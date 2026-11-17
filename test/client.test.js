@@ -108,6 +108,12 @@ test("redactValue keeps structure while replacing nested tokens", () => {
   assert.deepEqual(redactValue({ a: 1 }, null), { a: 1 });
 });
 
+test("redactValue redacts tokens used as object keys", () => {
+  assert.deepEqual(redactValue({ [TOKEN]: { value: TOKEN } }, TOKEN), {
+    "[REDACTED]": { value: "[REDACTED]" },
+  });
+});
+
 test("a missing base URL is a configuration error", async () => {
   await assert.rejects(
     () => request({ token: TOKEN, path: "/health" }),

@@ -22,7 +22,10 @@ export function redactValue(value, token) {
   if (Array.isArray(value)) return value.map((item) => redactValue(item, token));
   if (value !== null && typeof value === "object") {
     const redacted = {};
-    for (const [key, item] of Object.entries(value)) redacted[key] = redactValue(item, token);
+    for (const [key, item] of Object.entries(value)) {
+      // Keys can carry a token too, so redact both sides of the entry.
+      redacted[key.split(token).join("[REDACTED]")] = redactValue(item, token);
+    }
     return redacted;
   }
   return value;
