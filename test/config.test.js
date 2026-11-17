@@ -73,6 +73,19 @@ test("environment overrides the stored file", async () => {
   assert.equal(loaded.token, "env-token");
 });
 
+test("empty environment values do not mask stored settings", async () => {
+  const path = await tempConfigPath();
+  await saveConfig({ baseUrl: "https://stored.example.com", timeoutMs: 2500 }, { filePath: path });
+
+  const loaded = await loadConfig({
+    env: { CODERAX_BASE_URL: "", CODERAX_TIMEOUT_MS: "" },
+    filePath: path,
+  });
+
+  assert.equal(loaded.baseUrl, "https://stored.example.com");
+  assert.equal(loaded.timeoutMs, 2500);
+});
+
 test("a missing config file is not an error", async () => {
   const loaded = await loadConfig({ env: {}, filePath: await tempConfigPath() });
   assert.equal(loaded.baseUrl, null);

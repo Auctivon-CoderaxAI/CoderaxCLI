@@ -97,6 +97,41 @@ test("times out instead of hanging", async () => {
   );
 });
 
+test("maps a response body timeout to REQUEST_TIMEOUT", async () => {
+  await withStub(
+    (req, res) => {
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.write("partial");
+    },
+    async (baseUrl) => {
+      await assert.rejects(
+        () => request({ baseUrl, token: TOKEN, path: "/slow-body", timeoutMs: 60 }),
+        (error) => error instanceof CoderaxError && error.code === "REQUEST_TIMEOUT",
+      );
+    },
+  );
+});
+
+test("renders object-valued error details as text", async () => {
+  await withStub(
+    (req, res) => {
+      res.writeHead(401, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "Invalid API key", type: "auth" } }));
+    },
+    async (baseUrl) => {
+      await assert.rejects(
+        () => request({ baseUrl, token: TOKEN, path: "/api/ask" }),
+        (error) => {
+          assert.equal(error.code, "HTTP_401");
+          assert.match(error.message, /Invalid API key/);
+          assert.equal(error.message.includes("[object Object]"), false);
+          return true;
+        },
+      );
+    },
+  );
+});
+
 test("redact leaves non-matching text untouched", () => {
   assert.equal(redact("nothing to hide", TOKEN), "nothing to hide");
   assert.equal(redact("", TOKEN), "");
@@ -287,6 +322,33 @@ test("streamRequest uses an idle timeout, not a total deadline", async () => {
   });
 
   assert.equal(text, "one two three");
+});
+
+test("renders object-valued SSE errors as text", async () => {
+  const encoder = new TextEncoder();
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode('data: {"error":{"message":"bad stream","type":"auth"}}\n\n'));
+      controller.close();
+    },
+  });
+
+  await assert.rejects(
+    () =>
+      streamRequest({
+        baseUrl: "https://coderax.test",
+        token: TOKEN,
+        path: "/api/ask",
+        fetchImpl: async () =>
+          new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } }),
+      }),
+    (error) => {
+      assert.equal(error.code, "STREAM_ERROR");
+      assert.match(error.message, /bad stream/);
+      assert.equal(error.message.includes("[object Object]"), false);
+      return true;
+    },
+  );
 });
 
 test("streamRequest redacts overlapping token prefixes", async () => {

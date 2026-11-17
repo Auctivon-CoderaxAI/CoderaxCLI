@@ -90,6 +90,22 @@ function truncate(value, limit = 300) {
   return text.length > limit ? `${text.slice(0, limit)}...` : text;
 }
 
+function detailText(value) {
+  if (typeof value === "string") return value;
+  if (value === null || value === undefined) return "";
+  if (typeof value === "object") {
+    if (typeof value.message === "string") return value.message;
+    if (typeof value.error === "string") return value.error;
+    if (typeof value.detail === "string") return value.detail;
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return "";
+    }
+  }
+  return String(value);
+}
+
 /**
  * Single-request helper. No retries, no redirects, no cookie jar, and no token
  * in any error string.
@@ -102,6 +118,7 @@ export async function request({
   body,
   timeoutMs = 15000,
   accept = "application/json",
+  includeRaw = false,
   fetchImpl = fetch,
 } = {}) {
   if (!baseUrl) {
@@ -146,7 +163,14 @@ export async function request({
   let text = "";
   try {
     text = await response.text();
-  } catch {
+  } catch (error) {
+    const name = error?.name ?? "";
+    if (name === "TimeoutError" || name === "AbortError") {
+      throw new CoderaxError(
+        "REQUEST_TIMEOUT",
+        `request to ${target.pathname} timed out after ${timeoutMs}ms`,
+      );
+    }
     throw new CoderaxError("RESPONSE_UNREADABLE", `could not read the response from ${target.pathname}`);
   }
 
@@ -164,14 +188,18 @@ export async function request({
   const safeJson = redactValue(json, token);
 
   if (!response.ok) {
-    const detail = safeJson?.message ?? safeJson?.error ?? diagnosticText;
-    const message = `HTTP ${response.status} from ${target.pathname}${detail ? `: ${truncate(String(detail))}` : ""}`;
+    const detail = detailText(safeJson?.message ?? safeJson?.error ?? diagnosticText);
+    const message = `HTTP ${response.status} from ${target.pathname}${detail ? `: ${truncate(detail)}` : ""}`;
     const failure = new CoderaxError(`HTTP_${response.status}`, message, { status: response.status });
     failure.body = safeJson;
     throw failure;
   }
 
-  return { status: response.status, headers: response.headers, json: safeJson, text: fullText };
+  const result = { status: response.status, headers: response.headers, json: safeJson, text: fullText };
+  // Discovery needs the original route keys to issue requests. This field is
+  // opt-in so ordinary output never receives an unredacted document.
+  if (includeRaw) result.rawJson = json;
+  return result;
 }
 
 function parseSseEvent(rawEvent) {
@@ -266,10 +294,10 @@ function streamFailure(status, text, token, pathname) {
     parsed = null;
   }
   const safeJson = redactValue(parsed, token);
-  const detail = safeJson?.message ?? safeJson?.error ?? redact(text, token).slice(0, 200);
+  const detail = detailText(safeJson?.message ?? safeJson?.error ?? redact(text, token).slice(0, 200));
   const failure = new CoderaxError(
     `HTTP_${status}`,
-    `HTTP ${status} from ${pathname}${detail ? `: ${truncate(String(detail))}` : ""}`,
+    `HTTP ${status} from ${pathname}${detail ? `: ${truncate(detail)}` : ""}`,
     { status },
   );
   failure.body = safeJson;
@@ -377,7 +405,7 @@ export async function streamRequest({
           if (event?.final === true || event?.error) {
             onEvent?.({ type: "final", payload: redactValue(event, token) });
             if (event.error) {
-              throw new CoderaxError("STREAM_ERROR", redact(String(event.error), token));
+              throw new CoderaxError("STREAM_ERROR", redact(detailText(event.error) || "stream error", token));
             }
           }
         }

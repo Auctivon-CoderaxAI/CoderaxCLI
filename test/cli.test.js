@@ -207,6 +207,59 @@ test("call output redacts a token in the request path", async () => {
   });
 });
 
+test("discovery keeps route keys unredacted while output stays redacted", async () => {
+  const route = `/api/${TOKEN}/agents`;
+  const document = {
+    openapi: "3.1.0",
+    paths: { [route]: { get: { operationId: "listAgents" } } },
+  };
+
+  await withStub(
+    async (baseUrl) => {
+      const env = { ...(await tempEnv()), CODERAX_BASE_URL: baseUrl, CODERAX_TOKEN: TOKEN };
+      const openapiIo = capture();
+      assert.equal(
+        await runCli(["openapi", "--json"], { env, stdout: openapiIo.stdout, stderr: openapiIo.stderr }),
+        0,
+      );
+      assert.equal(openapiIo.out().includes(TOKEN), false);
+      assert.equal(JSON.parse(openapiIo.out()).operations[0].path, "/api/[REDACTED]/agents");
+
+      const agentsIo = capture();
+      assert.equal(
+        await runCli(["agents", "--json"], { env, stdout: agentsIo.stdout, stderr: agentsIo.stderr }),
+        0,
+      );
+      const agents = JSON.parse(agentsIo.out());
+      assert.equal(agents.path, "/api/[REDACTED]/agents");
+      assert.equal(agents.body.agents.length, 1);
+      assert.equal(agentsIo.out().includes(TOKEN), false);
+    },
+    (req, res) => {
+      const url = new URL(req.url, "http://localhost");
+      const json = (status, payload) => {
+        res.writeHead(status, { "content-type": "application/json" });
+        res.end(JSON.stringify(payload));
+      };
+      if (url.pathname === "/openapi.json") return json(200, document);
+      if (url.pathname === route) return json(200, { agents: [{ id: "agent-1" }] });
+      return json(404, { message: "not found" });
+    },
+  );
+});
+
+test("doctor probes the same health endpoints", async () => {
+  await withStub(async (baseUrl) => {
+    const io = capture();
+    const env = { ...(await tempEnv()), CODERAX_BASE_URL: baseUrl };
+    const code = await runCli(["doctor", "--json"], { env, stdout: io.stdout, stderr: io.stderr });
+    assert.equal(code, 1);
+    const reachability = JSON.parse(io.out()).checks.find((check) => check.name === "reachability");
+    assert.equal(reachability.ok, true);
+    assert.match(reachability.detail, /GET \/health/);
+  });
+});
+
 test("call rejects body on GET and invalid JSON", async () => {
   const io = capture();
   const env = await tempEnv();
@@ -260,7 +313,7 @@ test("missing operations are reported, not guessed", async () => {
 test("discovery applies relative server prefixes and skips templated paths", async () => {
   const document = {
     openapi: "3.1.0",
-    servers: [{ url: "/api/v1/" }],
+    servers: [{ url: "/api/{version}/", variables: { version: { default: "v1" } } }],
     paths: {
       "/agents": { get: { operationId: "listAgents" } },
       "/admin/{id}/agents": { get: { operationId: "adminAgents" } },
@@ -296,6 +349,34 @@ test("discovery applies relative server prefixes and skips templated paths", asy
       return json(404, { message: "not found" });
     },
   );
+});
+
+test("discovery stops when the document body times out", async () => {
+  let documentRequests = 0;
+  const server = createServer((req, res) => {
+    if (req.url === "/openapi.json") {
+      documentRequests += 1;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.write('{"openapi":"3.1.0"');
+      return;
+    }
+    res.writeHead(404, { "content-type": "application/json" });
+    res.end(JSON.stringify({ message: "not found" }));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const { port } = server.address();
+
+  try {
+    await assert.rejects(
+      () => discoverOpenApi({ baseUrl: `http://127.0.0.1:${port}`, token: TOKEN, timeoutMs: 80 }),
+      (error) => error.code === "REQUEST_TIMEOUT",
+    );
+    assert.equal(documentRequests, 1);
+  } finally {
+    server.closeAllConnections?.();
+    server.close();
+  }
 });
 
 test("discovery surfaces authentication failures", async () => {
