@@ -23,11 +23,18 @@ export function redactValue(value, token) {
   if (value !== null && typeof value === "object") {
     const redacted = {};
     const keys = new Set();
+    const nextSuffix = new Map();
     for (const [key, item] of Object.entries(value)) {
       const base = key.split(token).join("[REDACTED]");
       let safe = base;
       // Two keys can redact to the same name; suffix rather than drop a field.
-      for (let n = 2; keys.has(safe); n += 1) safe = `${base}#${n}`;
+      // Remember where this base's search stopped so many collisions stay linear.
+      if (keys.has(base)) {
+        let n = nextSuffix.get(base) ?? 2;
+        while (keys.has(`${base}#${n}`)) n += 1;
+        safe = `${base}#${n}`;
+        nextSuffix.set(base, n + 1);
+      }
       keys.add(safe);
       // defineProperty keeps a `__proto__` entry an own field instead of
       // assigning the result's prototype.

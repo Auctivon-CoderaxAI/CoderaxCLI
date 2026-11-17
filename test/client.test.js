@@ -130,6 +130,28 @@ test("redactValue keeps both fields when redacted keys collide", () => {
   });
 });
 
+test("redactValue skips suffixes already taken by another key", () => {
+  const unit = "[REDACTED]";
+  const base = `${unit}${unit}`;
+  const redacted = redactValue(
+    {
+      [`${base}#2`]: "occupied",
+      [`${TOKEN}${TOKEN}`]: 1,
+      [`${TOKEN}${unit}`]: 2,
+      [`${unit}${TOKEN}`]: 3,
+      [base]: 4,
+    },
+    TOKEN,
+  );
+  assert.deepEqual(redacted, {
+    [`${base}#2`]: "occupied",
+    [base]: 1,
+    [`${base}#3`]: 2,
+    [`${base}#4`]: 3,
+    [`${base}#5`]: 4,
+  });
+});
+
 test("a missing base URL is a configuration error", async () => {
   await assert.rejects(
     () => request({ token: TOKEN, path: "/health" }),
