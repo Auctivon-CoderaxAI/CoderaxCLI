@@ -132,6 +132,45 @@ test("renders object-valued error details as text", async () => {
   );
 });
 
+test("request errors redact a token in the route path", async () => {
+  await withStub(
+    (req, res) => {
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({ message: "boom" }));
+    },
+    async (baseUrl) => {
+      await assert.rejects(
+        () => request({ baseUrl, token: TOKEN, path: `/api/${TOKEN}/missing` }),
+        (error) => {
+          assert.equal(error.code, "HTTP_500");
+          assert.equal(error.message.includes(TOKEN), false);
+          assert.match(error.message, /REDACTED/);
+          return true;
+        },
+      );
+    },
+  );
+});
+
+test("streamRequest errors redact a token in the route path", async () => {
+  await assert.rejects(
+    () =>
+      streamRequest({
+        baseUrl: "https://coderax.test",
+        token: TOKEN,
+        path: `/api/${TOKEN}/ask`,
+        fetchImpl: async () =>
+          new Response("boom", { status: 500, headers: { "content-type": "text/plain" } }),
+      }),
+    (error) => {
+      assert.equal(error.code, "HTTP_500");
+      assert.equal(error.message.includes(TOKEN), false);
+      assert.match(error.message, /REDACTED/);
+      return true;
+    },
+  );
+});
+
 test("redact leaves non-matching text untouched", () => {
   assert.equal(redact("nothing to hide", TOKEN), "nothing to hide");
   assert.equal(redact("", TOKEN), "");

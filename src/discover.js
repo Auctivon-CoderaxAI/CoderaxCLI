@@ -13,7 +13,7 @@ const HTTP_METHODS = new Set(["get", "post", "put", "patch", "delete", "head", "
 function serverPathPrefix(document) {
   const server = document?.servers?.[0];
   const url = server?.url;
-  if (typeof url !== "string" || !url.startsWith("/") || url.startsWith("//")) return "";
+  if (typeof url !== "string") return "";
   const expanded = url.replace(/\{([^}]+)\}/g, (placeholder, name) => {
     const value = server?.variables?.[name]?.default;
     return typeof value === "string" ? value : placeholder;

@@ -128,6 +128,7 @@ export async function request({
     );
   }
   const target = joinRoute(baseUrl, path);
+  const displayPath = redact(target.pathname, token);
   const headers = { accept };
   if (token) headers.authorization = `Bearer ${token}`;
 
@@ -151,12 +152,12 @@ export async function request({
     if (name === "TimeoutError" || name === "AbortError") {
       throw new CoderaxError(
         "REQUEST_TIMEOUT",
-        `request to ${target.pathname} timed out after ${timeoutMs}ms`,
+        `request to ${displayPath} timed out after ${timeoutMs}ms`,
       );
     }
     throw new CoderaxError(
       "REQUEST_FAILED",
-      `request to ${target.pathname} failed: ${truncate(redact(String(error?.message ?? "network error"), token))}`,
+      `request to ${displayPath} failed: ${truncate(redact(String(error?.message ?? "network error"), token))}`,
     );
   }
 
@@ -168,10 +169,10 @@ export async function request({
     if (name === "TimeoutError" || name === "AbortError") {
       throw new CoderaxError(
         "REQUEST_TIMEOUT",
-        `request to ${target.pathname} timed out after ${timeoutMs}ms`,
+        `request to ${displayPath} timed out after ${timeoutMs}ms`,
       );
     }
-    throw new CoderaxError("RESPONSE_UNREADABLE", `could not read the response from ${target.pathname}`);
+    throw new CoderaxError("RESPONSE_UNREADABLE", `could not read the response from ${displayPath}`);
   }
 
   const fullText = redact(text, token);
@@ -189,7 +190,7 @@ export async function request({
 
   if (!response.ok) {
     const detail = detailText(safeJson?.message ?? safeJson?.error ?? diagnosticText);
-    const message = `HTTP ${response.status} from ${target.pathname}${detail ? `: ${truncate(detail)}` : ""}`;
+    const message = `HTTP ${response.status} from ${displayPath}${detail ? `: ${truncate(detail)}` : ""}`;
     const failure = new CoderaxError(`HTTP_${response.status}`, message, { status: response.status });
     failure.body = safeJson;
     throw failure;
@@ -326,6 +327,7 @@ export async function streamRequest({
     );
   }
   const target = joinRoute(baseUrl, path);
+  const displayPath = redact(target.pathname, token);
   const headers = { accept: "text/event-stream" };
   if (token) headers.authorization = `Bearer ${token}`;
 
@@ -361,10 +363,10 @@ export async function streamRequest({
     });
 
     if (!response.ok) {
-      throw streamFailure(response.status, await response.text(), token, target.pathname);
+      throw streamFailure(response.status, await response.text(), token, displayPath);
     }
     if (!response.body) {
-      throw new CoderaxError("RESPONSE_UNREADABLE", `the response from ${target.pathname} has no body`);
+      throw new CoderaxError("RESPONSE_UNREADABLE", `the response from ${displayPath} has no body`);
     }
 
     const reader = response.body.getReader();
@@ -427,12 +429,12 @@ export async function streamRequest({
     if (timedOut || name === "TimeoutError" || name === "AbortError") {
       throw new CoderaxError(
         "REQUEST_TIMEOUT",
-        `request to ${target.pathname} timed out after ${timeoutMs}ms`,
+        `request to ${displayPath} timed out after ${timeoutMs}ms`,
       );
     }
     throw new CoderaxError(
       "REQUEST_FAILED",
-      `request to ${target.pathname} failed: ${truncate(redact(String(error?.message ?? "network error"), token))}`,
+      `request to ${displayPath} failed: ${truncate(redact(String(error?.message ?? "network error"), token))}`,
     );
   } finally {
     clearTimeout(timer);

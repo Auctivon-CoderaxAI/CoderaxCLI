@@ -313,7 +313,7 @@ test("missing operations are reported, not guessed", async () => {
 test("discovery applies relative server prefixes and skips templated paths", async () => {
   const document = {
     openapi: "3.1.0",
-    servers: [{ url: "/api/{version}/", variables: { version: { default: "v1" } } }],
+    servers: [{ url: "{basePath}/{version}/", variables: { basePath: { default: "/api" }, version: { default: "v1" } } }],
     paths: {
       "/agents": { get: { operationId: "listAgents" } },
       "/admin/{id}/agents": { get: { operationId: "adminAgents" } },
