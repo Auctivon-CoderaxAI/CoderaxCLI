@@ -4,6 +4,10 @@
 
 - The token is stored at `~/.coderax/config.json` with mode `0600` and only when
   the operator runs `config set --token`; it is never written to logs or stdout.
+- Writes go to a fresh `0600` temporary file and are atomically renamed over the
+  config, so an existing world-readable file never receives the token even
+  briefly. A failed rename or an unprotected temp file is an error, not a
+  silent success.
 - `config show` reports only `tokenConfigured: true|false`.
 - `describeConfig` deliberately omits the token, and tests assert the string never
   appears in its output.

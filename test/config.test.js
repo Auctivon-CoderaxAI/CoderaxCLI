@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -100,5 +100,37 @@ test("a non-object config file is rejected", async () => {
   await assert.rejects(
     () => loadConfig({ env: {}, filePath: path }),
     (error) => error instanceof ConfigError && error.code === "CONFIG_INVALID",
+  );
+});
+
+test("rewriting an existing config replaces it atomically and leaves no temp files", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "coderax-config-"));
+  const path = join(directory, "config.json");
+
+  await saveConfig({ baseUrl: "https://one.example.com", token: "first-token" }, { filePath: path });
+  await saveConfig({ token: "second-token" }, { filePath: path });
+
+  const parsed = JSON.parse(await readFile(path, "utf8"));
+  assert.equal(parsed.token, "second-token");
+  assert.equal(parsed.baseUrl, "https://one.example.com");
+  assert.deepEqual(await readdir(directory), ["config.json"]);
+});
+
+test("a failed atomic replace does not report success", async () => {
+  const path = await tempConfigPath();
+  await assert.rejects(
+    () =>
+      saveConfig(
+        { token: "x" },
+        {
+          filePath: path,
+          renameImpl: async () => {
+            const error = new Error("rename denied");
+            error.code = "EPERM";
+            throw error;
+          },
+        },
+      ),
+    (error) => error instanceof ConfigError && error.code === "CONFIG_WRITE_FAILED",
   );
 });

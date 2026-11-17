@@ -42,6 +42,9 @@ No path is hardcoded. When the match is absent the CLI exits `1` with
 
 ## Requests
 
+- Route paths are appended beneath the configured deployment prefix, so
+  `--base-url https://example.com/coderax` requests
+  `https://example.com/coderax/health`, not `https://example.com/health`.
 - `call <METHOD> <PATH> [--data <json>]` — `--data` is rejected on `GET`/`HEAD`.
 - Bodies are serialized as JSON; responses are parsed as JSON when possible and
   shown verbatim otherwise.

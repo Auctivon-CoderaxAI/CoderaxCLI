@@ -2,9 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { mkdtemp, readFile, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { runCli } from "../src/cli.js";
 import { discoverOpenApi, summarizeOperations } from "../src/discover.js";
 
@@ -233,4 +235,49 @@ test("summarizeOperations ignores non-method keys", () => {
     operations.map((entry) => `${entry.method} ${entry.path}`),
     ["GET /api/x", "POST /api/x"],
   );
+});
+
+test("unknown options are rejected before any request", async () => {
+  const io = capture();
+  const env = await tempEnv();
+  const code = await runCli(["health", "--timeout-ms", "100"], {
+    env,
+    stdout: io.stdout,
+    stderr: io.stderr,
+  });
+  assert.equal(code, 2);
+  assert.match(io.err(), /unknown option: --timeout-ms/);
+});
+
+test("config commands work before any deployment is configured", async () => {
+  const io = capture();
+  const env = await tempEnv();
+  const code = await runCli(["config", "show", "--json"], {
+    env,
+    stdout: io.stdout,
+    stderr: io.stderr,
+  });
+  assert.equal(code, 0);
+  assert.equal(JSON.parse(io.out()).baseUrl, null);
+});
+
+const CLI_PATH = fileURLToPath(new URL("../src/cli.js", import.meta.url));
+
+test("the packaged executable reaches runCli", () => {
+  const result = spawnSync(process.execPath, [CLI_PATH, "--version"], { encoding: "utf8" });
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /coderax-cli 0\.1\.0/);
+});
+
+test("a symlinked executable is still detected as the entrypoint", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("symlink creation requires elevated privileges on Windows");
+    return;
+  }
+  const directory = await mkdtemp(join(tmpdir(), "coderax-link-"));
+  const link = join(directory, "coderax");
+  await symlink(CLI_PATH, link);
+  const result = spawnSync(process.execPath, [link, "--version"], { encoding: "utf8" });
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /coderax-cli/);
 });

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
-import { CoderaxError, redact, request } from "../src/client.js";
+import { CoderaxError, redact, redactValue, request } from "../src/client.js";
 
 const TOKEN = "token-that-must-never-leak";
 
@@ -103,9 +103,63 @@ test("redact leaves non-matching text untouched", () => {
   assert.equal(redact("abc", null), "abc");
 });
 
+test("redactValue keeps structure while replacing nested tokens", () => {
+  assert.deepEqual(redactValue({ a: [TOKEN, 1, null] }, TOKEN), { a: ["[REDACTED]", 1, null] });
+  assert.deepEqual(redactValue({ a: 1 }, null), { a: 1 });
+});
+
 test("a missing base URL is a configuration error", async () => {
   await assert.rejects(
     () => request({ token: TOKEN, path: "/health" }),
     (error) => error instanceof CoderaxError && error.code === "BASE_URL_REQUIRED",
+  );
+});
+
+test("preserves the deployment pathname prefix", async () => {
+  await withStub(
+    (req, res) => {
+      if (req.url === "/coderax/health") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ status: "ok" }));
+        return;
+      }
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ message: "not found" }));
+    },
+    async (baseUrl) => {
+      const response = await request({ baseUrl: `${baseUrl}/coderax`, token: TOKEN, path: "/health" });
+      assert.equal(response.status, 200);
+      assert.deepEqual(response.json, { status: "ok" });
+    },
+  );
+});
+
+test("does not truncate long successful text responses", async () => {
+  const long = "x".repeat(2500);
+  await withStub(
+    (req, res) => {
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.end(long);
+    },
+    async (baseUrl) => {
+      const response = await request({ baseUrl, token: TOKEN, path: "/log" });
+      assert.equal(response.text.length, 2500);
+    },
+  );
+});
+
+test("redacts the token inside successful JSON without breaking its shape", async () => {
+  await withStub(
+    (req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ token: TOKEN, nested: { echo: TOKEN, count: 3 } }));
+    },
+    async (baseUrl) => {
+      const response = await request({ baseUrl, token: TOKEN, path: "/whoami" });
+      assert.deepEqual(response.json, {
+        token: "[REDACTED]",
+        nested: { echo: "[REDACTED]", count: 3 },
+      });
+    },
   );
 });

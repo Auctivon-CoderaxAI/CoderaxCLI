@@ -1,4 +1,4 @@
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -92,7 +92,15 @@ export async function loadConfig({ env = process.env, filePath, readFileImpl = r
 
 export async function saveConfig(
   patch,
-  { filePath, readFileImpl = readFile, writeFileImpl = writeFile, mkdirImpl = mkdir, chmodImpl = chmod } = {},
+  {
+    filePath,
+    readFileImpl = readFile,
+    writeFileImpl = writeFile,
+    renameImpl = rename,
+    unlinkImpl = unlink,
+    mkdirImpl = mkdir,
+    chmodImpl = chmod,
+  } = {},
 ) {
   const path = filePath ?? configPath();
   const stored = await readStoredConfig(path, readFileImpl);
@@ -103,12 +111,30 @@ export async function saveConfig(
   if (patch.timeoutMs !== undefined) next.timeoutMs = Number(patch.timeoutMs);
 
   await mkdirImpl(dirname(path), { recursive: true });
-  await writeFileImpl(path, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+
+  // Write a fresh 0600 file and atomically replace the config, so an existing
+  // world-readable file never receives the token even for an instant.
+  const tempPath = `${path}.${process.pid}.${Date.now().toString(36)}.tmp`;
   try {
-    await chmodImpl(path, 0o600);
-  } catch {
-    // Windows has no POSIX mode bits; the file remains in the user profile.
+    await writeFileImpl(tempPath, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+    try {
+      await chmodImpl(tempPath, 0o600);
+    } catch (error) {
+      if (process.platform !== "win32") {
+        throw new ConfigError("CONFIG_PERMISSIONS", `could not restrict permissions on ${tempPath}`);
+      }
+    }
+    await renameImpl(tempPath, path);
+  } catch (error) {
+    try {
+      await unlinkImpl(tempPath);
+    } catch {
+      // Nothing to clean up.
+    }
+    if (error instanceof ConfigError) throw error;
+    throw new ConfigError("CONFIG_WRITE_FAILED", `could not write ${path} atomically`);
   }
+
   return { path, config: next };
 }
 

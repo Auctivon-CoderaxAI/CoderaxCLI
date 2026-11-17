@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { pathToFileURL } from "node:url";
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import {
   ConfigError,
   describeConfig,
@@ -41,6 +42,7 @@ not hardcode routes and fails with OPERATION_NOT_FOUND when a route is absent.
 const EXIT = Object.freeze({ ok: 0, failure: 1, usage: 2 });
 
 const KNOWN_COMMANDS = new Set(["config", "health", "openapi", "agents", "models", "call"]);
+const KNOWN_FLAGS = new Set(["help", "version", "json", "base-url", "token", "timeout", "data"]);
 const ALLOWED_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
 
 export class UsageError extends Error {
@@ -69,23 +71,22 @@ export function parseArgv(argv) {
       flags.set("json", true);
       continue;
     }
-    if (arg === "--refresh") {
-      flags.set("refresh", true);
-      continue;
-    }
-
     if (arg.startsWith("--")) {
       const body = arg.slice(2);
       const equals = body.indexOf("=");
+      const name = equals === -1 ? body : body.slice(0, equals);
+      if (!KNOWN_FLAGS.has(name)) {
+        throw new UsageError(`unknown option: --${name}`);
+      }
       if (equals !== -1) {
-        flags.set(body.slice(0, equals), body.slice(equals + 1));
+        flags.set(name, body.slice(equals + 1));
         continue;
       }
       const value = argv[index + 1];
       if (value === undefined || value.startsWith("--")) {
-        throw new UsageError(`--${body} requires a value`);
+        throw new UsageError(`--${name} requires a value`);
       }
-      flags.set(body, value);
+      flags.set(name, value);
       index += 1;
       continue;
     }
@@ -144,7 +145,7 @@ function preflight(positionals, flags) {
   }
 }
 
-async function resolveContext(flags, deps) {
+async function resolveSettings(flags, deps) {
   const config = await loadConfig({ env: deps.env, ...(deps.configDeps ?? {}) });
 
   let baseUrl = config.baseUrl;
@@ -160,14 +161,19 @@ async function resolveContext(flags, deps) {
     }
   }
 
-  if (!baseUrl) {
+  // `config` commands must work on a fresh install, so the base URL is only
+  // required by the commands that actually send requests.
+  return { config, baseUrl, token: token || null, timeoutMs };
+}
+
+function requireBaseUrl(context) {
+  if (!context.baseUrl) {
     throw new CoderaxError(
       "BASE_URL_REQUIRED",
       "no deployment configured; run `coderax config set --base-url <url>` or set CODERAX_BASE_URL",
     );
   }
-
-  return { config, baseUrl, token: token || null, timeoutMs };
+  return context;
 }
 
 async function commandHealth(context, deps, write, flags) {
@@ -336,7 +342,7 @@ export async function runCli(argv, options = {}) {
   try {
     const { flags, positionals } = parseArgv(argv);
 
-    if (flags.has("help") || positionals.length === 0) {
+    if (flags.has("help")) {
       deps.stdout(USAGE);
       return EXIT.ok;
     }
@@ -344,16 +350,24 @@ export async function runCli(argv, options = {}) {
       write(`coderax-cli ${VERSION}`);
       return EXIT.ok;
     }
+    if (positionals.length === 0) {
+      deps.stdout(USAGE);
+      return EXIT.ok;
+    }
 
     preflight(positionals, flags);
 
-    const context = await resolveContext(flags, deps);
+    const settings = await resolveSettings(flags, deps);
     const [command] = positionals;
 
+    if (command === "config") {
+      await commandConfig(positionals, settings, deps, write, flags);
+      return EXIT.ok;
+    }
+
+    const context = requireBaseUrl(settings);
+
     switch (command) {
-      case "config":
-        await commandConfig(positionals, context, deps, write, flags);
-        return EXIT.ok;
       case "health":
         await commandHealth(context, deps, write, flags);
         return EXIT.ok;
@@ -380,9 +394,17 @@ export async function runCli(argv, options = {}) {
   }
 }
 
-const isMain =
-  process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
+export function isEntrypoint(entry = process.argv[1]) {
+  if (entry === undefined) return false;
+  const modulePath = fileURLToPath(import.meta.url);
+  try {
+    // npm exposes package executables as symlinks on POSIX; compare real paths.
+    return realpathSync(entry) === realpathSync(modulePath);
+  } catch {
+    return entry === modulePath;
+  }
+}
 
-if (isMain) {
+if (isEntrypoint()) {
   process.exitCode = await runCli(process.argv.slice(2));
 }

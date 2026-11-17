@@ -12,6 +12,36 @@ export function redact(text, token) {
   return text.split(token).join("[REDACTED]");
 }
 
+/**
+ * Redact a token anywhere in a parsed JSON value, preserving the shape so
+ * machine-readable output stays valid JSON.
+ */
+export function redactValue(value, token) {
+  if (!token) return value;
+  if (typeof value === "string") return value.split(token).join("[REDACTED]");
+  if (Array.isArray(value)) return value.map((item) => redactValue(item, token));
+  if (value !== null && typeof value === "object") {
+    const redacted = {};
+    for (const [key, item] of Object.entries(value)) redacted[key] = redactValue(item, token);
+    return redacted;
+  }
+  return value;
+}
+
+/**
+ * Append a route beneath the configured deployment prefix. `new URL(path, base)`
+ * would discard a prefix such as `https://example.com/coderax`.
+ */
+function joinRoute(baseUrl, path) {
+  const base = baseUrl.replace(/\/+$/, "");
+  const suffix = path.startsWith("/") ? path : `/${path}`;
+  const target = new URL(`${base}${suffix}`);
+  if (target.origin !== new URL(base).origin) {
+    throw new CoderaxError("BASE_URL_INVALID", `route ${path} resolves outside the configured origin`);
+  }
+  return target;
+}
+
 function truncate(value, limit = 300) {
   const text = String(value ?? "").replace(/\s+/g, " ").trim();
   return text.length > limit ? `${text.slice(0, limit)}...` : text;
@@ -37,7 +67,7 @@ export async function request({
       "no base URL configured; run `coderax config set --base-url <url>` or set CODERAX_BASE_URL",
     );
   }
-  const target = new URL(path.startsWith("/") ? path : `/${path}`, `${baseUrl}/`);
+  const target = joinRoute(baseUrl, path);
   const headers = { accept };
   if (token) headers.authorization = `Bearer ${token}`;
 
@@ -77,7 +107,9 @@ export async function request({
     throw new CoderaxError("RESPONSE_UNREADABLE", `could not read the response from ${target.pathname}`);
   }
 
-  const safeText = redact(text.slice(0, 2000), token);
+  const fullText = redact(text, token);
+  const diagnosticText = redact(text.slice(0, 2000), token);
+
   let json = null;
   if (text.trim() !== "") {
     try {
@@ -86,16 +118,17 @@ export async function request({
       json = null;
     }
   }
+  const safeJson = redactValue(json, token);
 
   if (!response.ok) {
-    const detail = json?.message ?? json?.error ?? safeText;
-    const message = `HTTP ${response.status} from ${target.pathname}${detail ? `: ${truncate(redact(String(detail), token))}` : ""}`;
+    const detail = safeJson?.message ?? safeJson?.error ?? diagnosticText;
+    const message = `HTTP ${response.status} from ${target.pathname}${detail ? `: ${truncate(String(detail))}` : ""}`;
     const failure = new CoderaxError(`HTTP_${response.status}`, message, { status: response.status });
-    failure.body = json;
+    failure.body = safeJson;
     throw failure;
   }
 
-  return { status: response.status, headers: response.headers, json, text: safeText };
+  return { status: response.status, headers: response.headers, json: safeJson, text: fullText };
 }
 
 export function formatJson(value) {
