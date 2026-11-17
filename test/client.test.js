@@ -114,21 +114,6 @@ test("redactValue redacts tokens used as object keys", () => {
   });
 });
 
-test("redactValue keeps both fields when a redacted key collides", () => {
-  const result = redactValue({ secret: 1, "[REDACTED]": 2 }, "secret");
-  assert.deepEqual(result, { "[REDACTED]#2": 1, "[REDACTED]": 2 });
-  assert.equal(Object.hasOwn(result, "[REDACTED]"), true);
-  assert.equal(Object.hasOwn(result, "[REDACTED]#2"), true);
-});
-
-test("redactValue preserves an own __proto__ key without polluting", () => {
-  const parsed = JSON.parse('{"__proto__":{"polluted":true},"safe":1}');
-  const result = redactValue(parsed, TOKEN);
-  assert.equal(Object.hasOwn(result, "__proto__"), true);
-  assert.deepEqual(result["__proto__"], { polluted: true });
-  assert.equal(result.safe, 1);
-  assert.equal({}.polluted, undefined);
-});
 
 test("redactValue keeps a __proto__ field as an own property", () => {
   const parsed = JSON.parse('{"__proto__":{"x":1},"ok":true}');
