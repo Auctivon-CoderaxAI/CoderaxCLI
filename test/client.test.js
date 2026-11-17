@@ -114,6 +114,37 @@ test("redactValue redacts tokens used as object keys", () => {
   });
 });
 
+test("redactValue keeps both fields when a redacted key collides", () => {
+  const result = redactValue({ secret: 1, "[REDACTED]": 2 }, "secret");
+  assert.deepEqual(result, { "[REDACTED]#2": 1, "[REDACTED]": 2 });
+  assert.equal(Object.hasOwn(result, "[REDACTED]"), true);
+  assert.equal(Object.hasOwn(result, "[REDACTED]#2"), true);
+});
+
+test("redactValue preserves an own __proto__ key without polluting", () => {
+  const parsed = JSON.parse('{"__proto__":{"polluted":true},"safe":1}');
+  const result = redactValue(parsed, TOKEN);
+  assert.equal(Object.hasOwn(result, "__proto__"), true);
+  assert.deepEqual(result["__proto__"], { polluted: true });
+  assert.equal(result.safe, 1);
+  assert.equal({}.polluted, undefined);
+});
+
+test("redactValue keeps a __proto__ field as an own property", () => {
+  const parsed = JSON.parse('{"__proto__":{"x":1},"ok":true}');
+  const redacted = redactValue(parsed, TOKEN);
+  assert.deepEqual(Object.keys(redacted), ["__proto__", "ok"]);
+  assert.deepEqual(Object.getOwnPropertyDescriptor(redacted, "__proto__").value, { x: 1 });
+  assert.equal(redacted.ok, true);
+});
+
+test("redactValue keeps both fields when redacted keys collide", () => {
+  assert.deepEqual(redactValue({ [TOKEN]: 1, "[REDACTED]": 2 }, TOKEN), {
+    "[REDACTED]": 1,
+    "[REDACTED]#2": 2,
+  });
+});
+
 test("a missing base URL is a configuration error", async () => {
   await assert.rejects(
     () => request({ token: TOKEN, path: "/health" }),

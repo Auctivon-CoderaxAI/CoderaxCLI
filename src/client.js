@@ -22,9 +22,21 @@ export function redactValue(value, token) {
   if (Array.isArray(value)) return value.map((item) => redactValue(item, token));
   if (value !== null && typeof value === "object") {
     const redacted = {};
+    const keys = new Set();
     for (const [key, item] of Object.entries(value)) {
-      // Keys can carry a token too, so redact both sides of the entry.
-      redacted[key.split(token).join("[REDACTED]")] = redactValue(item, token);
+      const base = key.split(token).join("[REDACTED]");
+      let safe = base;
+      // Two keys can redact to the same name; suffix rather than drop a field.
+      for (let n = 2; keys.has(safe); n += 1) safe = `${base}#${n}`;
+      keys.add(safe);
+      // defineProperty keeps a `__proto__` entry an own field instead of
+      // assigning the result's prototype.
+      Object.defineProperty(redacted, safe, {
+        value: redactValue(item, token),
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
     }
     return redacted;
   }
