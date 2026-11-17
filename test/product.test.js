@@ -74,6 +74,7 @@ test("login verifies and stores a token, then status masks it and logout removes
 
   const stored = JSON.parse(await readFile(file, "utf8"));
   assert.equal(stored.token, TOKEN);
+  assert.equal(stored.baseUrl, "https://coderax.test");
 
   const statusIo = capture();
   assert.equal(
@@ -160,6 +161,22 @@ test("an empty stream is an error in JSON mode", async () => {
   assert.equal(code, 1);
   assert.equal(JSON.parse(io.out()).text, "");
   assert.match(io.err(), /streamed no text/i);
+});
+
+test("doctor checks the active config file's directory", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "coderax-doctor-"));
+  const file = join(directory, "config.json");
+  const io = capture();
+
+  await runCli(["doctor", "--json"], {
+    env: { CODERAX_CONFIG: file },
+    stdout: io.stdout,
+    stderr: io.stderr,
+  });
+
+  const result = JSON.parse(io.out());
+  const check = result.checks.find((entry) => entry.name === "config-dir");
+  assert.ok(check.detail.includes(directory), check.detail);
 });
 
 test("cloud is unavailable without executing anything", async () => {

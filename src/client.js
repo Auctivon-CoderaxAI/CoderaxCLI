@@ -186,12 +186,14 @@ function parseSseEvent(rawEvent) {
   try {
     return JSON.parse(data);
   } catch {
-    return { text: data };
+    return { text: data, raw: true };
   }
 }
 
 function extractDelta(payload) {
+  if (typeof payload === "string") return payload;
   if (!payload || typeof payload !== "object") return "";
+  if (payload.raw === true && typeof payload.text === "string") return payload.text;
   if (typeof payload.text === "string" && payload.message === true) {
     // Legacy ask endpoints resend the whole message; emit the tail only.
     return payload.delta ? String(payload.delta) : "";
@@ -217,16 +219,21 @@ class StreamTextRedactor {
   push(text) {
     if (!this.token) return text;
     this.pending += text;
+    // A complete token takes precedence over a suffix that also looks like a
+    // prefix, so overlapping tokens such as "aba" in "ab" + "a" are caught.
+    const complete = this.pending.lastIndexOf(this.token);
+    const emit = complete === -1 ? "" : this.pending.slice(0, complete + this.token.length);
+    const remainder = complete === -1 ? this.pending : this.pending.slice(complete + this.token.length);
     let hold = 0;
-    const max = Math.min(this.token.length - 1, this.pending.length);
+    const max = Math.min(this.token.length - 1, remainder.length);
     for (let length = max; length > 0; length -= 1) {
-      if (this.token.startsWith(this.pending.slice(-length))) {
+      if (this.token.startsWith(remainder.slice(-length))) {
         hold = length;
         break;
       }
     }
-    const safe = this.pending.slice(0, this.pending.length - hold);
-    this.pending = this.pending.slice(this.pending.length - hold);
+    const safe = emit + remainder.slice(0, remainder.length - hold);
+    this.pending = remainder.slice(remainder.length - hold);
     return redact(safe, this.token);
   }
 
@@ -236,6 +243,19 @@ class StreamTextRedactor {
     this.pending = "";
     return tail;
   }
+}
+
+function applySafeDelta(payload, delta, safeDelta) {
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return payload;
+  for (const field of ["delta", "token", "content"]) {
+    if (typeof payload[field] === "string" && payload[field] === delta) payload[field] = safeDelta;
+  }
+  if (typeof payload.text === "string" && payload.text === delta) payload.text = safeDelta;
+  const choice = payload.choices?.[0]?.delta;
+  if (choice !== null && typeof choice === "object" && typeof choice.content === "string" && choice.content === delta) {
+    choice.content = safeDelta;
+  }
+  return payload;
 }
 
 function streamFailure(status, text, token, pathname) {
@@ -346,11 +366,9 @@ export async function streamRequest({
             const safeDelta = deltaRedactor.push(delta);
             if (safeDelta) {
               assembled += safeDelta;
-              const payload = redactValue(event, token);
-              if (payload !== null && typeof payload === "object" && !Array.isArray(payload)) {
-                if (typeof payload.delta === "string") payload.delta = safeDelta;
-                if (typeof payload.text === "string" && payload.text === delta) payload.text = safeDelta;
-              }
+              const payload = typeof event === "string"
+                ? safeDelta
+                : applySafeDelta(redactValue(event, token), delta, safeDelta);
               onEvent?.({ type: "delta", text: safeDelta, payload });
             }
           } else {
@@ -390,6 +408,7 @@ export async function streamRequest({
     );
   } finally {
     clearTimeout(timer);
+    controller.abort();
     signal?.removeEventListener("abort", onAbort);
   }
 }

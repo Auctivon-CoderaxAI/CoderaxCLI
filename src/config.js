@@ -76,13 +76,13 @@ async function readStoredConfig(path, readFileImpl) {
  * Precedence: environment over stored file. A token is never required at load
  * time so that `coderax config show` works before the first login.
  */
-export async function loadConfig({ env = process.env, filePath, readFileImpl = readFile } = {}) {
+export async function loadConfig({ env = process.env, filePath, readFileImpl = readFile, overrides = {} } = {}) {
   const path = filePath ?? configPath(env);
   const stored = await readStoredConfig(path, readFileImpl);
 
-  const baseUrlRaw = env.CODERAX_BASE_URL?.trim() || stored.baseUrl;
+  const baseUrlRaw = overrides.baseUrl ?? env.CODERAX_BASE_URL?.trim() ?? stored.baseUrl;
   const token = env.CODERAX_TOKEN?.trim() || stored.token || null;
-  const timeoutRaw = env.CODERAX_TIMEOUT_MS ?? stored.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timeoutRaw = overrides.timeoutMs ?? env.CODERAX_TIMEOUT_MS ?? stored.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const timeoutMs = Number(timeoutRaw);
 
   if (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 120000) {

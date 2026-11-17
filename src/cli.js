@@ -5,10 +5,9 @@ import {
   ConfigError,
   describeConfig,
   loadConfig,
-  normalizeBaseUrl,
   saveConfig,
 } from "./config.js";
-import { CoderaxError, formatJson, request } from "./client.js";
+import { CoderaxError, formatJson, redact, request } from "./client.js";
 import { discoverOpenApi, findOperation } from "./discover.js";
 import * as product from "./product-commands.js";
 import { VERSION } from "./version.js";
@@ -176,6 +175,10 @@ function emit(write, flags, human, machine) {
   write(flags.has("json") ? formatJson(machine) : human);
 }
 
+function responseBody(response) {
+  return response.text.trim() === "null" ? null : response.json ?? response.text;
+}
+
 /**
  * Validate everything that does not need configuration before touching the
  * config file, so a typo reports a usage error instead of a missing base URL.
@@ -202,7 +205,10 @@ function preflight(positionals, flags) {
       if (!hasFlags && !key) {
         throw new UsageError("config set requires a key and value, or --base-url/--token/--timeout");
       }
-      if (key && !(key in CONFIG_KEYS) && !hasFlags) {
+      if (key && hasFlags) {
+        throw new UsageError("config set accepts either a key and value or flags, not both");
+      }
+      if (key && !(key in CONFIG_KEYS)) {
         throw new UsageError(`unknown config key: ${key}`);
       }
       if (key && key in CONFIG_KEYS && !hasFlags && !positionals[3]) {
@@ -239,20 +245,20 @@ function preflight(positionals, flags) {
 }
 
 async function resolveSettings(flags, deps) {
-  const config = await loadConfig({ env: deps.env, ...(deps.configDeps ?? {}) });
+  const overrides = {};
+  if (flags.has("base-url")) overrides.baseUrl = flags.get("base-url");
+  if (flags.has("timeout")) overrides.timeoutMs = flags.get("timeout");
+  // Apply overrides before validation so an invalid lower-priority environment
+  // value cannot block a valid flag.
+  const config = await loadConfig({
+    env: deps.env,
+    ...(deps.configDeps ?? {}),
+    overrides,
+  });
 
-  let baseUrl = config.baseUrl;
-  if (flags.has("base-url")) baseUrl = normalizeBaseUrl(flags.get("base-url")).baseUrl;
-
+  const baseUrl = config.baseUrl;
   const token = flags.has("token") ? flags.get("token") : config.token;
-
-  let timeoutMs = config.timeoutMs;
-  if (flags.has("timeout")) {
-    timeoutMs = Number(flags.get("timeout"));
-    if (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 120000) {
-      throw new UsageError("--timeout must be an integer between 100 and 120000");
-    }
-  }
+  const timeoutMs = config.timeoutMs;
 
   // `config` commands must work on a fresh install, so the base URL is only
   // required by the commands that actually send requests.
@@ -284,7 +290,7 @@ async function commandHealth(context, deps, write, flags) {
   for (const path of candidates) {
     try {
       const response = await request({ ...context, path, fetchImpl: deps.fetchImpl });
-      const body = response.json ?? response.text;
+      const body = responseBody(response);
       emit(
         write,
         flags,
@@ -339,7 +345,7 @@ async function commandResource(kind, context, deps, write, flags) {
     path: operation.path,
     fetchImpl: deps.fetchImpl,
   });
-  const payload = response.json ?? response.text;
+  const payload = responseBody(response);
 
   emit(
     write,
@@ -352,13 +358,14 @@ async function commandResource(kind, context, deps, write, flags) {
 async function commandCall(call, context, deps, write, flags) {
   const { method, path, body } = call;
   const response = await request({ ...context, path, method, body, fetchImpl: deps.fetchImpl });
-  const payload = response.json ?? response.text;
+  const payload = responseBody(response);
+  const displayPath = redact(path, context.token);
 
   emit(
     write,
     flags,
-    `${method} ${path} -> ${response.status}\n${response.json ? formatJson(response.json) : response.text}\n`,
-    { method, path, status: response.status, body: payload },
+    `${method} ${displayPath} -> ${response.status}\n${response.json !== null ? formatJson(response.json) : response.text}\n`,
+    { method, path: displayPath, status: response.status, body: payload },
   );
 }
 

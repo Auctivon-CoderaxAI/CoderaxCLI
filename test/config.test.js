@@ -45,6 +45,18 @@ test("embedded credentials and fragments are rejected", () => {
   );
 });
 
+test("explicit overrides bypass invalid lower-priority settings", async () => {
+  const path = await tempConfigPath();
+  const loaded = await loadConfig({
+    env: { CODERAX_BASE_URL: "http://remote.example.com", CODERAX_TIMEOUT_MS: "bad" },
+    filePath: path,
+    overrides: { baseUrl: "https://coderax.test", timeoutMs: "1000" },
+  });
+
+  assert.equal(loaded.baseUrl, "https://coderax.test");
+  assert.equal(loaded.timeoutMs, 1000);
+});
+
 test("environment overrides the stored file", async () => {
   const path = await tempConfigPath();
   await saveConfig(

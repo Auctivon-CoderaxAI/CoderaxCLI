@@ -1,5 +1,6 @@
 import { PRODUCTS, STATUS_LABELS, getOrderedProducts } from "./product-registry.js";
 import { CoderaxError, request, streamRequest } from "./client.js";
+import { dirname } from "node:path";
 import { configDir, loadConfig, maskToken, saveConfig } from "./config.js";
 import { VERSION } from "./version.js";
 
@@ -153,7 +154,7 @@ export async function login(ctx) {
     if (error?.status !== 404) throw error;
   }
 
-  await saveConfig({ token, account }, { filePath: ctx.settings.configPath });
+  await saveConfig({ token, account, baseUrl: ctx.settings.baseUrl }, { filePath: ctx.settings.configPath });
   ctx.out(
     ctx.json
       ? JSON.stringify({ authenticated: true, token: maskToken(token), account }, null, 2)
@@ -250,7 +251,7 @@ export async function doctor(ctx) {
     hint: major >= 24 ? "" : "Node 24 or newer is required.",
   });
 
-  const directory = configDir(ctx.env);
+  const directory = dirname(ctx.settings.configPath);
   let dirMode = null;
   try {
     dirMode = (await import("node:fs")).statSync(directory).mode & 0o777;

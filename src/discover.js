@@ -9,6 +9,13 @@ export const OPENAPI_CANDIDATES = ["/openapi.json", "/api/openapi.json", "/.well
 
 const HTTP_METHODS = new Set(["get", "post", "put", "patch", "delete", "head", "options"]);
 
+/** Only a relative server URL is safe to prepend to discovered operation paths. */
+function serverPathPrefix(document) {
+  const url = document?.servers?.[0]?.url;
+  if (typeof url !== "string" || !url.startsWith("/") || url.startsWith("//")) return "";
+  return url.replace(/\/+$/, "");
+}
+
 export function summarizeOperations(document) {
   const operations = [];
   for (const [path, methods] of Object.entries(document?.paths ?? {})) {
@@ -44,7 +51,13 @@ export async function discoverOpenApi({ baseUrl, token, timeoutMs, fetchImpl } =
         attempts.push(`${path}: document has no paths`);
         continue;
       }
-      const operations = summarizeOperations(json);
+      const prefix = serverPathPrefix(json);
+      const operations = summarizeOperations(json).map((operation) => ({
+        ...operation,
+        path: prefix
+          ? `${prefix}${operation.path.startsWith("/") ? "" : "/"}${operation.path}`
+          : operation.path,
+      }));
       if (operations.length === 0) {
         attempts.push(`${path}: document lists no operations`);
         continue;
@@ -64,5 +77,9 @@ export async function discoverOpenApi({ baseUrl, token, timeoutMs, fetchImpl } =
 }
 
 export function findOperation(operations, matcher) {
-  return operations.find((operation) => operation.method === "GET" && matcher.test(operation.path)) ?? null;
+  const matches = operations.filter(
+    (operation) => operation.method === "GET" && !operation.path.includes("{") && matcher.test(operation.path),
+  );
+  matches.sort((a, b) => a.path.length - b.path.length);
+  return matches[0] ?? null;
 }

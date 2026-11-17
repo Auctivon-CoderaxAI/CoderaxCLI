@@ -289,6 +289,87 @@ test("streamRequest uses an idle timeout, not a total deadline", async () => {
   assert.equal(text, "one two three");
 });
 
+test("streamRequest redacts overlapping token prefixes", async () => {
+  const token = "aba";
+  const encoder = new TextEncoder();
+  const chunks = [
+    'data: {"delta":"ab"}\n\n',
+    'data: {"delta":"a"}\n\n',
+    "data: [DONE]\n\n",
+  ];
+  const body = new ReadableStream({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+      controller.close();
+    },
+  });
+
+  const text = await streamRequest({
+    baseUrl: "https://coderax.test",
+    token,
+    path: "/api/ask",
+    fetchImpl: async () =>
+      new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } }),
+  });
+
+  assert.equal(text, "[REDACTED]");
+});
+
+test("streamRequest emits raw and top-level string SSE data", async () => {
+  const encoder = new TextEncoder();
+  const chunks = [
+    "data: hello\n\n",
+    'data: " world"\n\n',
+    "data: [DONE]\n\n",
+  ];
+  const body = new ReadableStream({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+      controller.close();
+    },
+  });
+
+  const text = await streamRequest({
+    baseUrl: "https://coderax.test",
+    token: TOKEN,
+    path: "/api/ask",
+    fetchImpl: async () =>
+      new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } }),
+  });
+
+  assert.equal(text, "hello world");
+});
+
+test("streamRequest redacts a token split across content fields", async () => {
+  const token = "secret";
+  const events = [];
+  const encoder = new TextEncoder();
+  const chunks = [
+    'data: {"content":"hello sec"}\n\n',
+    'data: {"content":"ret world"}\n\n',
+    "data: [DONE]\n\n",
+  ];
+  const body = new ReadableStream({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+      controller.close();
+    },
+  });
+
+  const text = await streamRequest({
+    baseUrl: "https://coderax.test",
+    token,
+    path: "/api/ask",
+    fetchImpl: async () =>
+      new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } }),
+    onEvent: (event) => events.push(event),
+  });
+
+  assert.equal(text.includes(token), false);
+  assert.match(text, /hello \[REDACTED\] world/);
+  assert.equal(JSON.stringify(events).includes(token), false);
+});
+
 test("streamRequest redacts a token split across SSE events", async () => {
   const token = "split-token";
   const events = [];

@@ -39,14 +39,15 @@ function stubHandler(req, res) {
     return json(200, { agents: [{ id: "agent-1", name: "Reviewer" }] });
   }
   if (url.pathname === "/api/models") return json(200, { models: ["gpt-4.1"] });
+  if (url.pathname === "/api/null") return json(200, null);
   if (url.pathname === "/api/whoami") {
     return json(200, { ok: true, token: (req.headers.authorization ?? "").replace("Bearer ", "") });
   }
   return json(404, { message: "not found" });
 }
 
-async function withStub(run) {
-  const server = createServer(stubHandler);
+async function withStub(run, handler = stubHandler) {
+  const server = createServer(handler);
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
   const { port } = server.address();
@@ -191,6 +192,21 @@ test("never prints the token even when the deployment echoes it back", async () 
   });
 });
 
+test("call output redacts a token in the request path", async () => {
+  await withStub(async (baseUrl) => {
+    const io = capture();
+    const env = { ...(await tempEnv()), CODERAX_BASE_URL: baseUrl, CODERAX_TOKEN: TOKEN };
+    const path = `/api/whoami?token=${TOKEN}`;
+
+    assert.equal(
+      await runCli(["call", "GET", path, "--json"], { env, stdout: io.stdout, stderr: io.stderr }),
+      0,
+    );
+    assert.equal(io.out().includes(TOKEN), false);
+    assert.match(JSON.parse(io.out()).path, /REDACTED/);
+  });
+});
+
 test("call rejects body on GET and invalid JSON", async () => {
   const io = capture();
   const env = await tempEnv();
@@ -239,6 +255,47 @@ test("missing operations are reported, not guessed", async () => {
     server.closeAllConnections?.();
     server.close();
   }
+});
+
+test("discovery applies relative server prefixes and skips templated paths", async () => {
+  const document = {
+    openapi: "3.1.0",
+    servers: [{ url: "/api/v1/" }],
+    paths: {
+      "/agents": { get: { operationId: "listAgents" } },
+      "/admin/{id}/agents": { get: { operationId: "adminAgents" } },
+      "/models": { get: { operationId: "listModels" } },
+    },
+  };
+  await withStub(
+    async (baseUrl) => {
+      const env = { ...(await tempEnv()), CODERAX_BASE_URL: baseUrl, CODERAX_TOKEN: TOKEN };
+      const openapiIo = capture();
+      assert.equal(
+        await runCli(["openapi", "--json"], { env, stdout: openapiIo.stdout, stderr: openapiIo.stderr }),
+        0,
+      );
+      const operations = JSON.parse(openapiIo.out()).operations;
+      assert.equal(operations.find((operation) => operation.operationId === "listAgents").path, "/api/v1/agents");
+
+      const agentsIo = capture();
+      assert.equal(
+        await runCli(["agents", "--json"], { env, stdout: agentsIo.stdout, stderr: agentsIo.stderr }),
+        0,
+      );
+      assert.equal(JSON.parse(agentsIo.out()).path, "/api/v1/agents");
+    },
+    (req, res) => {
+      const url = new URL(req.url, "http://localhost");
+      const json = (status, payload) => {
+        res.writeHead(status, { "content-type": "application/json" });
+        res.end(JSON.stringify(payload));
+      };
+      if (url.pathname === "/openapi.json") return json(200, document);
+      if (url.pathname === "/api/v1/agents") return json(200, { agents: [] });
+      return json(404, { message: "not found" });
+    },
+  );
 });
 
 test("discovery surfaces authentication failures", async () => {
@@ -321,6 +378,44 @@ test("config rejects inherited object keys", async () => {
     });
     assert.equal(code, 2, `${argv.join(" ")} should be a usage error`);
   }
+});
+
+test("config set rejects mixing positional and flag forms", async () => {
+  const io = capture();
+  const code = await runCli(["config", "set", "model", "gpt-6", "--timeout", "1000"], {
+    env: await tempEnv(),
+    stdout: io.stdout,
+    stderr: io.stderr,
+  });
+  assert.equal(code, 2);
+  assert.match(io.err(), /not both/);
+});
+
+test("valid CLI overrides supersede invalid lower-priority settings", async () => {
+  const io = capture();
+  const env = await tempEnv();
+  env.CODERAX_BASE_URL = "http://remote.example.com";
+  env.CODERAX_TIMEOUT_MS = "not-a-number";
+  const code = await runCli(
+    ["config", "show", "--json", "--base-url", "https://coderax.test", "--timeout", "1000"],
+    { env, stdout: io.stdout, stderr: io.stderr },
+  );
+  assert.equal(code, 0);
+  const shown = JSON.parse(io.out());
+  assert.equal(shown.baseUrl, "https://coderax.test");
+  assert.equal(shown.timeoutMs, 1000);
+});
+
+test("call preserves a JSON null body", async () => {
+  await withStub(async (baseUrl) => {
+    const io = capture();
+    const env = { ...(await tempEnv()), CODERAX_BASE_URL: baseUrl, CODERAX_TOKEN: TOKEN };
+    assert.equal(
+      await runCli(["call", "GET", "/api/null", "--json"], { env, stdout: io.stdout, stderr: io.stderr }),
+      0,
+    );
+    assert.equal(JSON.parse(io.out()).body, null);
+  });
 });
 
 const CLI_PATH = fileURLToPath(new URL("../src/cli.js", import.meta.url));
