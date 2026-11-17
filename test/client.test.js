@@ -103,6 +103,18 @@ test("redact leaves non-matching text untouched", () => {
   assert.equal(redact("abc", null), "abc");
 });
 
+test("redact never reintroduces a token contained in the marker", () => {
+  const token = "E";
+  const redacted = redact(`before${token}after`, token);
+  assert.equal(redacted.includes(token), false);
+});
+
+test("redact does not create the token across a replacement boundary", () => {
+  const token = "]A";
+  const redacted = redact(`${token}A`, token);
+  assert.equal(redacted.includes(token), false);
+});
+
 test("redactValue keeps structure while replacing nested tokens", () => {
   assert.deepEqual(redactValue({ a: [TOKEN, 1, null] }, TOKEN), { a: ["[REDACTED]", 1, null] });
   assert.deepEqual(redactValue({ a: 1 }, null), { a: 1 });
@@ -112,6 +124,12 @@ test("redactValue redacts tokens used as object keys", () => {
   assert.deepEqual(redactValue({ [TOKEN]: { value: TOKEN } }, TOKEN), {
     "[REDACTED]": { value: "[REDACTED]" },
   });
+});
+
+test("redactValue keeps keys and values free of a token contained in the marker", () => {
+  const redacted = redactValue({ xE: "E" }, "E");
+  assert.equal(Object.keys(redacted).length, 1);
+  assert.equal(JSON.stringify(redacted).includes("E"), false);
 });
 
 

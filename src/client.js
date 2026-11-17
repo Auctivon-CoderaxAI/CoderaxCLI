@@ -7,9 +7,25 @@ export class CoderaxError extends Error {
   }
 }
 
+function redactionMarker(token) {
+  const preferred = "[REDACTED]";
+  // A marker that shares any character with the token can form the token
+  // across a replacement boundary, so require a disjoint alphabet. Short
+  // tokens such as "E" are the common case where `[REDACTED]` is unsafe.
+  if (![...preferred].some((char) => token.includes(char))) return preferred;
+  for (const char of "*#~^|+=%0123456789") {
+    if (!token.includes(char)) return char.repeat(3);
+  }
+  for (let code = 0x2588; code <= 0x10ffff; code += 1) {
+    const char = String.fromCodePoint(code);
+    if (!token.includes(char)) return char.repeat(3);
+  }
+  throw new Error("could not build a token-safe redaction marker");
+}
+
 export function redact(text, token) {
   if (typeof text !== "string" || !token) return text;
-  return text.split(token).join("[REDACTED]");
+  return text.split(token).join(redactionMarker(token));
 }
 
 /**
@@ -18,14 +34,14 @@ export function redact(text, token) {
  */
 export function redactValue(value, token) {
   if (!token) return value;
-  if (typeof value === "string") return value.split(token).join("[REDACTED]");
+  if (typeof value === "string") return redact(value, token);
   if (Array.isArray(value)) return value.map((item) => redactValue(item, token));
   if (value !== null && typeof value === "object") {
     const redacted = {};
     const keys = new Set();
     const nextSuffix = new Map();
     for (const [key, item] of Object.entries(value)) {
-      const base = key.split(token).join("[REDACTED]");
+      const base = redact(key, token);
       let safe = base;
       // Two keys can redact to the same name; suffix rather than drop a field.
       // Remember where this base's search stopped so many collisions stay linear.
