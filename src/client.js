@@ -174,6 +174,169 @@ export async function request({
   return { status: response.status, headers: response.headers, json: safeJson, text: fullText };
 }
 
+function parseSseEvent(rawEvent) {
+  const dataLines = rawEvent
+    .split("\n")
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice(5).trimStart());
+
+  if (dataLines.length === 0) return undefined;
+  const data = dataLines.join("\n");
+  if (data === "[DONE]" || data === "") return null;
+  try {
+    return JSON.parse(data);
+  } catch {
+    return { text: data };
+  }
+}
+
+function extractDelta(payload) {
+  if (!payload || typeof payload !== "object") return "";
+  if (typeof payload.text === "string" && payload.message === true) {
+    // Legacy ask endpoints resend the whole message; emit the tail only.
+    return payload.delta ? String(payload.delta) : "";
+  }
+  const candidate =
+    payload.delta
+    ?? payload.token
+    ?? payload.content
+    ?? payload.choices?.[0]?.delta?.content;
+  return typeof candidate === "string" ? candidate : "";
+}
+
+function streamFailure(status, text, token, pathname) {
+  let parsed = null;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    parsed = null;
+  }
+  const safeJson = redactValue(parsed, token);
+  const detail = safeJson?.message ?? safeJson?.error ?? redact(text.slice(0, 200), token);
+  const failure = new CoderaxError(
+    `HTTP_${status}`,
+    `HTTP ${status} from ${pathname}${detail ? `: ${truncate(String(detail))}` : ""}`,
+    { status },
+  );
+  failure.body = safeJson;
+  return failure;
+}
+
+/**
+ * POST a prompt and consume a server-sent-event response. The token is removed
+ * from every delta, event payload, and error string before it reaches output.
+ */
+export async function streamRequest({
+  baseUrl,
+  token,
+  path,
+  method = "POST",
+  body,
+  timeoutMs = 15000,
+  signal,
+  onEvent,
+  fetchImpl = fetch,
+} = {}) {
+  if (!baseUrl) {
+    throw new CoderaxError(
+      "BASE_URL_REQUIRED",
+      "no base URL configured; run `coderax config set --base-url <url>` or set CODERAX_BASE_URL",
+    );
+  }
+  const target = joinRoute(baseUrl, path);
+  const headers = { accept: "text/event-stream" };
+  if (token) headers.authorization = `Bearer ${token}`;
+
+  let payload;
+  if (body !== undefined) {
+    headers["content-type"] = "application/json";
+    payload = JSON.stringify(body);
+  }
+
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  const onAbort = () => controller.abort();
+  signal?.addEventListener("abort", onAbort, { once: true });
+
+  try {
+    const response = await fetchImpl(target, {
+      method,
+      headers,
+      body: payload,
+      redirect: "error",
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      throw streamFailure(response.status, await response.text(), token, target.pathname);
+    }
+    if (!response.body) {
+      throw new CoderaxError("RESPONSE_UNREADABLE", `the response from ${target.pathname} has no body`);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let assembled = "";
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      // SSE permits CRLF line endings. Normalise after each chunk so a CRLF
+      // split across reads still terminates a frame.
+      buffer = buffer.replace(/\r\n/g, "\n");
+
+      let boundary = buffer.indexOf("\n\n");
+      while (boundary !== -1) {
+        const rawEvent = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        const event = parseSseEvent(rawEvent);
+        if (event !== null && event !== undefined) {
+          const delta = extractDelta(event);
+          if (delta) {
+            const safeDelta = redact(delta, token);
+            assembled += safeDelta;
+            onEvent?.({ type: "delta", text: safeDelta, payload: redactValue(event, token) });
+          } else {
+            onEvent?.({ type: "event", payload: redactValue(event, token) });
+          }
+          if (event?.final === true || event?.error) {
+            onEvent?.({ type: "final", payload: redactValue(event, token) });
+            if (event.error) {
+              throw new CoderaxError("STREAM_ERROR", redact(String(event.error), token));
+            }
+          }
+        }
+        boundary = buffer.indexOf("\n\n");
+      }
+    }
+
+    return assembled;
+  } catch (error) {
+    if (error instanceof CoderaxError) throw error;
+    if (signal?.aborted) throw new CoderaxError("CANCELLED", "request cancelled");
+    const name = error?.name ?? "";
+    if (timedOut || name === "TimeoutError" || name === "AbortError") {
+      throw new CoderaxError(
+        "REQUEST_TIMEOUT",
+        `request to ${target.pathname} timed out after ${timeoutMs}ms`,
+      );
+    }
+    throw new CoderaxError(
+      "REQUEST_FAILED",
+      redact(`request to ${target.pathname} failed: ${truncate(error?.message ?? "network error")}`, token),
+    );
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
+  }
+}
+
 export function formatJson(value) {
   return `${JSON.stringify(value, null, 2)}\n`;
 }

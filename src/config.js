@@ -12,10 +12,17 @@ export class ConfigError extends Error {
 
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
 export const DEFAULT_TIMEOUT_MS = 15000;
+export const DEFAULT_CHAT_PATH = "/api/ask/agents";
+export const DEFAULT_ENDPOINT = "agents";
+
+export function configDir(env = process.env) {
+  const override = env.CODERAX_CONFIG_DIR?.trim();
+  return override ? override : join(homedir(), ".coderax");
+}
 
 export function configPath(env = process.env) {
   const override = env.CODERAX_CONFIG?.trim();
-  return override ? override : join(homedir(), ".coderax", "config.json");
+  return override ? override : join(configDir(env), "config.json");
 }
 
 /**
@@ -87,6 +94,11 @@ export async function loadConfig({ env = process.env, filePath, readFileImpl = r
     baseUrl: baseUrlRaw ? normalizeBaseUrl(baseUrlRaw).baseUrl : null,
     token: typeof token === "string" && token !== "" ? token : null,
     timeoutMs,
+    chatPath: env.CODERAX_CHAT_PATH?.trim() || stored.chatPath || DEFAULT_CHAT_PATH,
+    endpoint: env.CODERAX_ENDPOINT?.trim() || stored.endpoint || DEFAULT_ENDPOINT,
+    model: env.CODERAX_MODEL?.trim() || stored.model || "",
+    output: stored.output || "text",
+    account: typeof stored.account === "string" ? stored.account : null,
   };
 }
 
@@ -107,8 +119,13 @@ export async function saveConfig(
   const next = { ...stored };
 
   if (patch.baseUrl !== undefined) next.baseUrl = normalizeBaseUrl(patch.baseUrl).baseUrl;
-  if (patch.token !== undefined) next.token = String(patch.token);
+  if (patch.token !== undefined) next.token = patch.token === null ? null : String(patch.token);
   if (patch.timeoutMs !== undefined) next.timeoutMs = Number(patch.timeoutMs);
+  if (patch.chatPath !== undefined) next.chatPath = String(patch.chatPath);
+  if (patch.endpoint !== undefined) next.endpoint = String(patch.endpoint);
+  if (patch.model !== undefined) next.model = String(patch.model);
+  if (patch.output !== undefined) next.output = String(patch.output);
+  if (patch.account !== undefined) next.account = patch.account === null ? null : String(patch.account);
 
   await mkdirImpl(dirname(path), { recursive: true });
 
@@ -142,7 +159,19 @@ export function describeConfig(config) {
   return {
     configPath: config.configPath,
     baseUrl: config.baseUrl ?? null,
-    tokenConfigured: config.token !== null,
+    tokenConfigured: Boolean(config.token),
     timeoutMs: config.timeoutMs,
+    chatPath: config.chatPath,
+    endpoint: config.endpoint,
+    model: config.model,
+    account: config.account ?? null,
+    output: config.output,
   };
+}
+
+/** Never print a whole token, not even in `--json` output. */
+export function maskToken(token) {
+  if (!token) return null;
+  if (token.length <= 8) return "*".repeat(token.length);
+  return `${token.slice(0, 4)}\u2026${token.slice(-4)}`;
 }

@@ -10,39 +10,108 @@ import {
 } from "./config.js";
 import { CoderaxError, formatJson, request } from "./client.js";
 import { discoverOpenApi, findOperation } from "./discover.js";
+import * as product from "./product-commands.js";
+import { VERSION } from "./version.js";
 
-export const VERSION = "0.1.0";
+export { VERSION };
 
 const USAGE = `coderax ${VERSION} - command-line client for a Coderax deployment
 
 Usage:
-  coderax config show [--json]
+  coderax products [--json]
+  coderax chat [message] [--model <id>] [--json]
+  coderax work [message] [--model <id>] [--json]
+  coderax models [--json]
+  coderax agents [--json]
+  coderax cloud [--json]
+  coderax projects [--json]
+  coderax login [--token <token>] [--json]
+  coderax logout [--json]
+  coderax status [--json]
+  coderax config show|list [--json]
+  coderax config get <key>
+  coderax config set <key> <value>
   coderax config set [--base-url <url>] [--token <token>] [--timeout <ms>]
+  coderax doctor [--json]
+  coderax update [--json]
   coderax health [--json]
   coderax openapi [--json]
-  coderax agents [--json]
-  coderax models [--json]
   coderax call <METHOD> <PATH> [--data <json>] [--json]
 
 Global options:
   --base-url <url>   Override the deployment URL (HTTPS, or HTTP on loopback)
   --token <token>    Override the configured bearer token
   --timeout <ms>     Per-request timeout, 100-120000
+  --model <id>       Override the model for one invocation
+  --endpoint <name>  Override the chat endpoint name
+  --chat-path <path> Override the streaming path
+  --url <path>       Override the streaming path for one invocation
   --json             Machine-readable output
+  --no-color         Accepted for compatibility
   -h, --help         Show this help
   -v, --version      Show the version
 
 Environment:
-  CODERAX_BASE_URL, CODERAX_TOKEN, CODERAX_TIMEOUT_MS, CODERAX_CONFIG
+  CODERAX_BASE_URL, CODERAX_TOKEN, CODERAX_TIMEOUT_MS, CODERAX_CONFIG,
+  CODERAX_CONFIG_DIR, CODERAX_CHAT_PATH, CODERAX_ENDPOINT, CODERAX_MODEL
 
 API paths are resolved from the deployment's own OpenAPI document. The CLI does
 not hardcode routes and fails with OPERATION_NOT_FOUND when a route is absent.
 `;
 
-const EXIT = Object.freeze({ ok: 0, failure: 1, usage: 2 });
+const EXIT = Object.freeze({
+  ok: 0,
+  failure: 1,
+  usage: 2,
+  unauthenticated: 3,
+  network: 4,
+  notFound: 5,
+  unavailable: 6,
+  cancelled: 130,
+});
 
-const KNOWN_COMMANDS = new Set(["config", "health", "openapi", "agents", "models", "call"]);
-const KNOWN_FLAGS = new Set(["help", "version", "json", "base-url", "token", "timeout", "data"]);
+const CONFIG_KEYS = Object.freeze({
+  "base-url": "baseUrl",
+  "chat-path": "chatPath",
+  endpoint: "endpoint",
+  model: "model",
+});
+const CONFIG_FLAGS = ["base-url", "token", "timeout", "chat-path", "endpoint", "model"];
+
+const KNOWN_COMMANDS = new Set([
+  "config",
+  "health",
+  "openapi",
+  "agents",
+  "models",
+  "call",
+  "products",
+  "chat",
+  "work",
+  "cloud",
+  "projects",
+  "login",
+  "logout",
+  "status",
+  "doctor",
+  "update",
+  "help",
+  "version",
+]);
+const KNOWN_FLAGS = new Set([
+  "help",
+  "version",
+  "json",
+  "base-url",
+  "token",
+  "timeout",
+  "data",
+  "model",
+  "endpoint",
+  "chat-path",
+  "url",
+  "no-color",
+]);
 const ALLOWED_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
 
 export class UsageError extends Error {
@@ -69,6 +138,10 @@ export function parseArgv(argv) {
     }
     if (arg === "--json") {
       flags.set("json", true);
+      continue;
+    }
+    if (arg === "--no-color") {
+      flags.set("no-color", true);
       continue;
     }
     if (arg.startsWith("--")) {
@@ -114,11 +187,24 @@ function preflight(positionals, flags) {
 
   if (command === "config") {
     const action = positionals[1] ?? "show";
-    if (action !== "show" && action !== "set") {
+    if (!["show", "list", "get", "set"].includes(action)) {
       throw new UsageError(`unknown config action: ${action}`);
     }
-    if (action === "set" && !["base-url", "token", "timeout"].some((name) => flags.has(name))) {
-      throw new UsageError("config set requires --base-url, --token, or --timeout");
+    if (action === "get" && (!positionals[2] || !(positionals[2] in CONFIG_KEYS))) {
+      throw new UsageError(`config get requires one of: ${Object.keys(CONFIG_KEYS).join(", ")}`);
+    }
+    if (action === "set") {
+      const key = positionals[2];
+      const hasFlags = CONFIG_FLAGS.some((name) => flags.has(name));
+      if (!hasFlags && !key) {
+        throw new UsageError("config set requires a key and value, or --base-url/--token/--timeout");
+      }
+      if (key && !(key in CONFIG_KEYS) && !hasFlags) {
+        throw new UsageError(`unknown config key: ${key}`);
+      }
+      if (key && key in CONFIG_KEYS && !hasFlags && !positionals[3]) {
+        throw new UsageError(`config set ${key} requires a value`);
+      }
     }
   }
 
@@ -163,7 +249,15 @@ async function resolveSettings(flags, deps) {
 
   // `config` commands must work on a fresh install, so the base URL is only
   // required by the commands that actually send requests.
-  return { config, baseUrl, token: token || null, timeoutMs };
+  return {
+    ...config,
+    baseUrl,
+    token: token || null,
+    timeoutMs,
+    model: flags.has("model") ? flags.get("model") : config.model,
+    endpoint: flags.has("endpoint") ? flags.get("endpoint") : config.endpoint,
+    chatPath: flags.has("chat-path") ? flags.get("chat-path") : config.chatPath,
+  };
 }
 
 function requireBaseUrl(context) {
@@ -257,7 +351,7 @@ async function commandCall(positionals, context, deps, write, flags) {
   }
 
   const method = methodRaw.toUpperCase();
-  if (!["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"].includes(method)) {
+  if (!ALLOWED_METHODS.has(method)) {
     throw new UsageError(`unsupported method: ${methodRaw}`);
   }
 
@@ -287,14 +381,24 @@ async function commandCall(positionals, context, deps, write, flags) {
 async function commandConfig(positionals, context, deps, write, flags) {
   const action = positionals[1] ?? "show";
 
-  if (action === "show") {
-    const described = describeConfig(context.config);
+  if (action === "show" || action === "list") {
+    const described = describeConfig(context);
     emit(
       write,
       flags,
-      `config: ${described.configPath}\nbase URL: ${described.baseUrl ?? "(not set)"}\ntoken: ${described.tokenConfigured ? "configured" : "not configured"}\ntimeout: ${described.timeoutMs}ms\n`,
+      `config: ${described.configPath}\nbase URL: ${described.baseUrl ?? "(not set)"}\ntoken: ${described.tokenConfigured ? "configured" : "not configured"}\ntimeout: ${described.timeoutMs}ms\nchat path: ${described.chatPath}\nendpoint: ${described.endpoint}\nmodel: ${described.model || "(not set)"}\n`,
       described,
     );
+    return;
+  }
+
+  if (action === "get") {
+    const key = positionals[2];
+    if (!key || !(key in CONFIG_KEYS)) {
+      throw new UsageError(`config get requires one of: ${Object.keys(CONFIG_KEYS).join(", ")}`);
+    }
+    const value = context[CONFIG_KEYS[key]];
+    write(flags.has("json") ? formatJson({ [key]: value }) : String(value || "(unset)"));
     return;
   }
 
@@ -303,28 +407,51 @@ async function commandConfig(positionals, context, deps, write, flags) {
   }
 
   const patch = {};
-  if (flags.has("base-url")) patch.baseUrl = flags.get("base-url");
-  if (flags.has("token")) patch.token = flags.get("token");
-  if (flags.has("timeout")) {
-    const timeoutMs = Number(flags.get("timeout"));
-    if (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 120000) {
-      throw new UsageError("--timeout must be an integer between 100 and 120000");
+  const key = positionals[2];
+  const hasFlags = CONFIG_FLAGS.some((name) => flags.has(name));
+  if (key && key in CONFIG_KEYS && !hasFlags) {
+    const value = positionals.slice(3).join(" ").trim();
+    if (!value) throw new UsageError(`config set ${key} requires a value`);
+    patch[CONFIG_KEYS[key]] = value;
+  } else {
+    if (flags.has("base-url")) patch.baseUrl = flags.get("base-url");
+    if (flags.has("token")) patch.token = flags.get("token");
+    if (flags.has("chat-path")) patch.chatPath = flags.get("chat-path");
+    if (flags.has("endpoint")) patch.endpoint = flags.get("endpoint");
+    if (flags.has("model")) patch.model = flags.get("model");
+    if (flags.has("timeout")) {
+      const timeoutMs = Number(flags.get("timeout"));
+      if (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 120000) {
+        throw new UsageError("--timeout must be an integer between 100 and 120000");
+      }
+      patch.timeoutMs = timeoutMs;
     }
-    patch.timeoutMs = timeoutMs;
   }
   if (Object.keys(patch).length === 0) {
-    throw new UsageError("config set requires --base-url, --token, or --timeout");
+    throw new UsageError("config set requires a key and value, or --base-url/--token/--timeout");
   }
 
   const saved = await saveConfig(patch, {
     ...(deps.saveDeps ?? {}),
-    filePath: context.config.configPath,
+    filePath: context.configPath,
   });
   const described = describeConfig(
     await loadConfig({ env: deps.env, filePath: saved.path }),
   );
 
   emit(write, flags, `wrote ${saved.path}\nbase URL: ${described.baseUrl ?? "(not set)"}\ntoken: ${described.tokenConfigured ? "configured" : "not configured"}\n`, described);
+}
+
+function exitFor(error) {
+  if (error instanceof UsageError || error instanceof ConfigError || error.code === "USAGE") {
+    return EXIT.usage;
+  }
+  if (error.code === "UNAVAILABLE") return EXIT.unavailable;
+  if (error.code === "CANCELLED") return EXIT.cancelled;
+  if (error.code === "HTTP_401" || error.code === "HTTP_403") return EXIT.unauthenticated;
+  if (error.code === "HTTP_404") return EXIT.notFound;
+  if (error.code === "REQUEST_TIMEOUT" || error.code === "REQUEST_FAILED") return EXIT.network;
+  return EXIT.failure;
 }
 
 export async function runCli(argv, options = {}) {
@@ -335,9 +462,13 @@ export async function runCli(argv, options = {}) {
     stderr: options.stderr ?? ((text) => process.stderr.write(text)),
     configDeps: options.configDeps,
     saveDeps: options.saveDeps,
+    signal: options.signal,
+    stdinIsTTY: options.stdinIsTTY ?? Boolean(process.stdin.isTTY),
+    readSecret: options.readSecret ?? readStdin,
   };
 
   const write = (text) => deps.stdout(text.endsWith("\n") ? text : `${text}\n`);
+  const raw = (text) => deps.stdout(String(text));
 
   try {
     const { flags, positionals } = parseArgv(argv);
@@ -359,10 +490,56 @@ export async function runCli(argv, options = {}) {
 
     const settings = await resolveSettings(flags, deps);
     const [command] = positionals;
+    const ctx = {
+      ...settings,
+      settings,
+      args: positionals.slice(1),
+      flags,
+      env: deps.env,
+      json: flags.has("json"),
+      out: write,
+      raw,
+      err: (text) => deps.stderr(`${text}\n`),
+      fetchImpl: deps.fetchImpl,
+      signal: deps.signal,
+      stdinIsTTY: deps.stdinIsTTY,
+      readSecret: deps.readSecret,
+    };
 
     if (command === "config") {
       await commandConfig(positionals, settings, deps, write, flags);
       return EXIT.ok;
+    }
+
+    switch (command) {
+      case "products":
+        return await product.products(ctx);
+      case "cloud":
+        return await product.cloud(ctx);
+      case "projects":
+        return await product.projects(ctx);
+      case "status":
+        return await product.status(ctx);
+      case "login":
+        return await product.login(ctx);
+      case "logout":
+        return await product.logout(ctx);
+      case "chat":
+        return await product.chat(ctx);
+      case "work":
+        return await product.work(ctx);
+      case "doctor":
+        return await product.doctor(ctx);
+      case "update":
+        return await product.update(ctx);
+      case "help":
+        deps.stdout(USAGE);
+        return EXIT.ok;
+      case "version":
+        write(`coderax-cli ${VERSION}`);
+        return EXIT.ok;
+      default:
+        break;
     }
 
     const context = requireBaseUrl(settings);
@@ -389,9 +566,19 @@ export async function runCli(argv, options = {}) {
     const detail =
       error instanceof UsageError ? error.message : `${error.code ?? "ERROR"}: ${error.message}`;
     deps.stderr(`coderax: ${known ? detail : "unexpected failure"}\n`);
-    if (error instanceof UsageError || error instanceof ConfigError) return EXIT.usage;
-    return EXIT.failure;
+    return exitFor(error);
   }
+}
+
+async function readStdin() {
+  if (process.stdin.isTTY) {
+    return "";
+  }
+  let data = "";
+  for await (const chunk of process.stdin) {
+    data += chunk;
+  }
+  return data.trim();
 }
 
 export function isEntrypoint(entry = process.argv[1]) {

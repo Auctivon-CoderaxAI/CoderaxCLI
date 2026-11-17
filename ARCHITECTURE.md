@@ -1,13 +1,18 @@
 # Architecture
 
 ```
-argv ──► parseArgv ──► preflight ──► resolveContext ──► command
+argv ──► parseArgv ──► preflight ──► resolveSettings ──► command
                           │              │                │
                      usage errors   config.js        health / openapi /
                      (exit 2)       (env + file)     agents / models / call
                                                         │
                                                         ├─► discover.js (OpenAPI)
-                                                        └─► client.js (HTTP)
+                                                        └─► client.js (HTTP + SSE)
+
+product commands (chat / work / products / cloud / login / doctor)
+  └─► product-commands.js ─► product-registry.js
+                           ├─► client.js (HTTP + SSE)
+                           └─► config.js (atomic 0600 config)
 ```
 
 ## Layers
@@ -17,6 +22,8 @@ argv ──► parseArgv ──► preflight ──► resolveContext ──► 
 | `src/config.js` | resolve, validate, persist deployment settings | filesystem, environment |
 | `src/client.js` | one HTTP request, error mapping, redaction | `fetch` only |
 | `src/discover.js` | find and summarize the OpenAPI document | client |
+| `src/product-registry.js` | canonical five-product status data | none |
+| `src/product-commands.js` | chat, Work, products, Cloud, login, doctor | config, client, registry |
 | `src/cli.js` | parsing, preflight, dispatch, output | all of the above |
 
 Each layer is injectable: tests pass `fetchImpl`, `env`, `stdout`, and file
