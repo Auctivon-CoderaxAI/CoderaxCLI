@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
-import { CoderaxError, redact, redactValue, request } from "../src/client.js";
+import { CoderaxError, redact, redactValue, request, streamRequest } from "../src/client.js";
 
 const TOKEN = "token-that-must-never-leak";
 
@@ -233,4 +233,88 @@ test("redacts the token inside successful JSON without breaking its shape", asyn
       });
     },
   );
+});
+
+test("redacts a token before truncating a network failure", async () => {
+  const token = "SECRET-TOKEN";
+  const message = `${"x".repeat(295)}${token}`;
+  await assert.rejects(
+    () =>
+      request({
+        baseUrl: "https://coderax.test",
+        token,
+        path: "/health",
+        fetchImpl: async () => {
+          throw new Error(message);
+        },
+      }),
+    (error) => {
+      assert.equal(error.code, "REQUEST_FAILED");
+      assert.equal(error.message.includes("SECRE"), false);
+      return true;
+    },
+  );
+});
+
+test("streamRequest uses an idle timeout, not a total deadline", async () => {
+  const encoder = new TextEncoder();
+  const chunks = [
+    'data: {"delta":"one "}\n\n',
+    'data: {"delta":"two "}\n\n',
+    'data: {"delta":"three"}\n\n',
+    "data: [DONE]\n\n",
+  ];
+  let index = 0;
+  const body = new ReadableStream({
+    async pull(controller) {
+      if (index >= chunks.length) {
+        controller.close();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      controller.enqueue(encoder.encode(chunks[index]));
+      index += 1;
+    },
+  });
+
+  const text = await streamRequest({
+    baseUrl: "https://coderax.test",
+    token: TOKEN,
+    path: "/api/ask",
+    timeoutMs: 150,
+    fetchImpl: async () =>
+      new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } }),
+  });
+
+  assert.equal(text, "one two three");
+});
+
+test("streamRequest redacts a token split across SSE events", async () => {
+  const token = "split-token";
+  const events = [];
+  const encoder = new TextEncoder();
+  const chunks = [
+    'data: {"delta":"hello spl"}\n\n',
+    'data: {"delta":"it-token world"}\n\n',
+    "data: [DONE]\n\n",
+  ];
+  const body = new ReadableStream({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+      controller.close();
+    },
+  });
+
+  const text = await streamRequest({
+    baseUrl: "https://coderax.test",
+    token,
+    path: "/api/ask",
+    fetchImpl: async () =>
+      new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } }),
+    onEvent: (event) => events.push(event),
+  });
+
+  assert.equal(text.includes(token), false);
+  assert.match(text, /hello \[REDACTED\] world/);
+  assert.equal(JSON.stringify(events).includes(token), false);
 });

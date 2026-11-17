@@ -127,7 +127,7 @@ export async function saveConfig(
   if (patch.output !== undefined) next.output = String(patch.output);
   if (patch.account !== undefined) next.account = patch.account === null ? null : String(patch.account);
 
-  await mkdirImpl(dirname(path), { recursive: true });
+  await mkdirImpl(dirname(path), { recursive: true, mode: 0o700 });
 
   // Write a fresh 0600 file and atomically replace the config, so an existing
   // world-readable file never receives the token even for an instant.

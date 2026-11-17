@@ -55,8 +55,10 @@ Environment:
   CODERAX_BASE_URL, CODERAX_TOKEN, CODERAX_TIMEOUT_MS, CODERAX_CONFIG,
   CODERAX_CONFIG_DIR, CODERAX_CHAT_PATH, CODERAX_ENDPOINT, CODERAX_MODEL
 
-API paths are resolved from the deployment's own OpenAPI document. The CLI does
-not hardcode routes and fails with OPERATION_NOT_FOUND when a route is absent.
+Discovery: agents, models, and openapi use the deployment's OpenAPI document.
+health probes fixed paths, login checks /api/user, doctor checks /api/health,
+chat and work use the configured chat path, and call uses the path you supply.
+A missing discovered route fails with OPERATION_NOT_FOUND.
 `;
 
 const EXIT = Object.freeze({
@@ -70,12 +72,12 @@ const EXIT = Object.freeze({
   cancelled: 130,
 });
 
-const CONFIG_KEYS = Object.freeze({
+const CONFIG_KEYS = Object.freeze(Object.assign(Object.create(null), {
   "base-url": "baseUrl",
   "chat-path": "chatPath",
   endpoint: "endpoint",
   model: "model",
-});
+}));
 const CONFIG_FLAGS = ["base-url", "token", "timeout", "chat-path", "endpoint", "model"];
 
 const KNOWN_COMMANDS = new Set([
@@ -180,6 +182,7 @@ function emit(write, flags, human, machine) {
  */
 function preflight(positionals, flags) {
   const [command] = positionals;
+  let call = null;
 
   if (!KNOWN_COMMANDS.has(command)) {
     throw new UsageError(`unknown command: ${command}. Run \`coderax --help\`.`);
@@ -223,12 +226,16 @@ function preflight(positionals, flags) {
         throw new UsageError(`${method} does not accept --data`);
       }
       try {
-        JSON.parse(flags.get("data"));
+        call = { method, path, body: JSON.parse(flags.get("data")) };
       } catch {
         throw new UsageError("--data must be valid JSON");
       }
+    } else {
+      call = { method, path, body: undefined };
     }
   }
+
+  return { call };
 }
 
 async function resolveSettings(flags, deps) {
@@ -342,31 +349,8 @@ async function commandResource(kind, context, deps, write, flags) {
   );
 }
 
-async function commandCall(positionals, context, deps, write, flags) {
-  const methodRaw = positionals[1];
-  const path = positionals[2];
-
-  if (methodRaw === undefined || path === undefined) {
-    throw new UsageError("call requires <METHOD> <PATH>");
-  }
-
-  const method = methodRaw.toUpperCase();
-  if (!ALLOWED_METHODS.has(method)) {
-    throw new UsageError(`unsupported method: ${methodRaw}`);
-  }
-
-  let body;
-  if (flags.has("data")) {
-    if (method === "GET" || method === "HEAD") {
-      throw new UsageError(`${method} does not accept --data`);
-    }
-    try {
-      body = JSON.parse(flags.get("data"));
-    } catch {
-      throw new UsageError("--data must be valid JSON");
-    }
-  }
-
+async function commandCall(call, context, deps, write, flags) {
+  const { method, path, body } = call;
   const response = await request({ ...context, path, method, body, fetchImpl: deps.fetchImpl });
   const payload = response.json ?? response.text;
 
@@ -486,7 +470,7 @@ export async function runCli(argv, options = {}) {
       return EXIT.ok;
     }
 
-    preflight(positionals, flags);
+    const { call } = preflight(positionals, flags);
 
     const settings = await resolveSettings(flags, deps);
     const [command] = positionals;
@@ -556,7 +540,7 @@ export async function runCli(argv, options = {}) {
         await commandResource(command, context, deps, write, flags);
         return EXIT.ok;
       case "call":
-        await commandCall(positionals, context, deps, write, flags);
+        await commandCall(call, context, deps, write, flags);
         return EXIT.ok;
       default:
         throw new UsageError(`unknown command: ${command}. Run \`coderax --help\`.`);

@@ -1,6 +1,6 @@
 import { PRODUCTS, STATUS_LABELS, getOrderedProducts } from "./product-registry.js";
 import { CoderaxError, request, streamRequest } from "./client.js";
-import { configDir, maskToken, saveConfig } from "./config.js";
+import { configDir, loadConfig, maskToken, saveConfig } from "./config.js";
 import { VERSION } from "./version.js";
 
 export const EXIT = Object.freeze({
@@ -163,9 +163,20 @@ export async function login(ctx) {
 }
 
 export async function logout(ctx) {
-  const removed = Boolean(ctx.settings.token);
+  const stored = await loadConfig({ env: {}, filePath: ctx.settings.configPath });
+  const removed = Boolean(stored.token);
+  const environmentTokenActive = Boolean(ctx.env.CODERAX_TOKEN?.trim());
   await saveConfig({ token: null, account: null }, { filePath: ctx.settings.configPath });
-  ctx.out(ctx.json ? JSON.stringify({ removed }) : removed ? "Signed out." : "No stored credentials.");
+  const message = environmentTokenActive
+    ? "Stored credentials cleared. CODERAX_TOKEN is still set; unset it to sign out of this environment."
+    : removed
+      ? "Signed out."
+      : "No stored credentials.";
+  ctx.out(
+    ctx.json
+      ? JSON.stringify({ removed, environmentTokenActive, message }, null, 2)
+      : message,
+  );
   return EXIT.OK;
 }
 
@@ -202,19 +213,20 @@ async function streamPrompt(ctx, mode) {
     },
   });
 
-  if (ctx.json) {
-    ctx.out(
-      JSON.stringify(
-        { mode, text: assembled || streamed.join(""), events: streamed.length },
-        null,
-        2,
-      ),
-    );
-  } else if (assembled || streamed.length) {
-    ctx.out("");
-  } else {
-    ctx.err("The server accepted the request but streamed no text.");
+  const answer = assembled || streamed.join("");
+  if (!answer) {
+    const message = "The server accepted the request but streamed no text.";
+    if (ctx.json) {
+      ctx.out(JSON.stringify({ mode, text: "", events: streamed.length, error: message }, null, 2));
+    }
+    ctx.err(message);
     return EXIT.ERROR;
+  }
+
+  if (ctx.json) {
+    ctx.out(JSON.stringify({ mode, text: answer, events: streamed.length }, null, 2));
+  } else {
+    ctx.out("");
   }
 
   return EXIT.OK;

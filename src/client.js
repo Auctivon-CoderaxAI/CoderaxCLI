@@ -139,7 +139,7 @@ export async function request({
     }
     throw new CoderaxError(
       "REQUEST_FAILED",
-      redact(`request to ${target.pathname} failed: ${truncate(error?.message ?? "network error")}`, token),
+      `request to ${target.pathname} failed: ${truncate(redact(String(error?.message ?? "network error"), token))}`,
     );
   }
 
@@ -151,7 +151,7 @@ export async function request({
   }
 
   const fullText = redact(text, token);
-  const diagnosticText = redact(text.slice(0, 2000), token);
+  const diagnosticText = fullText.slice(0, 2000);
 
   let json = null;
   if (text.trim() !== "") {
@@ -204,6 +204,40 @@ function extractDelta(payload) {
   return typeof candidate === "string" ? candidate : "";
 }
 
+/**
+ * Hold back a suffix that could be the beginning of a token, so a token split
+ * across SSE deltas is redacted as a whole instead of leaking in two pieces.
+ */
+class StreamTextRedactor {
+  constructor(token) {
+    this.token = token || "";
+    this.pending = "";
+  }
+
+  push(text) {
+    if (!this.token) return text;
+    this.pending += text;
+    let hold = 0;
+    const max = Math.min(this.token.length - 1, this.pending.length);
+    for (let length = max; length > 0; length -= 1) {
+      if (this.token.startsWith(this.pending.slice(-length))) {
+        hold = length;
+        break;
+      }
+    }
+    const safe = this.pending.slice(0, this.pending.length - hold);
+    this.pending = this.pending.slice(this.pending.length - hold);
+    return redact(safe, this.token);
+  }
+
+  flush() {
+    if (!this.token) return "";
+    const tail = redact(this.pending, this.token);
+    this.pending = "";
+    return tail;
+  }
+}
+
 function streamFailure(status, text, token, pathname) {
   let parsed = null;
   try {
@@ -212,7 +246,7 @@ function streamFailure(status, text, token, pathname) {
     parsed = null;
   }
   const safeJson = redactValue(parsed, token);
-  const detail = safeJson?.message ?? safeJson?.error ?? redact(text.slice(0, 200), token);
+  const detail = safeJson?.message ?? safeJson?.error ?? redact(text, token).slice(0, 200);
   const failure = new CoderaxError(
     `HTTP_${status}`,
     `HTTP ${status} from ${pathname}${detail ? `: ${truncate(String(detail))}` : ""}`,
@@ -255,10 +289,17 @@ export async function streamRequest({
 
   const controller = new AbortController();
   let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, timeoutMs);
+  let timer;
+  // The timeout is an idle deadline: it covers connection setup and the wait
+  // for each next chunk, not the total duration of a healthy stream.
+  const armTimer = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+  };
+  armTimer();
   const onAbort = () => controller.abort();
   signal?.addEventListener("abort", onAbort, { once: true });
 
@@ -280,11 +321,14 @@ export async function streamRequest({
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
+    const deltaRedactor = new StreamTextRedactor(token);
     let buffer = "";
     let assembled = "";
+    armTimer();
 
     while (true) {
       const { value, done } = await reader.read();
+      armTimer();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
       // SSE permits CRLF line endings. Normalise after each chunk so a CRLF
@@ -299,9 +343,16 @@ export async function streamRequest({
         if (event !== null && event !== undefined) {
           const delta = extractDelta(event);
           if (delta) {
-            const safeDelta = redact(delta, token);
-            assembled += safeDelta;
-            onEvent?.({ type: "delta", text: safeDelta, payload: redactValue(event, token) });
+            const safeDelta = deltaRedactor.push(delta);
+            if (safeDelta) {
+              assembled += safeDelta;
+              const payload = redactValue(event, token);
+              if (payload !== null && typeof payload === "object" && !Array.isArray(payload)) {
+                if (typeof payload.delta === "string") payload.delta = safeDelta;
+                if (typeof payload.text === "string" && payload.text === delta) payload.text = safeDelta;
+              }
+              onEvent?.({ type: "delta", text: safeDelta, payload });
+            }
           } else {
             onEvent?.({ type: "event", payload: redactValue(event, token) });
           }
@@ -314,6 +365,12 @@ export async function streamRequest({
         }
         boundary = buffer.indexOf("\n\n");
       }
+    }
+
+    const tail = deltaRedactor.flush();
+    if (tail) {
+      assembled += tail;
+      onEvent?.({ type: "delta", text: tail });
     }
 
     return assembled;
@@ -329,7 +386,7 @@ export async function streamRequest({
     }
     throw new CoderaxError(
       "REQUEST_FAILED",
-      redact(`request to ${target.pathname} failed: ${truncate(error?.message ?? "network error")}`, token),
+      `request to ${target.pathname} failed: ${truncate(redact(String(error?.message ?? "network error"), token))}`,
     );
   } finally {
     clearTimeout(timer);

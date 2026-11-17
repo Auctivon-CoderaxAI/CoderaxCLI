@@ -2,8 +2,9 @@
 
 ## Credentials
 
-- The token is stored at `~/.coderax/config.json` with mode `0600` and only when
-  the operator runs `config set --token`; it is never written to logs or stdout.
+- The token is stored at `~/.coderax/config.json` with mode `0600` when the
+  operator runs `config set --token` or the `login` flow saves it; it is never
+  written to logs or stdout.
 - Writes go to a fresh `0600` temporary file and are atomically renamed over the
   config, so an existing world-readable file never receives the token even
   briefly. A failed rename or an unprotected temp file is an error, not a
@@ -29,9 +30,12 @@ party.
 
 ## Output hygiene
 
-Every error string is passed through `redact()`, which replaces the configured
-token with `[REDACTED]`. This covers the case where a server echoes the token in a
-validation message. Response text is truncated before it is shown.
+Every output path is passed through `redact()` or `redactValue()`, which replace
+the configured token with a marker. The marker is usually `[REDACTED]`, but it
+uses `***` or another collision-safe value when the token shares characters with
+`[REDACTED]`. Successful response text is returned in full after redaction;
+only error diagnostics are truncated. JSON output stays valid and recursively
+redacts both keys and values.
 
 ## Timeouts
 

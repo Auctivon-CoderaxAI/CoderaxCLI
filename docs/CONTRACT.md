@@ -23,6 +23,9 @@ Candidates, tried in order:
 A candidate is accepted only when it is a JSON object with an `openapi` version
 starting `3.`, a `paths` object, and at least one operation. The first accepted
 document wins; failures from every candidate are reported when none is usable.
+An `HTTP_401`, `HTTP_403`, or `REQUEST_TIMEOUT` is surfaced immediately instead
+of being hidden behind `OPENAPI_NOT_FOUND`, so authentication and timeout
+exit codes remain meaningful.
 
 ## Health
 
@@ -53,7 +56,15 @@ No path is hardcoded. When the match is absent the CLI exits `1` with
 
 ## Exit codes
 
-`0` success · `1` operational failure · `2` usage or configuration error.
+- `0` success
+- `1` other operational failure (missing operation, unavailable health check,
+  other non-2xx HTTP status)
+- `2` usage error or invalid configuration
+- `3` HTTP 401/403 authentication or authorization failure
+- `4` network failure or timeout
+- `5` HTTP 404 not found
+- `6` Cloud/projects unavailable
+- `130` cancelled
 
 ## Compatibility
 

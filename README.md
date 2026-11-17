@@ -15,10 +15,11 @@ package is deprecated; it is replaced by this implementation.
 ## Why paths are discovered, not hardcoded
 
 Coderax exposes its API through an OpenAPI document with Swagger UI. This CLI
-reads that document and resolves `agents` and `models` from it. If a deployment
-does not expose a route, the CLI says so (`OPERATION_NOT_FOUND`) instead of
-sending a request to a guessed path. `coderax call` exists for routes outside the
-convenience commands.
+reads that document for `openapi`, `agents`, and `models`. If a deployment does
+not expose one of those routes, the CLI says so (`OPERATION_NOT_FOUND`) instead
+of sending a request to a guessed path. `health` probes fixed paths, `login`
+checks `/api/user`, `doctor` checks `/api/health`, `chat` and `work` use the
+configured chat path, and `coderax call` uses the path you supply.
 
 ## Status
 
@@ -35,7 +36,7 @@ convenience commands.
 | `openapi` discovery and operation listing | ✅ implemented, tested |
 | `call <METHOD> <PATH> [--data]` | ✅ implemented, tested |
 | `agents` / `models` resolved from OpenAPI | ✅ implemented, tested |
-| Token redaction in every error path | ✅ implemented, tested |
+| Token redaction in every output path | ✅ implemented, tested |
 | File upload, agent mutation | ⛔ not implemented — use `call` |
 
 ## Install
@@ -79,19 +80,21 @@ coderax call GET /api/models --json
 coderax call POST /api/ask --data '{"text":"hello"}'
 ```
 
-`chat`, `work`, `login`, `status` and `doctor` use the deployment's product API.
-`health`, `openapi`, `agents`, `models` and `call` use its OpenAPI document.
+`openapi`, `agents`, and `models` use the deployment's OpenAPI document. `health`
+probes fixed paths, `login` checks `/api/user`, `doctor` checks `/api/health`,
+`chat` and `work` use the configured chat path, and `call` uses the path you
+supply.
 
 ## Exit codes
 
 | Code | Meaning |
 | --- | --- |
 | `0` | success |
-| `1` | operational failure (HTTP error, missing operation) |
-| `2` | usage or configuration error |
-| `3` | unauthenticated |
-| `4` | network error |
-| `5` | not found |
+| `1` | other operational failure (missing operation, unavailable health check, other non-2xx HTTP status) |
+| `2` | usage error or invalid configuration (bad URL, insecure transport, bad timeout) |
+| `3` | authentication or authorization failure (HTTP 401/403) |
+| `4` | network failure or timeout |
+| `5` | not found (HTTP 404) |
 | `6` | unavailable (Cloud/projects) |
 | `130` | cancelled |
 

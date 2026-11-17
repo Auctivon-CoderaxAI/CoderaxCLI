@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -114,6 +114,26 @@ test("rewriting an existing config replaces it atomically and leaves no temp fil
   assert.equal(parsed.token, "second-token");
   assert.equal(parsed.baseUrl, "https://one.example.com");
   assert.deepEqual(await readdir(directory), ["config.json"]);
+});
+
+test("creates the config directory with mode 0700", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "coderax-config-"));
+  const path = join(directory, "nested", "config.json");
+  let received;
+
+  await saveConfig(
+    { token: "x" },
+    {
+      filePath: path,
+      mkdirImpl: async (target, options) => {
+        received = options;
+        await mkdir(target, options);
+      },
+    },
+  );
+
+  assert.equal(received.mode, 0o700);
+  assert.equal(received.recursive, true);
 });
 
 test("a failed atomic replace does not report success", async () => {

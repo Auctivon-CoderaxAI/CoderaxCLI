@@ -51,6 +51,9 @@ export async function discoverOpenApi({ baseUrl, token, timeoutMs, fetchImpl } =
       }
       return { document: json, sourcePath: path, operations };
     } catch (error) {
+      if (error.code === "HTTP_401" || error.code === "HTTP_403" || error.code === "REQUEST_TIMEOUT") {
+        throw error;
+      }
       attempts.push(`${path}: ${error.code ?? "request failed"}`);
     }
   }

@@ -211,35 +211,58 @@ test("call rejects body on GET and invalid JSON", async () => {
 });
 
 test("missing operations are reported, not guessed", async () => {
-  await withStub(async (baseUrl) => {
-    const server = createServer((req, res) => {
-      const url = new URL(req.url, "http://localhost");
-      if (url.pathname === "/openapi.json") {
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ openapi: "3.1.0", paths: { "/api/healthz": { get: {} } } }));
-        return;
-      }
-      res.writeHead(404);
-      res.end();
-    });
-    server.listen(0, "127.0.0.1");
-    await once(server, "listening");
-    const { port } = server.address();
-    const io = capture();
-    try {
-      const code = await runCli(["agents"], {
-        env: { CODERAX_BASE_URL: `http://127.0.0.1:${port}` },
-        stdout: io.stdout,
-        stderr: io.stderr,
-      });
-      assert.equal(code, 1);
-      assert.match(io.err(), /OPERATION_NOT_FOUND|no GET agents operation/);
-    } finally {
-      server.closeAllConnections?.();
-      server.close();
+  const server = createServer((req, res) => {
+    const url = new URL(req.url, "http://localhost");
+    if (url.pathname === "/openapi.json") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ openapi: "3.1.0", paths: { "/api/healthz": { get: {} } } }));
+      return;
     }
-    void baseUrl;
+    res.writeHead(404);
+    res.end();
   });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const { port } = server.address();
+  const env = await tempEnv();
+  env.CODERAX_BASE_URL = `http://127.0.0.1:${port}`;
+  const io = capture();
+  try {
+    const code = await runCli(["agents"], {
+      env,
+      stdout: io.stdout,
+      stderr: io.stderr,
+    });
+    assert.equal(code, 1);
+    assert.match(io.err(), /OPERATION_NOT_FOUND|no GET agents operation/);
+  } finally {
+    server.closeAllConnections?.();
+    server.close();
+  }
+});
+
+test("discovery surfaces authentication failures", async () => {
+  const server = createServer((req, res) => {
+    res.writeHead(401, { "content-type": "application/json" });
+    res.end(JSON.stringify({ message: "unauthorized" }));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const { port } = server.address();
+  const io = capture();
+  const env = {
+    ...(await tempEnv()),
+    CODERAX_BASE_URL: `http://127.0.0.1:${port}`,
+    CODERAX_TOKEN: TOKEN,
+  };
+  try {
+    const code = await runCli(["openapi"], { env, stdout: io.stdout, stderr: io.stderr });
+    assert.equal(code, 3);
+    assert.match(io.err(), /HTTP_401/);
+  } finally {
+    server.closeAllConnections?.();
+    server.close();
+  }
 });
 
 test("discovery reports every candidate when nothing is usable", async () => {
@@ -283,6 +306,21 @@ test("config commands work before any deployment is configured", async () => {
   });
   assert.equal(code, 0);
   assert.equal(JSON.parse(io.out()).baseUrl, null);
+});
+
+test("config rejects inherited object keys", async () => {
+  for (const argv of [
+    ["config", "set", "constructor", "x"],
+    ["config", "get", "toString"],
+  ]) {
+    const io = capture();
+    const code = await runCli(argv, {
+      env: await tempEnv(),
+      stdout: io.stdout,
+      stderr: io.stderr,
+    });
+    assert.equal(code, 2, `${argv.join(" ")} should be a usage error`);
+  }
 });
 
 const CLI_PATH = fileURLToPath(new URL("../src/cli.js", import.meta.url));

@@ -122,6 +122,46 @@ test("chat streams SSE deltas and redacts an echoed token", async () => {
   assert.equal(result.events, 2);
 });
 
+test("logout reports an environment token that remains active", async () => {
+  const file = await tempConfig();
+  const io = capture();
+  const env = { CODERAX_CONFIG: file, CODERAX_TOKEN: TOKEN };
+  const code = await runCli(["logout", "--json"], {
+    env,
+    stdout: io.stdout,
+    stderr: io.stderr,
+  });
+
+  assert.equal(code, 0);
+  const result = JSON.parse(io.out());
+  assert.equal(result.removed, false);
+  assert.equal(result.environmentTokenActive, true);
+  assert.match(result.message, /unset/i);
+  assert.equal(JSON.parse(await readFile(file, "utf8")).token, null);
+});
+
+test("an empty stream is an error in JSON mode", async () => {
+  const io = capture();
+  const env = {
+    CODERAX_CONFIG: await tempConfig(),
+    CODERAX_BASE_URL: "https://coderax.test",
+    CODERAX_TOKEN: TOKEN,
+  };
+  const fetchImpl = async () => sseResponse(["data: [DONE]\n\n"]);
+
+  const code = await runCli(["chat", "hi", "--json"], {
+    env,
+    fetchImpl,
+    stdout: io.stdout,
+    stderr: io.stderr,
+    stdinIsTTY: true,
+  });
+
+  assert.equal(code, 1);
+  assert.equal(JSON.parse(io.out()).text, "");
+  assert.match(io.err(), /streamed no text/i);
+});
+
 test("cloud is unavailable without executing anything", async () => {
   const io = capture();
   assert.equal(
