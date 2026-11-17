@@ -130,6 +130,15 @@ test("redactValue keeps both fields when redacted keys collide", () => {
   });
 });
 
+test("redactValue does not bring the token back through a collision suffix", () => {
+  const redacted = redactValue({ x2: "one", "x[REDACTED]": "two" }, "2");
+  assert.deepEqual(redacted, {
+    "x[REDACTED]": "one",
+    "x[REDACTED]#[REDACTED]": "two",
+  });
+  assert.equal(JSON.stringify(redacted).includes("2"), false);
+});
+
 test("redactValue skips suffixes already taken by another key", () => {
   const unit = "[REDACTED]";
   const base = `${unit}${unit}`;

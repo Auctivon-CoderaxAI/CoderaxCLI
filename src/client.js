@@ -31,8 +31,13 @@ export function redactValue(value, token) {
       // Remember where this base's search stopped so many collisions stay linear.
       if (keys.has(base)) {
         let n = nextSuffix.get(base) ?? 2;
-        while (keys.has(`${base}#${n}`)) n += 1;
-        safe = `${base}#${n}`;
+        // Redact the suffix too: a numeric token must not return through "#2".
+        let candidate = redact(`${base}#${n}`, token);
+        while (keys.has(candidate)) {
+          n += 1;
+          candidate = redact(`${base}#${n}`, token);
+        }
+        safe = candidate;
         nextSuffix.set(base, n + 1);
       }
       keys.add(safe);
