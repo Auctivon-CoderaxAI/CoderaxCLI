@@ -39,6 +39,9 @@ function stubHandler(req, res) {
     return json(200, { agents: [{ id: "agent-1", name: "Reviewer" }] });
   }
   if (url.pathname === "/api/models") return json(200, { models: ["gpt-4.1"] });
+  if (url.pathname === "/api/whoami") {
+    return json(200, { ok: true, token: (req.headers.authorization ?? "").replace("Bearer ", "") });
+  }
   return json(404, { message: "not found" });
 }
 
@@ -164,6 +167,27 @@ test("health, openapi, agents, models, and call work against a deployment", asyn
       0,
     );
     assert.equal(JSON.parse(callIo.out()).status, 200);
+  });
+});
+
+test("never prints the token even when the deployment echoes it back", async () => {
+  await withStub(async (baseUrl) => {
+    const io = capture();
+    const env = {
+      CODERAX_CONFIG: join(await mkdtemp(join(tmpdir(), "coderax-cli-")), "c.json"),
+      CODERAX_BASE_URL: baseUrl,
+      CODERAX_TOKEN: TOKEN,
+    };
+
+    const code = await runCli(["call", "GET", "/api/whoami", "--json"], {
+      env,
+      stdout: io.stdout,
+      stderr: io.stderr,
+    });
+
+    assert.equal(code, 0);
+    assert.equal(io.out().includes(TOKEN), false);
+    assert.equal(JSON.parse(io.out()).body.token, "[REDACTED]");
   });
 });
 
