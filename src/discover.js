@@ -11,9 +11,15 @@ const HTTP_METHODS = new Set(["get", "post", "put", "patch", "delete", "head", "
 
 /** Only a relative server URL is safe to prepend to discovered operation paths. */
 function serverPathPrefix(document) {
-  const url = document?.servers?.[0]?.url;
-  if (typeof url !== "string" || !url.startsWith("/") || url.startsWith("//")) return "";
-  return url.replace(/\/+$/, "");
+  const server = document?.servers?.[0];
+  const url = server?.url;
+  if (typeof url !== "string") return "";
+  const expanded = url.replace(/\{([^}]+)\}/g, (placeholder, name) => {
+    const value = server?.variables?.[name]?.default;
+    return typeof value === "string" ? value : placeholder;
+  });
+  if (!expanded.startsWith("/") || expanded.startsWith("//")) return "";
+  return expanded.replace(/\/+$/, "");
 }
 
 export function summarizeOperations(document) {
@@ -37,22 +43,23 @@ export async function discoverOpenApi({ baseUrl, token, timeoutMs, fetchImpl } =
   const attempts = [];
   for (const path of OPENAPI_CANDIDATES) {
     try {
-      const { json } = await request({ baseUrl, token, path, timeoutMs, fetchImpl });
-      if (json === null || typeof json !== "object" || Array.isArray(json)) {
+      const { rawJson } = await request({ baseUrl, token, path, timeoutMs, fetchImpl, includeRaw: true });
+      const document = rawJson;
+      if (document === null || typeof document !== "object" || Array.isArray(document)) {
         attempts.push(`${path}: response is not a JSON object`);
         continue;
       }
-      const version = String(json.openapi ?? "");
+      const version = String(document.openapi ?? "");
       if (!version.startsWith("3.")) {
         attempts.push(`${path}: not an OpenAPI 3.x document`);
         continue;
       }
-      if (json.paths === null || typeof json.paths !== "object") {
+      if (document.paths === null || typeof document.paths !== "object") {
         attempts.push(`${path}: document has no paths`);
         continue;
       }
-      const prefix = serverPathPrefix(json);
-      const operations = summarizeOperations(json).map((operation) => ({
+      const prefix = serverPathPrefix(document);
+      const operations = summarizeOperations(document).map((operation) => ({
         ...operation,
         path: prefix
           ? `${prefix}${operation.path.startsWith("/") ? "" : "/"}${operation.path}`
@@ -62,7 +69,7 @@ export async function discoverOpenApi({ baseUrl, token, timeoutMs, fetchImpl } =
         attempts.push(`${path}: document lists no operations`);
         continue;
       }
-      return { document: json, sourcePath: path, operations };
+      return { document, sourcePath: path, operations };
     } catch (error) {
       if (error.code === "HTTP_401" || error.code === "HTTP_403" || error.code === "REQUEST_TIMEOUT") {
         throw error;

@@ -15,6 +15,12 @@ export const DEFAULT_TIMEOUT_MS = 15000;
 export const DEFAULT_CHAT_PATH = "/api/ask/agents";
 export const DEFAULT_ENDPOINT = "agents";
 
+function envText(value) {
+  if (typeof value !== "string") return undefined;
+  const text = value.trim();
+  return text === "" ? undefined : text;
+}
+
 export function configDir(env = process.env) {
   const override = env.CODERAX_CONFIG_DIR?.trim();
   return override ? override : join(homedir(), ".coderax");
@@ -80,9 +86,9 @@ export async function loadConfig({ env = process.env, filePath, readFileImpl = r
   const path = filePath ?? configPath(env);
   const stored = await readStoredConfig(path, readFileImpl);
 
-  const baseUrlRaw = overrides.baseUrl ?? env.CODERAX_BASE_URL?.trim() ?? stored.baseUrl;
+  const baseUrlRaw = overrides.baseUrl ?? envText(env.CODERAX_BASE_URL) ?? stored.baseUrl;
   const token = env.CODERAX_TOKEN?.trim() || stored.token || null;
-  const timeoutRaw = overrides.timeoutMs ?? env.CODERAX_TIMEOUT_MS ?? stored.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timeoutRaw = overrides.timeoutMs ?? envText(env.CODERAX_TIMEOUT_MS) ?? stored.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const timeoutMs = Number(timeoutRaw);
 
   if (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 120000) {

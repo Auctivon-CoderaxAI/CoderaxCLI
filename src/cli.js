@@ -55,8 +55,8 @@ Environment:
   CODERAX_CONFIG_DIR, CODERAX_CHAT_PATH, CODERAX_ENDPOINT, CODERAX_MODEL
 
 Discovery: agents, models, and openapi use the deployment's OpenAPI document.
-health probes fixed paths, login checks /api/user, doctor checks /api/health,
-chat and work use the configured chat path, and call uses the path you supply.
+health probes fixed paths, login checks /api/user, doctor probes the same health
+endpoints, and chat and work use the configured chat path. call uses the path you supply.
 A missing discovered route fails with OPERATION_NOT_FOUND.
 `;
 
@@ -284,46 +284,35 @@ function requireBaseUrl(context) {
 }
 
 async function commandHealth(context, deps, write, flags) {
-  const candidates = ["/health", "/api/health", "/healthz"];
-  const attempts = [];
-
-  for (const path of candidates) {
-    try {
-      const response = await request({ ...context, path, fetchImpl: deps.fetchImpl });
-      const body = responseBody(response);
-      emit(
-        write,
-        flags,
-        `health: ok (GET ${path}) HTTP ${response.status}\n${response.json ? formatJson(response.json) : ""}`,
-        { endpoint: path, status: response.status, body },
-      );
-      return;
-    } catch (error) {
-      attempts.push({ endpoint: path, code: error.code ?? "ERROR" });
-      if (error.code === "HTTP_404" || error.code === "HTTP_405") continue;
-      throw error;
-    }
-  }
-
-  throw new CoderaxError(
-    "HEALTH_UNAVAILABLE",
-    `no health endpoint responded. Tried ${attempts.map((entry) => `${entry.endpoint} (${entry.code})`).join(", ")}`,
+  const { path, response } = await product.probeHealth({ ...context, fetchImpl: deps.fetchImpl });
+  const body = responseBody(response);
+  emit(
+    write,
+    flags,
+    `health: ok (GET ${path}) HTTP ${response.status}\n${response.json ? formatJson(response.json) : ""}`,
+    { endpoint: path, status: response.status, body },
   );
 }
 
 async function commandOpenapi(context, deps, write, flags) {
   const discovery = await discoverOpenApi({ ...context, fetchImpl: deps.fetchImpl });
-  const lines = discovery.operations
+  const displayOperations = discovery.operations.map((operation) => ({
+    ...operation,
+    path: redact(operation.path, context.token),
+    operationId: operation.operationId ? redact(operation.operationId, context.token) : null,
+    summary: operation.summary ? redact(operation.summary, context.token) : null,
+  }));
+  const lines = displayOperations
     .slice(0, 50)
     .map((operation) => `  ${operation.method.padEnd(6)} ${operation.path}${operation.operationId ? `  # ${operation.operationId}` : ""}`);
   emit(
     write,
     flags,
-    `contract: ${discovery.sourcePath} (${discovery.operations.length} operations)\n${lines.join("\n")}\n`,
+    `contract: ${discovery.sourcePath} (${displayOperations.length} operations)\n${lines.join("\n")}\n`,
     {
       sourcePath: discovery.sourcePath,
-      operationCount: discovery.operations.length,
-      operations: discovery.operations,
+      operationCount: displayOperations.length,
+      operations: displayOperations,
     },
   );
 }
@@ -346,12 +335,13 @@ async function commandResource(kind, context, deps, write, flags) {
     fetchImpl: deps.fetchImpl,
   });
   const payload = responseBody(response);
+  const displayPath = redact(operation.path, context.token);
 
   emit(
     write,
     flags,
-    `${operation.method} ${operation.path} -> ${response.status}\n${response.json ? formatJson(response.json) : response.text}\n`,
-    { method: operation.method, path: operation.path, status: response.status, body: payload },
+    `${operation.method} ${displayPath} -> ${response.status}\n${response.json ? formatJson(response.json) : response.text}\n`,
+    { method: operation.method, path: displayPath, status: response.status, body: payload },
   );
 }
 

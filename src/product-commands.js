@@ -42,6 +42,26 @@ function requireAuth(ctx) {
   }
 }
 
+const HEALTH_CANDIDATES = ["/health", "/api/health", "/healthz"];
+
+export async function probeHealth({ baseUrl, token, timeoutMs, fetchImpl } = {}) {
+  const attempts = [];
+  for (const path of HEALTH_CANDIDATES) {
+    try {
+      const response = await request({ baseUrl, token, path, timeoutMs, fetchImpl });
+      return { path, response };
+    } catch (error) {
+      attempts.push(`${path} (${error.code ?? "ERROR"})`);
+      if (error.code === "HTTP_404" || error.code === "HTTP_405") continue;
+      throw error;
+    }
+  }
+  throw new CoderaxError(
+    "HEALTH_UNAVAILABLE",
+    `no health endpoint responded. Tried ${attempts.join(", ")}`,
+  );
+}
+
 export async function products(ctx) {
   const list = getOrderedProducts();
 
@@ -285,20 +305,19 @@ export async function doctor(ctx) {
 
   if (ctx.settings.baseUrl) {
     try {
-      const response = await request({
+      const { path, response } = await probeHealth({
         baseUrl: ctx.settings.baseUrl,
         token: ctx.settings.token,
-        path: "/api/health",
         timeoutMs: ctx.settings.timeoutMs,
         fetchImpl: ctx.fetchImpl,
       });
-      checks.push({ name: "reachability", ok: true, detail: `GET /api/health HTTP ${response.status}`, hint: "" });
+      checks.push({ name: "reachability", ok: true, detail: `GET ${path} HTTP ${response.status}`, hint: "" });
     } catch (error) {
       checks.push({
         name: "reachability",
         ok: false,
         detail: error.message,
-        hint: "Confirm the deployment URL and that /api/health is exposed.",
+        hint: "Confirm the deployment URL and that a health endpoint is exposed.",
       });
     }
   }
