@@ -216,7 +216,7 @@ async function streamPrompt(ctx, mode) {
   const assembled = await streamRequest({
     baseUrl: ctx.settings.baseUrl,
     token: ctx.settings.token,
-    path: ctx.flags.get("url") || ctx.settings.chatPath,
+    path: ctx.flags.get("url") || (mode === "work" ? "/api/work/chat" : ctx.settings.chatPath),
     timeoutMs: ctx.settings.timeoutMs,
     fetchImpl: ctx.fetchImpl,
     signal: ctx.signal,
