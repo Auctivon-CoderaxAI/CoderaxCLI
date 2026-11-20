@@ -141,7 +141,7 @@ test("work sends prompts to the native Work chat route, not the Chat route", asy
       mode: "work",
       endpoint: "agents",
     });
-    return sseResponse(['data: {"delta":"accepted"}\\n\\n', "data: [DONE]\\n\\n"]);
+    return sseResponse(['data: {"delta":"accepted"}\n\n', "data: [DONE]\n\n"]);
   };
 
   const code = await runCli(["work", "implement the fix", "--json"], {
