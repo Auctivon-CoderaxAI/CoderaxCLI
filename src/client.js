@@ -266,6 +266,10 @@ class StreamTextRedactor {
     return redact(safe, this.token);
   }
 
+  reset() {
+    this.pending = "";
+  }
+
   flush() {
     if (!this.token) return "";
     const tail = redact(this.pending, this.token);
@@ -374,6 +378,7 @@ export async function streamRequest({
     const deltaRedactor = new StreamTextRedactor(token);
     let buffer = "";
     let assembled = "";
+    let lastMessageSnapshot = null;
     armTimer();
 
     while (true) {
@@ -391,7 +396,23 @@ export async function streamRequest({
         buffer = buffer.slice(boundary + 2);
         const event = parseSseEvent(rawEvent);
         if (event !== null && event !== undefined) {
-          const delta = extractDelta(event);
+          let delta = extractDelta(event);
+          // Native Work sends the full response text after every delta, not a
+          // delta field. Emit only the unseen suffix; never echo the full snapshot.
+          if (event?.message === true && typeof event.text === "string" && event.delta == null) {
+            const snapshot = event.text;
+            if (lastMessageSnapshot === null || snapshot.startsWith(lastMessageSnapshot)) {
+              delta = snapshot.slice(lastMessageSnapshot?.length ?? 0);
+            } else {
+              // A text_replace event rewrites the answer rather than appending.
+              // The returned answer must reflect that revision, not stale text.
+              assembled = redact(snapshot, token);
+              deltaRedactor.reset();
+              onEvent?.({ type: "replace", text: assembled, payload: redactValue(event, token) });
+              delta = "";
+            }
+            lastMessageSnapshot = snapshot;
+          }
           if (delta) {
             const safeDelta = deltaRedactor.push(delta);
             if (safeDelta) {
@@ -405,6 +426,17 @@ export async function streamRequest({
             onEvent?.({ type: "event", payload: redactValue(event, token) });
           }
           if (event?.final === true || event?.error) {
+            // The final persisted response is authoritative, including if the
+            // engine rewrote its answer before completion.
+            const terminalText = event?.responseMessage?.text;
+            if (event?.final === true && typeof terminalText === "string") {
+              const safeTerminalText = redact(terminalText, token);
+              if (safeTerminalText !== assembled) {
+                assembled = safeTerminalText;
+                deltaRedactor.reset();
+                onEvent?.({ type: "replace", text: assembled, payload: redactValue(event, token) });
+              }
+            }
             onEvent?.({ type: "final", payload: redactValue(event, token) });
             if (event.error) {
               throw new CoderaxError("STREAM_ERROR", redact(detailText(event.error) || "stream error", token));

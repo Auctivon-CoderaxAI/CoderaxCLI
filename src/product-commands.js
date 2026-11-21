@@ -216,7 +216,7 @@ async function streamPrompt(ctx, mode) {
   const assembled = await streamRequest({
     baseUrl: ctx.settings.baseUrl,
     token: ctx.settings.token,
-    path: ctx.flags.get("url") || ctx.settings.chatPath,
+    path: ctx.flags.get("url") || (mode === "work" ? "/api/work/chat" : ctx.settings.chatPath),
     timeoutMs: ctx.settings.timeoutMs,
     fetchImpl: ctx.fetchImpl,
     signal: ctx.signal,
@@ -230,6 +230,12 @@ async function streamPrompt(ctx, mode) {
       if (event.type === "delta") {
         streamed.push(event.text);
         if (!ctx.json) ctx.raw(event.text);
+      } else if (event.type === "replace") {
+        // A cumulative Work snapshot may revise earlier text. The interactive
+        // terminal cannot erase already printed lines; display the correction.
+        streamed.length = 0;
+        streamed.push(event.text);
+        if (!ctx.json) ctx.raw(`\n[Revised response]\n${event.text}`);
       }
     },
   });
