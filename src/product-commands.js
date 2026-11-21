@@ -230,6 +230,12 @@ async function streamPrompt(ctx, mode) {
       if (event.type === "delta") {
         streamed.push(event.text);
         if (!ctx.json) ctx.raw(event.text);
+      } else if (event.type === "replace") {
+        // A cumulative Work snapshot may revise earlier text. The interactive
+        // terminal cannot erase already printed lines; display the correction.
+        streamed.length = 0;
+        streamed.push(event.text);
+        if (!ctx.json) ctx.raw(`\n[Revised response]\n${event.text}`);
       }
     },
   });
