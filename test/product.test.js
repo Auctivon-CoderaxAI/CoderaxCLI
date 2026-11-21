@@ -157,6 +157,58 @@ test("work sends prompts to the native Work chat route, not the Chat route", asy
   assert.equal(io.out().includes(TOKEN), false);
 });
 
+test("work consumes native cumulative message snapshots without duplicating text", async () => {
+  const io = capture();
+  const env = {
+    CODERAX_CONFIG: await tempConfig(),
+    CODERAX_BASE_URL: "https://coderax.test",
+    CODERAX_TOKEN: TOKEN,
+  };
+  const fetchImpl = async (url) => {
+    assert.equal(new URL(url).pathname, "/api/work/chat");
+    return sseResponse([
+      'data: {"created":true,"streamId":"task-id"}\\n\\n',
+      'data: {"message":true,"text":"accepted"}\\n\\n',
+      'data: {"message":true,"text":"accepted and verified"}\\n\\n',
+      'data: {"final":true,"responseMessage":{"text":"accepted and verified"}}\\n\\n',
+    ]);
+  };
+  const code = await runCli(["work", "implement", "--json"], {
+    env,
+    fetchImpl,
+    stdout: io.stdout,
+    stderr: io.stderr,
+    stdinIsTTY: true,
+  });
+  assert.equal(code, 0);
+  assert.equal(JSON.parse(io.out()).text, "accepted and verified");
+  assert.equal(JSON.parse(io.out()).events, 2);
+});
+
+test("work returns the corrected answer when an engine snapshot replaces earlier text", async () => {
+  const io = capture();
+  const env = {
+    CODERAX_CONFIG: await tempConfig(),
+    CODERAX_BASE_URL: "https://coderax.test",
+    CODERAX_TOKEN: TOKEN,
+  };
+  const fetchImpl = async () => sseResponse([
+    'data: {"message":true,"text":"old draft"}\\n\\n',
+    'data: {"message":true,"text":"corrected answer"}\\n\\n',
+    'data: {"final":true,"responseMessage":{"text":"corrected answer"}}\\n\\n',
+  ]);
+  const code = await runCli(["work", "implement", "--json"], {
+    env,
+    fetchImpl,
+    stdout: io.stdout,
+    stderr: io.stderr,
+    stdinIsTTY: true,
+  });
+  assert.equal(code, 0);
+  assert.equal(JSON.parse(io.out()).text, "corrected answer");
+  assert.equal(io.out().includes(TOKEN), false);
+});
+
 test("logout reports an environment token that remains active", async () => {
   const file = await tempConfig();
   const io = capture();
