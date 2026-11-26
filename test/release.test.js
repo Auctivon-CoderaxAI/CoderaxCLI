@@ -134,26 +134,40 @@ test("npm install diagnostics use the supplied layout for removal advice", async
   await mkdir(join(root, "src"), { recursive: true });
   await writeFile(modulePath, "");
 
-  function check(path, installPath, scope) {
+  function check(path, installPath, scope, command = "npm uninstall coderax-cli") {
     const installMethod = detectInstallMethod(path);
     assert.equal(installMethod, `npm-${scope}`);
     assert.deepEqual(
       programRemovalCommands({ installMethod, installPath }),
-      [scope === "global" ? "npm uninstall --global coderax-cli" : "npm uninstall coderax-cli"],
+      [command],
     );
   }
 
   check(modulePath, root, "local"); // bin-links=false
   if (windows) {
     await writeFile(join(prefix, shim), "");
-    check(modulePath, root, "global");
+    check(modulePath, root, "global", `npm uninstall --global --prefix "${prefix.replaceAll("\\", "/")}" coderax-cli`);
   }
   await mkdir(localBin);
   await writeFile(join(localBin, shim), "");
   check(modulePath, root, "local");
 
-  const globalRoot = join(prefix, "lib", "node_modules", "coderax-cli");
-  check(join(globalRoot, "src", "diagnostics.js"), globalRoot, "global");
+  if (!windows) {
+    const globalRoot = join(prefix, "lib", "node_modules", "coderax-cli");
+    check(join(globalRoot, "src", "diagnostics.js"), globalRoot, "global", `npm uninstall --global --prefix "${prefix}" coderax-cli`);
+  }
+});
+
+test("global removal advice requires a usable npm prefix", () => {
+  for (const installPath of [
+    join("node_modules", "coderax-cli"),
+    join(tmpdir(), "custom $prefix", ...(process.platform === "win32" ? [] : ["lib"]), "node_modules", "coderax-cli"),
+    join(tmpdir(), "non-npm-layout", "coderax-cli"),
+  ]) {
+    const commands = programRemovalCommands({ installMethod: "npm-global", installPath });
+    assert.match(commands.join("\n"), /verify the npm prefix/i);
+    assert.doesNotMatch(commands.join("\n"), /npm uninstall/);
+  }
 });
 
 test("version works even when the config file is corrupt", async () => {
