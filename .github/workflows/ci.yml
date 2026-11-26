@@ -45,6 +45,15 @@ jobs:
         run: npm run check
       - name: Unit, CLI and contract tests
         run: npm test
+      # Fail closed on a stale shared SDK, a documented version that drifted
+      # from package.json, or a call to an operation the deployment does not
+      # publish.
+      - name: Contract and SDK drift
+        run: npm run verify:contract
+      # Installing this CLI must not add inference, a database, a daemon,
+      # Docker or Ollama; workloads stay cloud-hosted.
+      - name: No local execution surface
+        run: npm run verify:isolation
       - name: Build release artifacts
         run: npm run build
       - name: Verify checksums, contents, installers and safety

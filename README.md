@@ -230,6 +230,8 @@ The following development commands are intended for a cloud workspace:
 npm ci --ignore-scripts
 npm test
 npm run check
+npm run verify:contract
+npm run verify:isolation
 npm run build
 npm run verify
 npm run install-test
@@ -241,6 +243,8 @@ npm run repro
 | `npm ci --ignore-scripts` | Install the locked dependency tree |
 | `npm test` | Unit, CLI, contract, release and redaction tests |
 | `npm run check` | Syntax check for every module |
+| `npm run verify:contract` | Fail on a stale SDK version or an operation the deployment does not publish |
+| `npm run verify:isolation` | Fail if the CLI gains local inference, a database, a daemon, Docker or Ollama |
 | `npm run build` | Generate deterministic artifacts in `dist/` |
 | `npm run verify` | Verify checksums, archive contents and extractor integrity |
 | `npm run install-test` | Verify installation, authentication, compatibility, upgrade and uninstall |

@@ -59,15 +59,17 @@
     "start": "node src/cli.js --help",
     "test": "node --test \"test/*.test.js\"",
     "test:contract": "node --test test/contract.test.js test/workflow-cli.test.js",
-    "check": "node --check src/config.js && node --check src/credentials.js && node --check src/client.js && node --check src/discover.js && node --check src/cli.js && node --check src/product-commands.js && node --check src/product-registry.js && node --check src/session.js && node --check src/render.js && node --check src/approval.js && node --check src/workflow-commands.js && node --check src/version.js && node --check src/compat.js && node --check src/diagnostics.js && node --check src/maintenance.js && node --check packages/workflow-sdk/src/contract.js && node --check packages/workflow-sdk/src/errors.js && node --check packages/workflow-sdk/src/redact.js && node --check packages/workflow-sdk/src/sse.js && node --check packages/workflow-sdk/src/http.js && node --check packages/workflow-sdk/src/client.js && node --check packages/workflow-sdk/src/index.js && node --check scripts/build-release.mjs && node --check scripts/verify-release.mjs && node --check scripts/repro-check.mjs && node --check scripts/install-test.mjs && node --check scripts/lib/archive.mjs && node --check scripts/lib/safe-extract.mjs && node --check scripts/smoke-install.mjs && node --check scripts/verify-cross-surface.mjs",
+    "check": "node --check src/config.js && node --check src/credentials.js && node --check src/client.js && node --check src/discover.js && node --check src/cli.js && node --check src/product-commands.js && node --check src/product-registry.js && node --check src/session.js && node --check src/render.js && node --check src/approval.js && node --check src/workflow-commands.js && node --check src/version.js && node --check src/compat.js && node --check src/diagnostics.js && node --check src/maintenance.js && node --check packages/workflow-sdk/src/contract.js && node --check packages/workflow-sdk/src/errors.js && node --check packages/workflow-sdk/src/redact.js && node --check packages/workflow-sdk/src/sse.js && node --check packages/workflow-sdk/src/http.js && node --check packages/workflow-sdk/src/client.js && node --check packages/workflow-sdk/src/index.js && node --check scripts/build-release.mjs && node --check scripts/verify-release.mjs && node --check scripts/repro-check.mjs && node --check scripts/install-test.mjs && node --check scripts/lib/archive.mjs && node --check scripts/lib/safe-extract.mjs && node --check scripts/smoke-install.mjs && node --check scripts/verify-cross-surface.mjs && node --check scripts/lib/gates.mjs && node --check scripts/verify-contract.mjs && node --check scripts/verify-isolation.mjs && node --check test/gates.test.js",
     "build": "node scripts/build-release.mjs",
     "verify": "node scripts/verify-release.mjs",
     "repro": "node scripts/repro-check.mjs",
     "install-test": "node scripts/install-test.mjs",
     "smoke:install": "node scripts/smoke-install.mjs",
     "verify:cross-surface": "node scripts/verify-cross-surface.mjs",
+    "verify:contract": "node scripts/verify-contract.mjs",
+    "verify:isolation": "node scripts/verify-isolation.mjs",
     "audit": "npm audit --audit-level=high",
-    "release:check": "npm run check && npm test && npm run build && npm run verify && npm run repro && npm run install-test",
+    "release:check": "npm run check && npm run verify:contract && npm run verify:isolation && npm test && npm run build && npm run verify && npm run repro && npm run install-test",
     "prepublishOnly": "npm run release:check"
   }
 }

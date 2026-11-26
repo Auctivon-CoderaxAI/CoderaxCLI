@@ -223,12 +223,18 @@ async function withEngine(mode, run) {
   const apiVersion = mode === "api-incompatible" ? "2" : mode === "unavailable" ? null : "1";
   const deploymentVersion = mode === "older" ? "0.7.9" : mode === "unavailable" ? null : "0.8.8";
   const unauthenticated = mode === "unauthenticated";
+  // The version header is a version *claim*. A deployment that publishes no
+  // metadata must not put one on unrelated responses, or a 404 page would be
+  // what decides compatibility.
+  const advertisedVersion = mode === "unavailable" ? null : compatible ? "1" : "2";
 
   const server = createServer((req, res) => {
     const url = new URL(req.url, "http://127.0.0.1");
     const authenticated = req.headers.authorization === authorization;
     const json = (status, payload) => {
-      res.writeHead(status, { "content-type": "application/json", "x-coderax-api-version": compatible ? "1" : "2" });
+      const headers = { "content-type": "application/json" };
+      if (advertisedVersion !== null) headers["x-coderax-api-version"] = advertisedVersion;
+      res.writeHead(status, headers);
       res.end(JSON.stringify(payload));
     };
     if (unauthenticated) return json(401, { message: "unauthorized" });
