@@ -57,7 +57,13 @@ const GLOBAL_PREFIX_MARKERS = Object.freeze([
 export function detectInstallMethod(modulePath = MODULE_PATH) {
   const path = portable(realpathOrSelf(modulePath));
   if (path.includes("/node_modules/coderax-cli/")) {
-    return GLOBAL_PREFIX_MARKERS.some((marker) => path.includes(marker)) ? "npm-global" : "npm-local";
+    if (GLOBAL_PREFIX_MARKERS.some((marker) => path.includes(marker))) return "npm-global";
+    // A custom `npm install --global --prefix` has no marker in its path, and
+    // its package layout is identical to a local install. npm does leave a
+    // difference: a local install links the binary under node_modules/.bin,
+    // while a global install puts the shim at the prefix root (or prefix/bin).
+    const localShim = join(PACKAGE_ROOT, "..", ".bin", process.platform === "win32" ? "coderax.cmd" : "coderax");
+    return existsSync(localShim) ? "npm-local" : "npm-global";
   }
   // The standalone build ships this marker at the package root, so a custom
   // --prefix is recognised without assuming the default ~/.coderax/cli path.
