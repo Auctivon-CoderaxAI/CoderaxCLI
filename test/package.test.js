@@ -26,6 +26,11 @@ test("[capability:executable-entrypoints] the package exposes an executable code
   assert.deepEqual(Object.keys(packageJson.bin), ["coderax"]);
 
   const source = await readFile(CLI, "utf8");
+  assert.equal(
+    source.includes("\r\n"),
+    false,
+    "src/cli.js must be checked out with LF line endings; see .gitattributes",
+  );
   assert.equal(source.split("\n")[0], "#!/usr/bin/env node");
 
   if (!IS_WINDOWS) {

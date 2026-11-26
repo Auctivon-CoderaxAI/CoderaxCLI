@@ -1,0 +1,6 @@
+# Check out the same bytes on every hosted runner, so the entrypoint keeps a
+# usable shebang on Windows and release artifacts are identical across OSes.
+* text=auto eol=lf
+
+*.cmd text eol=crlf
+*.bat text eol=crlf

@@ -36,6 +36,7 @@ function runNpm(args, options = {}) {
 const workDir = await mkdtemp(join(tmpdir(), "coderax-package-"));
 const installDir = join(workDir, "install");
 
+console.log(`package: platform ${process.platform}, node ${process.versions.node}`);
 console.log("package: building the release artifact");
 const artifact = await buildArtifact(root);
 const tarballPath = join(workDir, artifact.filename);
@@ -78,8 +79,11 @@ const shim = join(installDir, "node_modules", ".bin", isWindows ? "coderax.cmd" 
 check("bin shim exists", existsSync(shim), shim);
 
 function runShim(args, options = {}) {
+  // POSIX runs the shim itself, proving the shebang and executable bit.
+  // Windows .cmd shims need a shell; let Node build the cmd.exe command line
+  // instead of hand-quoting it.
   if (!isWindows) return run(shim, args, options);
-  return run(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", `"${shim}" ${args.join(" ")}`], options);
+  return run(shim, args, { ...options, shell: true });
 }
 
 const version = runShim(["--version"]);
@@ -105,6 +109,10 @@ if (products.status === 0) {
 }
 
 if (failures.length > 0) {
+  for (const failure of failures) {
+    const message = failure.replace(/%/g, "%25").replace(/\r/g, "").replace(/\n/g, "%0A");
+    console.log(`::error title=Package check failed::${message.slice(0, 2000)}`);
+  }
   console.error(`package: FAILED with ${failures.length} problem(s)`);
   process.exit(1);
 }
