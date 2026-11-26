@@ -1,0 +1,3 @@
+# The vendored WorkflowEngine contract is hashed byte-for-byte. Disable
+# end-of-line conversion so a Windows checkout cannot change its digest.
+contracts/** -text
