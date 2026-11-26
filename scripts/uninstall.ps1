@@ -45,10 +45,32 @@ foreach ($target in $targets) {
   Remove-Item -LiteralPath $target -Recurse -Force
 }
 
-# Only remove the launcher when it came from this prefix.
+# Only remove the launcher when it came from this prefix. The installer writes
+# the batch file as ASCII and stores the entrypoint base64-encoded, so the
+# literal path never appears in it; decode the token and compare that path
+# instead of trusting the raw text.
 if (Test-Path -LiteralPath $launcher) {
   $content = Get-Content -Raw -LiteralPath $launcher
-  if ($content -and $content.Contains($Prefix)) {
+  $owned = $false
+  if ($content -and $content.Contains($Prefix)) { $owned = $true }
+  if (-not $owned -and $content) {
+    $marker = "Buffer.from('"
+    $index = $content.IndexOf($marker)
+    if ($index -ge 0) {
+      $start = $index + $marker.Length
+      $end = $content.IndexOf("'", $start)
+      if ($end -gt $start) {
+        $token = $content.Substring($start, $end - $start)
+        try {
+          $decoded = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($token))
+          if ($decoded.StartsWith($Prefix, [System.StringComparison]::OrdinalIgnoreCase)) { $owned = $true }
+        } catch {
+          $owned = $false
+        }
+      }
+    }
+  }
+  if ($owned) {
     Remove-Item -LiteralPath $launcher -Force
   } else {
     Write-Warning "leaving $launcher (it does not reference $Prefix)"
