@@ -48,8 +48,11 @@ if ([string]::IsNullOrWhiteSpace($Prefix) -or $Prefix -eq "/" -or $Prefix -eq $e
   Fail "refusing to use '$Prefix' as the install prefix" 2
 }
 
-if ($BaseUrl -notmatch '^https://' -and $BaseUrl -notmatch '^http://(localhost|127\.0\.0\.1)') {
-  Fail "releases URL must use HTTPS (got '$BaseUrl')." 2
+$releaseUri = $null
+if (-not [Uri]::TryCreate($BaseUrl, [UriKind]::Absolute, [ref]$releaseUri) -or
+    ($releaseUri.Scheme -ne 'https' -and
+      ($releaseUri.Scheme -ne 'http' -or $releaseUri.Host -notin @('localhost', '127.0.0.1')))) {
+  Fail "releases URL must use HTTPS or HTTP on localhost or 127.0.0.1." 2
 }
 
 # Get-FileHash is a Utility cmdlet and is not available in every PowerShell
@@ -105,6 +108,8 @@ if ($Version -notmatch '^\d+\.\d+\.\d+([-.][0-9A-Za-z.]+)?$') {
 }
 
 $asset = "coderax-cli-$Version-standalone.zip"
+$Prefix = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Prefix)
+$BinDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($BinDir)
 $destination = Join-Path $Prefix $Version
 $launcher = Join-Path $BinDir "coderax.cmd"
 
@@ -122,6 +127,8 @@ if ($DryRun) {
 $temp = Join-Path ([System.IO.Path]::GetTempPath()) ("coderax-install-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $temp -Force | Out-Null
 $backup = $null
+$staging = $null
+$tmpLauncher = $null
 
 try {
   if ($FromFile) {
@@ -134,7 +141,7 @@ try {
       Write-Warning "checksum verification disabled"
     }
   } else {
-    $releaseBase = "$BaseUrl/download/v$Version"
+    $releaseBase = "$($releaseUri.AbsoluteUri.TrimEnd('/'))/download/v$Version"
     $archive = Join-Path $temp $asset
     Save-File "$releaseBase/$asset" $archive
     if (-not $SkipVerify) {
@@ -168,7 +175,8 @@ try {
 @CODERAX_EXTRACT_B64@
 '@))
 
-  $staging = Join-Path $temp "stage"
+  # The final directory move must stay on the same volume as the prefix.
+  $staging = Join-Path $Prefix (".stage-" + [guid]::NewGuid().ToString("N"))
   New-Item -ItemType Directory -Path $staging -Force | Out-Null
   & node $extractMjs $archive $staging | Out-Null
   if ($LASTEXITCODE -ne 0) { Fail "archive failed safe extraction" 3 }
@@ -186,7 +194,6 @@ try {
     Fail "staged build did not report the expected version (got '$staged')" 3
   }
 
-  New-Item -ItemType Directory -Path $Prefix -Force | Out-Null
   New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
 
   if (Test-Path -LiteralPath $destination) {
@@ -202,29 +209,26 @@ try {
     Fail "could not move the staged install into place" 1
   }
 
-  # A shim rather than a copied launcher: the shipped launcher resolves paths
-  # relative to its own location, so copying it would break.
   try {
-    # cmd.exe reads a .cmd file in the console's OEM code page, so an ASCII
-    # write would replace non-ASCII prefix characters with '?' and break the
-    # launcher. Write in the OEM code page cmd will actually use.
-    $shim = "@echo off`r`ncall `"$destination\bin\coderax.cmd`" %*`r`nexit /b %ERRORLEVEL%`r`n"
-    $tmpLauncher = "$launcher.new"
-    $oem = [System.Text.Encoding]::GetEncoding(
-      [System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
-    [System.IO.File]::WriteAllText($tmpLauncher, $shim, $oem)
+    # Keep the batch file ASCII regardless of the console code page. Restore
+    # Node's script argv layout before importing the CLI at its exact path.
+    $entrypoint = Join-Path $destination "src\cli.js"
+    $encodedPath = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($entrypoint))
+    $shim = "@echo off`r`n" +
+      "setlocal DisableDelayedExpansion`r`n" +
+      "node -e `"const p = Buffer.from('$encodedPath', 'base64').toString('utf8'); process.argv.splice(1, 0, p); import(require('node:url').pathToFileURL(p).href)`" -- %*`r`n" +
+      "exit /b %ERRORLEVEL%`r`n"
+    $tmpLauncher = Join-Path $BinDir (".coderax-" + [guid]::NewGuid().ToString("N") + ".cmd")
+    [System.IO.File]::WriteAllText($tmpLauncher, $shim, [System.Text.Encoding]::ASCII)
+    $installed = (& $tmpLauncher --version) -join "`n"
+    if ($LASTEXITCODE -ne 0 -or $installed.Trim() -ne "coderax-cli $Version") {
+      throw "launcher version check failed (got '$installed')"
+    }
     Move-Item -LiteralPath $tmpLauncher -Destination $launcher -Force
   } catch {
     Remove-Item -LiteralPath $destination -Recurse -Force -ErrorAction SilentlyContinue
     if ($backup -and (Test-Path -LiteralPath $backup)) { Move-Item -LiteralPath $backup -Destination $destination }
-    Fail "could not install the launcher; the previous version was restored" 1
-  }
-
-  $installed = (& node (Join-Path $destination "src\cli.js") --version).Trim()
-  if ($installed -ne "coderax-cli $Version") {
-    Remove-Item -LiteralPath $destination -Recurse -Force -ErrorAction SilentlyContinue
-    if ($backup -and (Test-Path -LiteralPath $backup)) { Move-Item -LiteralPath $backup -Destination $destination }
-    Fail "installed launcher did not report the expected version (got '$installed'); rolled back" 1
+    Fail "could not install the launcher: $($_.Exception.Message)" 1
   }
 
   if ($backup) { Write-Host "coderax install: previous $Version kept for rollback at $backup" }
@@ -241,5 +245,7 @@ try {
   Write-Host "No other software was installed: no Node.js runtime, Ollama, containers,"
   Write-Host "databases, or background services. Coderax runs in the cloud deployment."
 } finally {
+  if ($tmpLauncher) { Remove-Item -LiteralPath $tmpLauncher -Force -ErrorAction SilentlyContinue }
+  if ($staging) { Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue }
   Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
 }
