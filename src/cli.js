@@ -43,7 +43,7 @@ Usage:
   coderax config show|list [--json]
   coderax config get <key>
   coderax config set <key> <value>
-  coderax config set [--base-url <url>] [--token <token>] [--timeout <ms>]
+  coderax config set [--base-url <url>] [--timeout <ms>]
   coderax doctor [--json]
   coderax update [--json]
   coderax health [--json]
@@ -98,7 +98,7 @@ Capability execution options:
 
 Global options:
   --base-url <url>   Override the deployment URL (HTTPS, or HTTP on loopback)
-  --token <token>    Override the configured bearer token
+  --token <token>    Override the bearer token for one request (rejected by login)
   --timeout <ms>     Per-request timeout, 100-120000
   --model <id>       Override the model for one invocation
   --endpoint <name>  Override the chat endpoint name
@@ -349,6 +349,12 @@ function preflight(positionals, flags, dynamic) {
   }
 
   if (command === "login") {
+    if (flags.has("token")) {
+      throw new UsageError(
+        "login does not accept --token because the value would be exposed in process arguments "
+          + "and shell history; use `coderax login --token-file <path>` or pipe it to `coderax login --with-token`",
+      );
+    }
     if (flags.has("token-file") && flags.has("with-token")) {
       throw new UsageError("login accepts either --token-file or --with-token, not both");
     }
@@ -394,7 +400,7 @@ function preflight(positionals, flags, dynamic) {
       const key = positionals[2];
       const hasFlags = CONFIG_FLAGS.some((name) => flags.has(name));
       if (!hasFlags && !key) {
-        throw new UsageError("config set requires a key and value, or --base-url/--token/--timeout");
+        throw new UsageError("config set requires a key and value, or --base-url/--timeout");
       }
       if (key && hasFlags) {
         throw new UsageError("config set accepts either a key and value or flags, not both");
@@ -663,7 +669,7 @@ async function commandConfig(positionals, context, deps, write, flags) {
     }
   }
   if (Object.keys(patch).length === 0) {
-    throw new UsageError("config set requires a key and value, or --base-url/--token/--timeout");
+    throw new UsageError("config set requires a key and value, or --base-url/--timeout");
   }
 
   const saved = await saveConfig(patch, {

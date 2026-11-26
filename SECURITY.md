@@ -19,8 +19,9 @@
 - `config show` reports only `tokenConfigured: true|false`; `status` reports the
   source (`environment`, `credential store`, `command flag`) and never the token.
 - Environment variables (`CODERAX_TOKEN`) take precedence, so CI can inject a
-  short-lived token without writing a file. `--token` is a one-shot override for
-  automation and is never persisted.
+  short-lived token without writing a file. `coderax login` refuses `--token`,
+  so the login path never places a credential in argv; the global `--token`
+  override remains for one non-login request and is never persisted.
 - A legacy plaintext token in an older config file is still honoured for one
   migration window, with a warning; `coderax login` removes it only after the
   secure write has been verified.

@@ -44,6 +44,19 @@ function corrupt(message) {
   return new CoderaxError("CREDENTIAL_CORRUPT", message);
 }
 
+/**
+ * Surface a credential-store failure with the store's own code. A locked
+ * keyring or a refused ACL is a known failure, not an "unexpected" crash, and
+ * its diagnostic (already scrubbed by the store helper) must reach the owner.
+ */
+function storeFailure(action, error) {
+  if (error instanceof CoderaxError) return error;
+  const code = typeof error?.code === "string" && error.code !== ""
+    ? error.code
+    : "CREDENTIAL_STORE_FAILED";
+  return new CoderaxError(code, `${action}: ${error?.message ?? String(error)}`);
+}
+
 function parseCredential(raw, baseUrl) {
   let parsed;
   try {
@@ -87,7 +100,12 @@ export function requireCredentialStore(store) {
 /** Read the credential for one deployment, or null when none is stored. */
 export async function readStoredCredential({ store, baseUrl }) {
   if (!store?.available || !baseUrl) return null;
-  const raw = await store.get(credentialAccount(baseUrl));
+  let raw;
+  try {
+    raw = await store.get(credentialAccount(baseUrl));
+  } catch (error) {
+    throw storeFailure("could not read the stored credential", error);
+  }
   if (raw === null || raw === undefined || raw === "") return null;
   return parseCredential(raw, baseUrl);
 }
@@ -106,8 +124,17 @@ export async function storeCredential({ store, baseUrl, token, account = null })
     createdAt: new Date().toISOString(),
   });
   const key = credentialAccount(baseUrl);
-  await store.set(key, record);
-  const stored = await store.get(key);
+  try {
+    await store.set(key, record);
+  } catch (error) {
+    throw storeFailure("could not write the credential", error);
+  }
+  let stored;
+  try {
+    stored = await store.get(key);
+  } catch (error) {
+    throw storeFailure("could not verify the stored credential", error);
+  }
   if (stored !== record) {
     throw new CoderaxError(
       "CREDENTIAL_WRITE_FAILED",

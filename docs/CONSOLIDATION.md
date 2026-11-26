@@ -42,8 +42,10 @@ Consequences:
 - `config set --token` is refused; the config file holds only the URL, account
   label and timeout, written atomically with mode `0600`.
 - `login --token-file <path>` refuses symlinks and group/other-readable files;
-  `login --with-token` reads stdin. `--token` remains a one-shot automation
-  override and is never persisted.
+  `login --with-token` reads stdin. `login --token` is refused outright, so a
+  credential cannot be captured from process arguments or shell history; the
+  global `--token` override remains for one non-login request and is never
+  persisted.
 - A legacy plaintext token is still honoured for one migration window with a
   warning; a successful `login` removes it only after the store read-back
   matches.
@@ -151,11 +153,22 @@ Against the real-HTTP contract harness:
 
 ## Verification at this HEAD
 
-- Local suite: **122 passed, 0 failed** (Node 24.22.1, Linux), including the
-  rewritten secure-login test.
+- Local suite: **144 passed, 0 failed** (Node 24.22.1, Linux). The 122
+  pre-existing tests are unchanged in intent; 22 are new and dedicated to the
+  security-sensitive paths:
+  - `test/auth.test.js` — argv `--token` refusal, unavailable store, ACL refusal
+    during the write, read-back mismatch, non-owner token, corrupt credential,
+    unknown version/foreign deployment, private token-file login with legacy
+    migration, and a group-readable token file.
+  - `test/secure-store.test.js` — POSIX mode/ownership, macOS `ls -le` ACLs,
+    Windows `icacls` broad/unverifiable/owner-only parsing, un-hardenable files,
+    real `0600`/`0700` writes, and token-file symlink/mode/size refusals.
+  - `test/interactive.test.js` — real `PromptSession`/readline drive of a Chat
+    turn, a durable Work task with its artifact, slash commands, and a clean
+    Ctrl+D EOF that exits 0 without an error.
 - `npm run check`: syntax and vendor checksum pass.
 - `npm run build`, `npm run verify`, `npm run repro`: pass; 3 artifacts,
-  649 inventoried files, byte-identical rebuild including `dist/`.
+  655 inventoried files, byte-identical rebuild including `dist/`.
 - Hosted matrix: exact-HEAD run
   [`45903747815`](https://github.com/Auctivon-CoderaxAI/CoderaxCLI/actions/runs/45903747815)
   passed `ubuntu-latest`, `macos-latest` and `windows-latest` at implementation
@@ -174,8 +187,10 @@ Against the real-HTTP contract harness:
 - Web↔CLI continuity is still unverified: there is no deployed Coderax gateway
   in this environment to prove a conversation or task is visible in both.
 - A headless Linux runner without `secret-tool` cannot complete an end-to-end
-  owner login; the suite injects an in-memory store and the real store is
-  covered by unit tests. `CODERAX_TOKEN` remains the CI path.
+  owner login; the suite injects an in-memory store, while the platform ACL
+  layer and every store-failure path are covered by dedicated tests. A real
+  Keychain/libsecret/DPAPI write still has to be exercised on each OS.
+  `CODERAX_TOKEN` remains the CI path.
 - Device-code login, refresh tokens and token revocation are not implemented
   because contract 1.1.0 publishes no such operations. They are not simulated.
 - Media, creative and games operations are absent from PR #7; those families

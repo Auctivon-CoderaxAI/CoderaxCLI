@@ -86,10 +86,12 @@ test("login verifies the owner and stores the credential outside the config file
 
   const loginIo = capture();
   const loginCode = await runCli(
-    ["login", "--base-url", server.url, "--token", server.token, "--json"],
+    ["login", "--base-url", server.url, "--json"],
     {
       env,
       credentialStore: store,
+      // The token comes from stdin, never from argv.
+      readSecret: async () => server.token,
       stdout: loginIo.stdout,
       stderr: loginIo.stderr,
       stdinIsTTY: true,

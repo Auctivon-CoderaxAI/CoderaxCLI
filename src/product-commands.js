@@ -149,13 +149,13 @@ export async function login(ctx) {
   let source;
 
   if (ctx.flags.has("token-file")) {
-    token = await readTokenFile(ctx.flags.get("token-file"));
+    try {
+      token = await readTokenFile(ctx.flags.get("token-file"));
+    } catch (error) {
+      // A refused token file is a credential error, not an unexpected crash.
+      throw new CoderaxError(error.code ?? "CREDENTIAL_FILE", error.message);
+    }
     source = "token file";
-  } else if (ctx.flags.has("token")) {
-    // Kept for one-shot automation and existing scripts. It is not persisted and
-    // the help points at the two forms that do not expose the value to `ps`.
-    token = ctx.flags.get("token");
-    source = "command flag";
   } else {
     token = ctx.env.CODERAX_TOKEN || (await ctx.readSecret());
     source = ctx.env.CODERAX_TOKEN ? "environment" : "stdin";
