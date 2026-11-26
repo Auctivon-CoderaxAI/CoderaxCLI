@@ -149,6 +149,41 @@ and start at 1.
   the cursor, and tells the owner to attach again. The cloud task is not
   cancelled.
 
+## Workflow control plane
+
+`coderax workflow` consumes only the operations in the table above. Engineering
+kinds (`inspect`, `architecture`, `generate`, `fix`, `refactor`, `debug`,
+`tests`, `test-run`, `review`, `audit`) map to `submitWork`; the engine's agent
+performs the work in its cloud workspace.
+
+The following CLI actions require dedicated operations that contract `1.0.0`
+does **not** publish. The CLI names the operation, sends no request and exits
+`6`:
+
+| CLI action | Required operation |
+| --- | --- |
+| `workflow repos` | `listRepositories` |
+| `workflow pause` | `pauseTask` |
+| `workflow diff` | `getTaskDiff` |
+| `workflow branch` | `createBranch` |
+| `workflow commit` | `prepareCommit` |
+| `workflow pr` | `createPullRequest` |
+| `workflow ci` | `getCiStatus` |
+| `workflow remediate` | `remediateReviewFindings` |
+
+These are operation names only. No path, method or payload is assumed. The
+engine must publish and authorize each operation before the CLI maps it.
+
+`workflow environments` proves `/v1/health`, `/v1/ready` and an
+owner-authenticated `/v1/agents` call. Contract `1.0.0` has no deployment or
+repository identifier operation, so the result reports both as unsupported and
+`trust: "unverified"`. A response that adds `verified` or `authorized` fields
+fails strict validation with `CONTRACT_MISMATCH` (`7`); it never grants trust.
+
+Every write remains server-authorized. `--confirm`, `--allow-production` and
+`--allow-destructive` are local intent, not authorization. Delivery is
+pull-request-only: no direct push, force push, merge or protected-branch head.
+
 ## Problems and exit codes
 
 Errors use the engine's Problem document:

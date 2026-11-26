@@ -9,6 +9,7 @@ import { configCommand } from "./commands/config.js";
 import { login, logout, refreshAuth, status } from "./commands/auth.js";
 import { chatCommand } from "./commands/chat.js";
 import { workCommand } from "./commands/work.js";
+import { WORKFLOW_ACTIONS, workflowCommand } from "./commands/workflow.js";
 import { sessionsCommand } from "./commands/sessions.js";
 import { notificationsCommand } from "./commands/notifications.js";
 import { permissionsCommand } from "./commands/permissions.js";
@@ -35,6 +36,12 @@ Usage:
   coderax work [objective]         Submit a durable cloud Work task and stream it
   coderax work <command>           submit | list | status | watch | attach | report
                                    cancel | resume | retry | resolve | uncertain | templates
+  coderax workflow <command>       environments | kinds | repos
+                                   run <kind> "<request>" | status | watch | attach
+                                   takeover | cancel | resume | retry | pause
+                                   diff | branch | commit | pr | ci | remediate
+                                   Kinds: inspect | architecture | generate | fix |
+                                   refactor | debug | tests | test-run | review | audit
   coderax sessions [list|show|switch|new|current]
   coderax agents                   Agent identities, availability and capabilities
   coderax models                   Models, cost class and the zero-cost route
@@ -63,6 +70,14 @@ Usage:
 Work templates:
   inspect | implement | test | diff | pr | review | ci
   coderax work --template implement "add the missing validation"
+
+Workflow engineering:
+  coderax workflow environments
+  coderax workflow run inspect "report the riskiest modules" --repo owner/name
+  coderax workflow run fix "the parser drops trailing comments" --detach
+  All execution is cloud-only. Delivery actions (branch, commit, pr, ci, diff,
+  remediate) require engine operations that contract 1.0.0 does not publish;
+  they report unavailable and never simulate or push.
 
 Global options:
   --engine-url <url>     WorkflowEngine URL (HTTPS, or HTTP on loopback)
@@ -103,13 +118,14 @@ const KNOWN_COMMANDS = new Set([
   "chat", "work", "sessions", "agents", "models", "notifications", "permissions",
   "login", "logout", "status", "auth", "engine", "doctor", "config", "completion",
   "products", "cloud", "projects", "update", "deploy", "health", "openapi", "call",
-  "help", "version",
+  "workflow", "help", "version",
 ]);
 
 const BOOLEAN_FLAGS = new Set([
   "help", "version", "json", "ndjson", "no-color", "quiet", "verbose", "once",
   "detach", "new", "refresh", "retry-submission", "approve", "deny", "approve-all",
-  "deny-all", "token-stdin", "unread", "no-watch",
+  "deny-all", "token-stdin", "unread", "no-watch", "confirm", "no-draft",
+  "allow-production", "allow-destructive",
 ]);
 
 const VALUE_FLAGS = new Set([
@@ -118,6 +134,7 @@ const VALUE_FLAGS = new Set([
   "mode", "budget-requests", "budget-input", "budget-output", "idempotency-key",
   "objective", "message", "max-reconnects", "task", "url", "data", "endpoint",
   "chat-path", "refresh-command", "credential-store", "theme", "output",
+  "repo", "base", "head", "branch",
 ]);
 
 const CONFIG_SET_FLAGS = new Set([
@@ -245,6 +262,26 @@ function preflight(positionals, flags) {
     }
   }
 
+  if (command === "workflow") {
+    const action = positionals[1];
+    if (!action || action === "help") return { call };
+    if (!WORKFLOW_ACTIONS.includes(action)) {
+      throw new UsageError(`unknown workflow command: ${action}. Run \`coderax workflow help\`.`);
+    }
+    if (action === "run" && !positionals[2]) {
+      throw new UsageError("workflow run requires a kind");
+    }
+    if (action === "branch" && !positionals[2]) {
+      throw new UsageError("workflow branch requires a branch name");
+    }
+    if (["diff", "ci", "remediate"].includes(action) && !positionals[2] && !flags.has("task")) {
+      throw new UsageError(`workflow ${action} requires a task id`);
+    }
+    if (flags.has("mode") && flags.get("mode") !== "cloud") {
+      throw new UsageError("workflow execution is cloud-only; --mode private is not supported");
+    }
+  }
+
   if (command === "permissions" && positionals[1] === "decide") {
     if (!positionals[2]) throw new UsageError("permissions decide requires a task id");
     if (!flags.has("approve") && !flags.has("deny")) {
@@ -316,6 +353,8 @@ async function dispatch(runtime, command, positionals, call, options) {
       return chatCommand(runtime, rest, { interactive: interactiveFactory(runtime) });
     case "work":
       return workCommand(runtime, rest, { interactive: interactiveFactory(runtime) });
+    case "workflow":
+      return workflowCommand(runtime, rest);
     case "sessions":
       return sessionsCommand(runtime, rest);
     case "agents":

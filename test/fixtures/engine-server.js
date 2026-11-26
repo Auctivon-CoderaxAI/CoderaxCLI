@@ -91,6 +91,10 @@ export async function startFixtureEngine({
   chatReply = null,
   bufferStart = 1,
   port = 0,
+  healthExtra = null,
+  readiness = null,
+  workSubmitStatus = null,
+  permissionDecisionStatus = null,
 } = {}) {
   const tasks = new Map();
   const conversations = new Map();
@@ -419,11 +423,11 @@ export async function startFixtureEngine({
       requests.push({ method: req.method, path: url.pathname, search: url.search, headers: req.headers, at: iso() });
 
       if (req.method === "GET" && url.pathname === "/v1/health") {
-        json(res, 200, health());
+        json(res, 200, { ...health(), ...(healthExtra ?? {}) });
         return;
       }
       if (req.method === "GET" && url.pathname === "/v1/ready") {
-        json(res, 200, { ready: true, missing: [], checks: [] });
+        json(res, 200, readiness ?? { ready: true, missing: [], checks: [] });
         return;
       }
       if (!auth(req)) {
@@ -480,6 +484,14 @@ export async function startFixtureEngine({
       }
 
       if (req.method === "POST" && url.pathname === "/v1/work") {
+        if (workSubmitStatus !== null) {
+          json(res, workSubmitStatus, problem(
+            workSubmitStatus,
+            workSubmitStatus === 403 ? "forbidden" : "unauthorized",
+            "the engine refused this owner write",
+          ));
+          return;
+        }
         const body = await readJson(req).catch(() => null);
         if (!body || typeof body.objective !== "string" || body.objective.length === 0) {
           json(res, 400, problem(400, "validation_failed", "objective is required"));
@@ -604,6 +616,14 @@ export async function startFixtureEngine({
           return;
         }
         if (action === "permissions" && req.method === "POST") {
+          if (permissionDecisionStatus !== null) {
+            json(res, permissionDecisionStatus, problem(
+              permissionDecisionStatus,
+              permissionDecisionStatus === 403 ? "forbidden" : "unauthorized",
+              "the engine refused this permission decision",
+            ));
+            return;
+          }
           const body = await readJson(req).catch(() => null);
           if (!body || typeof body.requestId !== "string" || !["approved", "denied"].includes(body.decision)) {
             json(res, 400, problem(400, "validation_failed", "requestId and decision are required"));

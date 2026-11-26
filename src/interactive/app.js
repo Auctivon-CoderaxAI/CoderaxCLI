@@ -2,6 +2,7 @@ import { CoderaxError, CancelledError, EXIT, UsageError } from "../errors.js";
 import { parseModelRef, newSubmissionKey, submitWork } from "../engine/submit.js";
 import { watchTask } from "../engine/stream.js";
 import { buildTemplateObjective, getTemplate, templateNames } from "../work/templates.js";
+import { buildWorkflowObjective, getWorkflowKind, workflowKindNames } from "../workflow/catalog.js";
 import { WorkPresenter } from "../ui/presenter.js";
 import { PromptSession, Spinner } from "../ui/prompt.js";
 import { renderTable } from "../ui/tables.js";
@@ -22,7 +23,7 @@ const SLASH_COMMANDS = [
   "/help", "/quit", "/exit", "/mode", "/chat", "/work", "/run", "/new",
   "/sessions", "/switch", "/tasks", "/status", "/report", "/attach", "/detach",
   "/cancel", "/resume", "/retry", "/agents", "/agent", "/models", "/model",
-  "/notifications", "/permissions", "/templates", "/multiline", "/verbose",
+  "/notifications", "/permissions", "/templates", "/workflow", "/multiline", "/verbose",
   "/clear", "/doctor",
 ];
 
@@ -281,25 +282,33 @@ export class InteractiveApp {
     await this.refreshCatalog();
   }
 
-  async submitTask(text, { templateName = null } = {}) {
+  async submitTask(text, { templateName = null, workflowKind = null } = {}) {
     const runtime = this.runtime;
     const client = await runtime.getEngine();
     const state = await runtime.state.load();
     const agent = state.active.agent ?? runtime.config.agent ?? "coderax";
     const model = parseModelRef(state.active.model ?? (runtime.config.model || undefined));
     const template = templateName ? getTemplate(templateName) : null;
+    const kind = workflowKind ? getWorkflowKind(workflowKind) : null;
     if (templateName && !template) {
       this.printError(new UsageError(`unknown template: ${templateName}`));
       return null;
     }
+    if (workflowKind && !kind) {
+      this.printError(new UsageError(`unknown workflow kind: ${workflowKind}. Choose one of ${workflowKindNames().join(", ")}`));
+      return null;
+    }
     try {
-      await client.requireCapability(agent, template?.requiresTools ? "tools" : null);
+      await client.requireCapability(agent, template?.requiresTools || kind?.requiresTools ? "tools" : null);
     } catch (error) {
       this.printError(error);
       return null;
     }
+    let objective = text;
+    if (template) objective = buildTemplateObjective(templateName, text);
+    if (kind) objective = buildWorkflowObjective(workflowKind, text, {});
     const request = {
-      objective: template ? buildTemplateObjective(templateName, text) : text,
+      objective,
       mode: "cloud",
       requireApproval: true,
       agent,
@@ -324,10 +333,24 @@ export class InteractiveApp {
     return submitted.task;
   }
 
-  async workTurn(text, { templateName = null } = {}) {
-    const task = await this.submitTask(text, { templateName });
+  async workTurn(text, { templateName = null, workflowKind = null } = {}) {
+    const task = await this.submitTask(text, { templateName, workflowKind });
     if (!task) return;
-    await this.runTask(task);
+    await this.runTask(task, { command: workflowKind ? "workflow.run" : "work.attach" });
+  }
+
+  async workflowTurn(kindName, text) {
+    const kind = getWorkflowKind(kindName);
+    if (!kind) {
+      this.runtime.write(`workflow kinds: ${workflowKindNames().join(", ")}`);
+      return;
+    }
+    if (!text) {
+      this.runtime.write(`usage: /workflow <kind> <request>  (kinds: ${workflowKindNames().join(", ")})`);
+      return;
+    }
+    this.mode = "work";
+    await this.workTurn(text, { workflowKind: kindName });
   }
 
   async runTask(task, { fromSeq = null, command = "work.attach", reattach = false } = {}) {
@@ -523,6 +546,16 @@ export class InteractiveApp {
         }
         this.mode = "work";
         await this.workTurn(tail.join(" "), { templateName: name });
+        return true;
+      }
+      case "/workflow": {
+        const [kindName, ...tail] = rest.split(/\s+/);
+        if (!kindName) {
+          runtime.write(`workflow kinds: ${workflowKindNames().join(", ")}`);
+          runtime.write("usage: /workflow <kind> <request>");
+          return true;
+        }
+        await this.workflowTurn(kindName, tail.join(" ").trim());
         return true;
       }
       case "/new": {
@@ -796,6 +829,7 @@ export class InteractiveApp {
       "  /chat [text]           switch to Chat and optionally send a turn",
       "  /work [text]           switch to Work and optionally submit a task",
       "  /run <template> [text] submit an engineering workflow template",
+      "  /workflow <kind> [text] submit an engineering kind (inspect, fix, review, ...)",
       "  /new                   start a new conversation in this mode",
       "",
       "Sessions and tasks",

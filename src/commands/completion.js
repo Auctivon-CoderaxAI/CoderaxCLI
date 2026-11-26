@@ -3,7 +3,18 @@ import { UsageError } from "../errors.js";
 export const COMMANDS = Object.freeze([
   "chat", "work", "sessions", "agents", "models", "notifications", "permissions",
   "login", "logout", "status", "engine", "doctor", "config", "completion",
-  "products", "cloud", "projects", "update", "deploy", "help", "version",
+  "products", "cloud", "projects", "update", "deploy", "workflow", "help", "version",
+]);
+
+const WORKFLOW_ACTIONS = Object.freeze([
+  "environments", "kinds", "repos", "run", "status", "watch", "attach", "takeover",
+  "cancel", "resume", "retry", "pause", "diff", "branch", "commit", "pr", "ci",
+  "remediate", "help",
+]);
+
+const WORKFLOW_KINDS = Object.freeze([
+  "inspect", "architecture", "generate", "fix", "refactor", "debug", "tests",
+  "test-run", "review", "audit",
 ]);
 
 const WORK_SUBCOMMANDS = Object.freeze([
@@ -31,6 +42,7 @@ _coderax() {
   previous="\${COMP_WORDS[COMP_CWORD-1]}"
   case "\${COMP_WORDS[1]}" in
     work) COMPREPLY=( $(compgen -W "${words(WORK_SUBCOMMANDS)} ${words(GLOBAL_FLAGS)}" -- "\${current}") ); return 0 ;;
+    workflow) COMPREPLY=( $(compgen -W "${words(WORKFLOW_ACTIONS)} ${words(WORKFLOW_KINDS)} ${words(GLOBAL_FLAGS)} --repo --base --head --branch --confirm --no-draft --detach" -- "\${current}") ); return 0 ;;
     engine) COMPREPLY=( $(compgen -W "health ready contract capabilities ${words(GLOBAL_FLAGS)}" -- "\${current}") ); return 0 ;;
     config) COMPREPLY=( $(compgen -W "show get set unset path ${words(GLOBAL_FLAGS)}" -- "\${current}") ); return 0 ;;
     completion) COMPREPLY=( $(compgen -W "bash zsh fish" -- "\${current}") ); return 0 ;;
@@ -50,6 +62,7 @@ _coderax() {
   fi
   case "\${words[2]}" in
     work) _values 'work command' ${WORK_SUBCOMMANDS.map((value) => `'${value}'`).join(" ")} ;;
+    workflow) _values 'workflow command' ${[...WORKFLOW_ACTIONS, ...WORKFLOW_KINDS].map((value) => `'${value}'`).join(" ")} ;;
     engine) _values 'engine command' health ready contract capabilities ;;
     config) _values 'config command' show get set unset path ;;
     completion) _values 'shell' bash zsh fish ;;
@@ -61,6 +74,7 @@ _coderax "$@"
       return `# fish completion for coderax
 complete -c coderax -f -a "${words(COMMANDS)}"
 complete -c coderax -n "__fish_seen_subcommand_from work" -f -a "${words(WORK_SUBCOMMANDS)}"
+complete -c coderax -n "__fish_seen_subcommand_from workflow" -f -a "${words([...WORKFLOW_ACTIONS, ...WORKFLOW_KINDS])}"
 complete -c coderax -n "__fish_seen_subcommand_from engine" -f -a "health ready contract capabilities"
 complete -c coderax -n "__fish_seen_subcommand_from config" -f -a "show get set unset path"
 complete -c coderax -n "__fish_seen_subcommand_from completion" -f -a "bash zsh fish"

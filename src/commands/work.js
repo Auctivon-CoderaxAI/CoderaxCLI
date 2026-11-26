@@ -172,7 +172,9 @@ async function startWatch({
   approveAll,
   denyAll,
   command = "work",
+  context = null,
 }) {
+  const attachCommand = command.startsWith("workflow.") ? "coderax workflow attach" : "coderax work attach";
   const controller = linkedController(runtime);
   const spinner = new Spinner({
     stream: runtime.stderrStream,
@@ -266,6 +268,7 @@ async function startWatch({
       ...summary,
       events,
       status: finalStatus,
+      ...(context ? { workflow: context } : {}),
     };
     runtime.emit(command, data);
     return exitForTaskState(summary.state);
@@ -277,7 +280,7 @@ async function startWatch({
         await runtime.state.upsertTask({ taskId: task.taskId, detached: true, updatedAt: new Date().toISOString() });
         runtime.write("");
         runtime.write(`Detached. Task ${task.taskId} keeps running in the cloud.`);
-        runtime.write(runtime.style.dim(`Reattach with: coderax work attach ${task.taskId}`));
+        runtime.write(runtime.style.dim(`Reattach with: ${attachCommand} ${task.taskId}`));
         return EXIT.OK;
       }
       if (reason === "cancel" || runtime.flags.has("cancel-on-interrupt")) {
@@ -298,13 +301,23 @@ async function startWatch({
   }
 }
 
-export async function submitCommand(runtime, positionals, { command = "work.submit" } = {}) {
-  const { text, template } = await resolveObjective(runtime, positionals);
-  const client = await runtime.getEngine();
+export async function submitCommand(runtime, positionals, {
+  command = "work.submit",
+  objectiveOverride = null,
+  template = null,
+  client: providedClient = null,
+  context = null,
+} = {}) {
+  const resolved = objectiveOverride
+    ? { text: objectiveOverride, template }
+    : await resolveObjective(runtime, positionals);
+  const { text } = resolved;
+  const activeTemplate = resolved.template;
+  const client = providedClient ?? await runtime.getEngine();
   const agent = taskAgent(runtime);
   const model = taskModel(runtime);
   const detach = runtime.flags.has("detach");
-  await ensureCapabilities(client, { agent, template, detach, model });
+  await ensureCapabilities(client, { agent, template: activeTemplate, detach, model });
   const conversationId = await activeConversation(runtime);
   const mode = runtime.flags.get("mode") ?? "cloud";
 
@@ -339,12 +352,14 @@ export async function submitCommand(runtime, positionals, { command = "work.subm
       accepted: submitted.accepted,
       task: { ...task, submissionKey: submitted.submissionKey },
       detached: true,
+      ...(context ? { workflow: context } : {}),
     };
     runtime.emit(command, data, () => {
       runtime.write(`${runtime.style.green("\u2713")} task ${task.taskId} accepted`);
       runtime.write(`  conversation ${task.conversationId}`);
       runtime.write(`  submission   ${submitted.submissionKey}`);
-      runtime.write(runtime.style.dim(`Attach with: coderax work attach ${task.taskId}`));
+      const attachCommand = command.startsWith("workflow.") ? "coderax workflow attach" : "coderax work attach";
+      runtime.write(runtime.style.dim(`Attach with: ${attachCommand} ${task.taskId}`));
     });
     return EXIT.OK;
   }
@@ -359,6 +374,7 @@ export async function submitCommand(runtime, positionals, { command = "work.subm
       approveAll: runtime.flags.has("approve-all"),
       denyAll: runtime.flags.has("deny-all"),
       command,
+      context,
     });
   } finally {
     prompt?.close();

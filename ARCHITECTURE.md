@@ -11,6 +11,7 @@ src/cli.js ── parse ── preflight ── dispatch ── exit code
   │                                      │
   │                                      ├─ interactive/app.js
   │                                      ├─ commands/work.js ── engine/{client,submit,stream}
+  │                                      ├─ commands/workflow.js ── workflow/{catalog,environment}
   │                                      ├─ commands/chat.js ── engine/client.js
   │                                      ├─ commands/{agents,models,...} ── engine/client.js
   │                                      └─ commands/deploy.js ── legacy client.js
@@ -33,7 +34,9 @@ src/cli.js ── parse ── preflight ── dispatch ── exit code
 | `src/engine/client.js` | `/v1` requests, Problem mapping, contract negotiation, auth refresh, capability checks |
 | `src/engine/stream.js` | SSE cursor replay, reconnect, dedupe, gap detection, final status reconciliation |
 | `src/engine/submit.js` | At-most-once Work submission and the idempotency ledger |
-| `src/commands/*` | Chat, Work, auth, config, sessions, notifications, permissions, completion, deploy |
+| `src/commands/*` | Chat, Work, workflow, auth, config, sessions, notifications, permissions, completion, deploy |
+| `src/workflow/catalog.js` | Engineering kinds, delivery-operation mapping, branch/repository/task validation, delivery policy |
+| `src/workflow/environment.js` | Contract, readiness, owner-session and agent-capability verification; no trust from server flags |
 | `src/interactive/app.js` | Readline shell, slash commands, prompt state, approvals, detachment |
 | `src/ui/*` | ANSI, incremental Markdown/code rendering, Spinner, PromptSession, tables, presenter |
 | `src/work/templates.js` | Cloud-work objectives and their capability requirements |
@@ -64,6 +67,28 @@ token-refresh command.
    exhausted reconnect, fetch `GET /v1/work/{taskId}` and use the authoritative
    state and artifacts.
 9. Exit with the task's state and the shared exit-code table.
+
+## Engineering control plane
+
+`coderax workflow` is a mapping layer, not a second engine. `catalog.js` declares
+ten engineering kinds as objectives for the published `POST /v1/work`
+operation, plus the delivery operations the CLI needs but contract `1.0.0` does
+not publish. It contains no planner, scheduler, task state machine or
+permission policy.
+
+`environment.js` proves the exact contract, engine readiness, an
+owner-authenticated `GET /v1/agents` call and the selected agent's capabilities
+before submission. It reports deployment and repository identity as
+unsupported, because the contract publishes neither. A server-supplied
+`verified` or `authorized` field is not read; the strict contract validator
+rejects unknown fields.
+
+Delivery actions (`diff`, `branch`, `commit`, `pr`, `ci`, `remediate`) and
+`repos`/`pause` have no published operation and therefore send nothing. They
+exit `6` with the required operation name instead of inventing a route or
+simulating a result. Implemented task controls (`status`, `watch`, `attach`,
+`takeover`, `cancel`, `resume`, `retry`) reuse the durable Work machinery and
+the same local journal.
 
 ## Local durability
 
@@ -96,6 +121,10 @@ mapped by `src/errors.js`; the exit code is part of the public interface.
 ## Deliberate constraints
 
 - No local workflow engine or fallback execution path.
+- No simulated delivery: an operation the contract does not publish is
+  reported unavailable, never approximated with a Work objective or a local
+  command.
+- No server flag is treated as trust or authorization; the engine decides.
 - No provider API keys read, stored, logged or inherited.
 - No anonymous owner operations.
 - No redirects, cookies, telemetry or background daemon.

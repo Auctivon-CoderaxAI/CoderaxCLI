@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+### Cloud engineering control plane
+
+- `coderax workflow` with environment verification, engineering kinds,
+  durable task control and an explicit delivery policy.
+- Ten engineering kinds (`inspect`, `architecture`, `generate`, `fix`,
+  `refactor`, `debug`, `tests`, `test-run`, `review`, `audit`) map to the
+  published `POST /v1/work` operation; nothing executes locally.
+- `workflow environments` verifies the exact contract, readiness, an
+  owner-authenticated `GET /v1/agents` call and agent capabilities. It reports
+  deployment and repository identity as unsupported and `trust: "unverified"`;
+  server `verified`/`authorized` flags are rejected as contract drift.
+- `repos`, `pause`, `diff`, `branch`, `commit`, `pr`, `ci` and `remediate` report
+  the required engine operation and exit `6`; no route is invented and no
+  delivery is simulated.
+- PR-only policy, protected-branch validation, repository/task/branch input
+  validation, no direct push, force push or merge switch.
+- `--confirm`, `--allow-production` and `--allow-destructive` never substitute
+  for server authorization.
+- Interactive `/workflow <kind> <request>` and shell completion.
+- 30 new tests, including real HTTP adversarial tests for unauthorized writes,
+  server-trust claims, protected branches, backend permission denial and
+  unavailable delivery operations. Full suite: 210 passed, 3 skipped.
+
 ## 1.0.0 — 2026-11-26
 
 First complete standalone terminal client for the Coderax WorkflowEngine

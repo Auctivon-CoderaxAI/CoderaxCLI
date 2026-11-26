@@ -88,6 +88,8 @@ you used.
 - `/notifications` reads durable completion notifications; the prompt shows a
   `●N` unread indicator and `coderax status` reports both server and local
   unread counts.
+- `/workflow <kind> <request>` submits an engineering kind (`inspect`, `fix`,
+  `review`, `audit`, ...) without leaving the prompt.
 - `/templates` lists the engineering presets.
 - `/multiline` toggles blank-line submission; when off, a trailing `\` continues
   the current message.
@@ -168,6 +170,38 @@ These are objectives sent to the engine, not a second workflow engine. Each
 requires the selected agent to publish `tools: true`; if the engine reports
 `tools: false`, the CLI exits `7` with `CAPABILITY_UNSUPPORTED` and names the
 missing capability. It does not simulate a coding run locally.
+
+### Cloud engineering control plane
+
+```sh
+coderax workflow environments
+coderax workflow kinds
+coderax workflow run inspect "report the riskiest modules" --repo owner/name
+coderax workflow run fix "the parser drops trailing comments" --detach
+coderax workflow attach <taskId>
+coderax workflow cancel <taskId>
+```
+
+`workflow run <kind>` submits a cloud objective for `inspect`, `architecture`,
+`generate`, `fix`, `refactor`, `debug`, `tests`, `test-run`, `review` or
+`audit`. It uses the same at-most-once submission, durable streaming, replay,
+approval and cancellation machinery as `work`, so a detached task survives the
+terminal and can be inspected from Coderax Web or another terminal.
+
+`workflow environments` proves the exact contract, engine readiness and an
+owner-authenticated `GET /v1/agents` call. It reports `trust: "unverified"`
+when the contract publishes no deployment identifier; a server-supplied
+`verified`/`authorized` flag is never treated as authorization. Every write is
+still decided by the engine for the authenticated owner.
+
+Delivery commands (`repos`, `pause`, `diff`, `branch`, `commit`, `pr`, `ci`,
+`remediate`) require dedicated engine operations that contract `1.0.0` does not
+publish. They report `unavailable`, exit `6` and send no request; the CLI does
+not invent a route or simulate the result. `--confirm` gates a mutation
+locally but never substitutes for server authorization, and
+`--allow-production`/`--allow-destructive` cannot override owner approval.
+See [`docs/WORKFLOW.md`](docs/WORKFLOW.md) for the operation mapping and the
+exact backend gaps.
 
 ## Reliability
 
@@ -275,7 +309,7 @@ used.
 ```sh
 npm ci
 npm run check          # syntax, ESM boundary, zero-dependency and version checks
-npm test               # 180 unit, CLI, contract, integration and interactive tests
+npm test               # 210 unit, CLI, contract, integration and interactive tests
                        # (3 real-engine tests skip without a built checkout)
 npm run test:contract  # vendored pin and local mirror; add an engine checkout for cross-repo
 WORKFLOW_ENGINE_ROOT=../Coderax-WorkflowEngine npm run test:engine
@@ -297,6 +331,13 @@ with an in-memory store. It is test-only; the CLI has no local engine mode.
   `CAPABILITY_UNSUPPORTED`; they are not faked locally.
 - The `pr` template prepares a PR body but never pushes or opens a pull request.
   The CLI holds no GitHub token.
+- Repository discovery, pause, diff, branch, commit, PR creation, CI status and
+  review remediation need dedicated WorkflowEngine operations that contract
+  `1.0.0` does not publish. `coderax workflow` reports them as `unavailable`
+  instead of simulating them; see [`docs/WORKFLOW.md`](docs/WORKFLOW.md).
+- Contract `1.0.0` publishes no deployment identifier and no repository id, so
+  `workflow environments` reports `trust: "unverified"` even after proving the
+  contract and owner session. Server flags are never treated as trust.
 - The deployment/OpenAPI surface (`coderax deploy ...`, `coderax call`,
   `products`, `cloud`, `projects`) is retained for legacy Coderax deployments
   and is separate from the WorkflowEngine commands.

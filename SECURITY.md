@@ -76,6 +76,30 @@ request. `--approve-all` and `--deny-all` are opt-in non-interactive policies.
 A non-interactive run without a policy exits `8` rather than silently granting
 or hanging.
 
+## Workflow authorization and delivery
+
+`coderax workflow` uses the same owner bearer token and the same server-side
+authorization as `work`. Before submitting, it verifies the exact contract,
+engine readiness, an owner-authenticated `GET /v1/agents` call and the selected
+agent's capabilities. It does not treat a server-supplied `verified` or
+`authorized` field as trust; the strict contract validators reject unknown
+fields.
+
+A local `--confirm` flag gates a delivery mutation but is not authorization.
+`--allow-production` and `--allow-destructive` record local intent only and
+cannot unlock a command or override an engine refusal. A `401`/`403` from the
+engine is surfaced with exit `3` and is never retried as a new write.
+
+Delivery is PR-only. There is no direct-push, force-push or merge command, and
+those switches are rejected as unknown options. Protected branches can be a
+pull-request base but never a head. Branch names and repository references are
+validated before any request, and task ids cannot contain path separators.
+
+Contract `1.0.0` publishes no repository, diff, branch, commit, pull-request,
+CI, pause or delivery-remediation operation. Those commands exit `6` without
+sending a request. The CLI does not invent a route, execute Git locally or
+simulate a successful delivery.
+
 ## Cloud-only execution
 
 The CLI never runs model inference, a local agent, repository builds, tests,
