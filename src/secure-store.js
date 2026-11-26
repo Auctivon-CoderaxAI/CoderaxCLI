@@ -57,6 +57,11 @@ export async function hardenSecurePath(path, options = {}) {
   }
   const grant = kind === "directory" ? `${account}:(OI)(CI)F` : `${account}:F`;
   try {
+    // `/inheritance:r` removes inherited ACEs but leaves explicit ones (for
+    // example a BUILTIN\Users ACE added after the file was created). Reset the
+    // DACL to its default first, then replace inheritance with one explicit
+    // grant for the current account.
+    await runCommand("icacls", [path, "/reset"]);
     await runCommand("icacls", [path, "/inheritance:r", "/grant:r", grant]);
   } catch (error) {
     throw new SecureStoreError(

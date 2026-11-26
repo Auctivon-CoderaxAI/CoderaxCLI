@@ -103,6 +103,7 @@ test("Windows hardening removes inheritance and grants only the current account"
     },
   });
   assert.deepEqual(calls, [
+    { command: "icacls", args: ["C:\\tmp\\file", "/reset"] },
     { command: "icacls", args: ["C:\\tmp\\file", "/inheritance:r", "/grant:r", "tester:F"] },
   ]);
 });
