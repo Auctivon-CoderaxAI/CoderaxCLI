@@ -56,14 +56,20 @@ const GLOBAL_PREFIX_MARKERS = Object.freeze([
 
 export function detectInstallMethod(modulePath = MODULE_PATH) {
   const path = portable(realpathOrSelf(modulePath));
-  if (path.includes("/node_modules/coderax-cli/")) {
+  const packageIndex = path.lastIndexOf(`/node_modules/${PACKAGE_NAME}/`);
+  if (packageIndex !== -1) {
     if (GLOBAL_PREFIX_MARKERS.some((marker) => path.includes(marker))) return "npm-global";
-    // A custom `npm install --global --prefix` has no marker in its path, and
-    // its package layout is identical to a local install. npm does leave a
-    // difference: a local install links the binary under node_modules/.bin,
-    // while a global install puts the shim at the prefix root (or prefix/bin).
-    const localShim = join(PACKAGE_ROOT, "..", ".bin", process.platform === "win32" ? "coderax.cmd" : "coderax");
-    return existsSync(localShim) ? "npm-local" : "npm-global";
+    const prefix = path.slice(0, packageIndex + 1);
+    const shim = process.platform === "win32" ? "coderax.cmd" : "coderax";
+    const localShim = join(prefix, "node_modules", ".bin", shim);
+    if (existsSync(localShim)) return "npm-local";
+
+    // POSIX global npm installs match the lib/node_modules marker above.
+    // On Windows, a custom global prefix shares the local package layout,
+    // but npm puts its global launcher directly in the prefix.
+    if (process.platform === "win32" && existsSync(join(prefix, shim))) return "npm-global";
+    // npm can install a project dependency with bin-links disabled.
+    return "npm-local";
   }
   // The standalone build ships this marker at the package root, so a custom
   // --prefix is recognised without assuming the default ~/.coderax/cli path.
