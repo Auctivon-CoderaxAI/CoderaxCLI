@@ -239,7 +239,9 @@ node "$TMP/extract/lib/safe-extract.mjs" "$ARCHIVE" "$STAGING" >/dev/null ||
 
 # The archive contains a single top-level directory named for the version.
 EXTRACTED="$STAGING/coderax-cli-$VERSION"
-[ -d "$EXTRACTED" ] || die "unexpected archive layout: coderax-cli-$VERSION/ is missing" 3
+if [ ! -d "$EXTRACTED" ]; then
+  die "unexpected archive layout: coderax-cli-$VERSION/ is missing (staging contains: $(ls -A "$STAGING" 2>&1 | tr '\n' ' '))" 3
+fi
 [ -f "$EXTRACTED/src/cli.js" ] || die "unexpected archive layout: src/cli.js is missing" 3
 [ -f "$EXTRACTED/bin/coderax" ] || die "unexpected archive layout: bin/coderax is missing" 3
 

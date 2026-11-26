@@ -3,7 +3,11 @@ name: ci
 on:
   push:
     branches: [main]
+  # Only code changes start the matrix. A plain `pull_request` also fires on
+  # edits, labels and bot comments; with cancel-in-progress that killed a
+  # running Windows job when a review bot updated the PR body.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read

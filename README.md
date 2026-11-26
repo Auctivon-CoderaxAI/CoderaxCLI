@@ -38,17 +38,27 @@ A token is a secret, not a configuration value. It is refused as a command-line
 argument because argv is visible in shell history and process listings:
 
 ```sh
-coderax login                  # prompts at a terminal with echo disabled
-printf '%s' "$TOKEN" | coderax login          # CI, no TTY
-coderax login --token-file ~/.coderax/token   # file must be 0600
+coderax login
+printf '%s' "$TOKEN" | coderax login
+coderax login --token-file ~/.coderax/token
 ```
 
+Interactive login prompts at a terminal with echo disabled. Piped input is
+supported for CI environments. Token files must have restricted permissions
+(`0600` on POSIX systems).
+
 `CODERAX_TOKEN` is also read for CI. `coderax login --token ...` exits `2` with
-an explanation. On Windows the token is stored with DPAPI; on Linux with the
+an explanation.
+
+On Windows the token is stored with DPAPI; on Linux with the
 Secret Service when `secret-tool` is available; otherwise it goes into the
 `0600` config file. macOS uses the `0600` file because the Keychain command-line
-tool has no interface that accepts a secret without putting it in argv. See
-[SECURITY.md](SECURITY.md).
+tool has no interface that accepts a secret without putting it in argv.
+
+The file-based credential fallback is a current implementation limitation
+and is not equivalent to encrypted operating-system credential storage.
+
+See [SECURITY.md](SECURITY.md).
 
 ```sh
 coderax status
@@ -91,7 +101,7 @@ else. No administrator rights, services, daemons, or open ports.
 | Release provenance verification (`--provenance`) | ✅ installer support; attestations must be published per release |
 | npm registry publication | ⛔ not enabled — owner authorization required |
 | Automatic updates | ⛔ deliberately not implemented |
-| File upload, agent mutation | ⛔ not implemented — use `call` |
+| File upload, agent mutation | ⛔ not implemented — use `call` where supported by the backend |
 
 ## Compatibility
 
@@ -107,8 +117,9 @@ contract and runs against a deployment release:
 never as compatible. The previous `>=0.8.0 <1.0.0` "WorkflowEngine" range was a
 guess: the reference deployment reports `v0.8.8`, its `/health` endpoint
 returns plain text with no version, and the separate
-`Coderax-WorkflowEngine` package is `0.1.0`. See
-[docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
+`Coderax-WorkflowEngine` package is `0.1.0`.
+
+See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
 
 ## Use
 
@@ -128,19 +139,42 @@ coderax openapi
 coderax call GET /api/models --json
 ```
 
-`openapi`, `agents`, and `models` use the deployment's OpenAPI document. `call`
-uses the path you supply. A missing discovered route fails with
-`OPERATION_NOT_FOUND`; a missing backend capability fails closed with
-`CAPABILITY_UNAVAILABLE`.
+`openapi`, `agents`, and `models` use the deployment's OpenAPI document.
+`call` uses the path you supply.
+
+A missing discovered route fails with `OPERATION_NOT_FOUND`; a missing
+backend capability fails closed with `CAPABILITY_UNAVAILABLE`.
+
+## Contract behavior and limitations
+
+| Situation | CLI behaviour |
+| --- | --- |
+| No API version in metadata or response headers during negotiation | `API_VERSION_UNVERIFIED`; `--strict` exits `6` |
+| Chat stream has no IDs | `CURSOR_UNSUPPORTED`; POST is not retried |
+| Run stream replays seen IDs | `CURSOR_IGNORED`; snapshots stay idempotent |
+| No `/api/repos` | `CAPABILITY_UNAVAILABLE` (exit `6`); pass `--repo` to `work submit` |
+| No `/api/workflows` | Durable commands exit `6`; chat is unaffected |
+| No `/api/user` | `OWNER_UNVERIFIABLE`; nothing is stored |
+| JSON `200` on an SSE route | `CONTRACT_VIOLATION` (exit `7`) |
+
+See [`docs/CONTRACT.md`](docs/CONTRACT.md) for the exact routes, frame shapes
+and reconnection rules, and [`BACKEND-DEFECTS.md`](BACKEND-DEFECTS.md) for the
+changes requested from the WorkflowEngine owners.
 
 ## Upgrade, rollback, uninstall
 
 ```sh
-coderax update                 # prints upgrade commands; never installs anything
-coderax version --json         # what is installed, and how
-coderax uninstall --dry-run    # what user data would be removed
-coderax uninstall --yes        # remove user data (the program stays)
+coderax update
+coderax version --json
+coderax uninstall --dry-run
+coderax uninstall --yes
 ```
+
+- `coderax update` prints upgrade commands and never installs anything
+  automatically.
+- `coderax version --json` reports what is installed and how.
+- `coderax uninstall --dry-run` reports which user data would be removed.
+- `coderax uninstall --yes` removes user data; the program remains installed.
 
 Standalone upgrades are staged and committed with a rename. A failed swap
 restores the previous version, and `--force` keeps the replaced directory at
@@ -154,6 +188,7 @@ restores the previous version, and `--force` keeps the replaced directory at
 
 Every release publishes a GitHub Release with an npm tarball, a POSIX standalone
 tarball, a Windows zip, `SHA256SUMS`, a release manifest, and an SPDX SBOM.
+
 Builds are reproducible: fixed metadata, sorted entries, fixed compression and a
 fixed `SOURCE_DATE_EPOCH`; `npm run repro` rebuilds twice and compares hashes.
 
@@ -162,11 +197,16 @@ The installers verify checksums by default, extract with a safe extractor
 build provenance with `--provenance` when the release publishes attestations.
 
 Maintainer documentation: [docs/RELEASE.md](docs/RELEASE.md).
-Supported runtimes and deployment versions: [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
+
+Supported runtimes and deployment versions:
+[docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
 
 ```sh
-npm run release:check    # syntax, tests, build, verify, repro, install-test
+npm run release:check
 ```
+
+The release check includes syntax validation, tests, build verification,
+reproducibility checks and installation tests.
 
 ## Interactive terminal
 
@@ -253,12 +293,33 @@ redacted if a server ever echoes it.
 
 ## Development
 
+All development, builds, automated tests and engineering workloads must
+execute in authorized cloud environments with zero additional spending.
+
+The owner's personal computer is used only for lightweight CLI access,
+authentication and control of cloud-hosted workloads.
+
+The following development commands are intended for a cloud workspace:
+
 ```sh
-npm ci --ignore-scripts   # dependency tree is empty by design
-npm test                  # unit, CLI, contract, release and redaction tests
-npm run check             # syntax check for every module
-npm run build             # deterministic artifacts in dist/
-npm run verify            # checksums, archive contents, extractor integrity
-npm run install-test      # install → auth → compat states → upgrade → uninstall
-npm run repro             # two builds, identical hashes
+npm ci --ignore-scripts
+npm test
+npm run check
+npm run build
+npm run verify
+npm run install-test
+npm run repro
 ```
+
+| Command | Purpose |
+| --- | --- |
+| `npm ci --ignore-scripts` | Install the locked dependency tree |
+| `npm test` | Unit, CLI, contract, release and redaction tests |
+| `npm run check` | Syntax check for every module |
+| `npm run build` | Generate deterministic artifacts in `dist/` |
+| `npm run verify` | Verify checksums, archive contents and extractor integrity |
+| `npm run install-test` | Verify installation, authentication, compatibility, upgrade and uninstall |
+| `npm run repro` | Build twice and verify identical hashes |
+
+No local AI inference, Ollama, WSL, local containers, local databases, or
+background agent services are required.
