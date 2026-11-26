@@ -50,7 +50,8 @@ foreach ($target in $targets) {
 # cmd.exe, so inspect both the literal text and the embedded payload.
 if (Test-Path -LiteralPath $launcher) {
   $content = Get-Content -Raw -LiteralPath $launcher
-  $marker = $Prefix.TrimEnd([char]'\') + '\'
+  $prefixPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Prefix)
+  $marker = $prefixPath.TrimEnd([char]'\') + '\'
   $owned = [bool]($content -and $content.Contains($marker))
   if (-not $owned -and $content) {
     $pattern = 'Buffer\.from\(''([A-Za-z0-9+/=]+)'',\s*''base64''\)'
