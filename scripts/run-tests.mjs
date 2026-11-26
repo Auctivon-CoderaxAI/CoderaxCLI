@@ -8,8 +8,18 @@
  * diagnose from outside the repository.
  */
 import { spawnSync } from "node:child_process";
+import { readdirSync } from "node:fs";
+import { join } from "node:path";
 
-const result = spawnSync(process.execPath, ["--test"], {
+// Pass the suite explicitly. With no arguments Node also treats helper scripts
+// whose names look like tests (scripts/install-test.mjs) as test files, which
+// would run the full installation acceptance before release artifacts exist.
+const files = readdirSync("test")
+  .filter((name) => name.endsWith(".test.js"))
+  .sort()
+  .map((name) => join("test", name));
+
+const result = spawnSync(process.execPath, ["--test", ...files], {
   encoding: "utf8",
   env: process.env,
 });
