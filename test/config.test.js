@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { verifySecurePath } from "../src/secure-store.js";
 import {
   ConfigError,
   describeConfig,
@@ -210,6 +212,28 @@ test("creates the config directory with mode 0700", async () => {
 
   assert.equal(received.mode, 0o700);
   assert.equal(received.recursive, true);
+});
+
+test("Windows config and directory ACLs are restricted to the current account", async (t) => {
+  if (process.platform !== "win32") {
+    t.skip("runs on the Windows GitHub runner");
+    return;
+  }
+  const directory = await mkdtemp(join(tmpdir(), "coderax-win-config-"));
+  const path = join(directory, "config.json");
+  await saveConfig({ baseUrl: "https://coderax.example.com" }, { filePath: path });
+
+  const file = await verifySecurePath(path);
+  assert.equal(file.ok, true, file.detail);
+  const dir = await verifySecurePath(directory, { kind: "directory" });
+  assert.equal(dir.ok, true, dir.detail);
+
+  // A broad inherited/added ACE must be repaired before the file is trusted.
+  execFileSync("icacls", [path, "/grant", "*S-1-5-32-545:(R)"]);
+  assert.equal((await verifySecurePath(path)).reason, "ACL_TOO_BROAD");
+  const loaded = await loadConfig({ env: {}, filePath: path });
+  assert.equal(loaded.baseUrl, "https://coderax.example.com");
+  assert.equal((await verifySecurePath(path)).ok, true);
 });
 
 test("a failed atomic replace does not report success", async () => {

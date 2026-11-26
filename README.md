@@ -54,8 +54,9 @@ Credentials live only in an OS facility:
 There is **no plaintext fallback**. If no store is available, login fails with
 `CREDENTIAL_STORE_UNAVAILABLE`; `auth status` and `doctor` explain how to fix it.
 The config file contains deployment settings only and is written atomically with
-mode `0600`. `saveConfig` rejects token, refresh-token, password, client-secret
-and API-key fields.
+mode `0600`; on Windows the shared secure-store helper restricts and verifies
+its ACL (and the DPAPI ciphertext ACL) with `icacls`. `saveConfig` rejects token,
+refresh-token, password, client-secret and API-key fields.
 
 For headless deployments and CI, pipe a deployment-issued session token:
 

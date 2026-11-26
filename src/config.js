@@ -1,6 +1,7 @@
 import { chmod, lstat, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { ensureSecureDirectory, ensureSecureFile } from "./secure-store.js";
 
 export class ConfigError extends Error {
   constructor(code, message) {
@@ -94,6 +95,21 @@ async function assertRegularFile(path) {
 
 async function readStoredConfig(path, readFileImpl) {
   await assertRegularFile(path);
+  // Windows ignores POSIX modes. Repair and verify the ACL before trusting a
+  // config that another process (or an older CLI) may have created with
+  // inherited BUILTIN\Users access.
+  if (process.platform === "win32") {
+    try {
+      await ensureSecureFile(path);
+    } catch (error) {
+      if (error?.reason !== "MISSING") {
+        throw new ConfigError(
+          "CONFIG_PERMISSIONS",
+          `could not restrict permissions on ${path}: ${error.message}`,
+        );
+      }
+    }
+  }
   try {
     const raw = await readFileImpl(path, "utf8");
     const parsed = JSON.parse(raw);
@@ -176,6 +192,16 @@ async function writeStoredConfig(
   } = {},
 ) {
   await mkdirImpl(dirname(path), { recursive: true, mode: 0o700 });
+  if (process.platform === "win32") {
+    try {
+      await ensureSecureDirectory(dirname(path));
+    } catch (error) {
+      throw new ConfigError(
+        "CONFIG_PERMISSIONS",
+        `could not restrict permissions on ${dirname(path)}: ${error.message}`,
+      );
+    }
+  }
 
   // Write a fresh 0600 file and atomically replace the config, so an existing
   // world-readable file never receives secret material even for an instant.
@@ -189,7 +215,13 @@ async function writeStoredConfig(
         throw new ConfigError("CONFIG_PERMISSIONS", `could not restrict permissions on ${tempPath}`);
       }
     }
+    if (process.platform === "win32") {
+      await ensureSecureFile(tempPath);
+    }
     await renameImpl(tempPath, path);
+    if (process.platform === "win32") {
+      await ensureSecureFile(path);
+    }
   } catch (error) {
     try {
       await unlinkImpl(tempPath);
@@ -197,6 +229,9 @@ async function writeStoredConfig(
       // Nothing to clean up.
     }
     if (error instanceof ConfigError) throw error;
+    if (error?.code === "STORE_PERMISSIONS") {
+      throw new ConfigError("CONFIG_PERMISSIONS", error.message);
+    }
     throw new ConfigError("CONFIG_WRITE_FAILED", `could not write ${path} atomically`);
   }
 }

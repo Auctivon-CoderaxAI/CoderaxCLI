@@ -5,6 +5,7 @@ import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promi
 import { dirname, join } from "node:path";
 import { redact } from "./client.js";
 import { configDir } from "./config.js";
+import { ensureSecureDirectory, ensureSecureFile } from "./secure-store.js";
 
 /**
  * Credentials live in an operating-system credential store, never in the
@@ -293,6 +294,12 @@ function windowsDpapiStore({ run, env, platform, directory }) {
   async function get(account) {
     if (!available) throw credentialError("CREDENTIAL_STORE_UNAVAILABLE", detail);
     const path = fileFor(account);
+    try {
+      await ensureSecureFile(path);
+    } catch (error) {
+      if (error?.reason === "MISSING") return null;
+      throw credentialError("CREDENTIAL_STORE_FAILED", `could not secure the DPAPI credential file: ${error.message}`);
+    }
     let ciphertext;
     try {
       ciphertext = await readFile(path, "utf8");
@@ -325,7 +332,7 @@ function windowsDpapiStore({ run, env, platform, directory }) {
     if (result.code !== 0) throw storeFailure(result, "write", secret);
     const ciphertext = result.stdout.trim();
     if (ciphertext === "") throw credentialError("CREDENTIAL_WRITE_FAILED", "Windows DPAPI returned no ciphertext");
-    await mkdir(credentialDirectory, { recursive: true, mode: 0o700 });
+    await ensureSecureDirectory(credentialDirectory);
     const path = fileFor(account);
     const temporary = `${path}.${process.pid}.${Date.now().toString(36)}.tmp`;
     try {
@@ -333,10 +340,11 @@ function windowsDpapiStore({ run, env, platform, directory }) {
       try {
         await chmod(temporary, 0o600);
       } catch {
-        // Windows does not implement POSIX modes; DPAPI still binds the data to
-        // the current user account.
+        // Windows does not implement POSIX modes; the ACL and DPAPI protect it.
       }
+      await ensureSecureFile(temporary);
       await rename(temporary, path);
+      await ensureSecureFile(path);
     } catch {
       try {
         await unlink(temporary);

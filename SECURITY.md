@@ -14,11 +14,13 @@ SHA-256 of the normalized deployment URL:
 | --- | --- | --- |
 | macOS | Keychain (`/usr/bin/security`) | stdin via `security -i`, never argv |
 | Linux | Secret Service (`secret-tool`) | stdin |
-| Windows | DPAPI `CurrentUser` | PowerShell stdin; encrypted file under `%APPDATA%` |
+| Windows | DPAPI `CurrentUser` | PowerShell stdin; encrypted file under `%APPDATA%`, ACL restricted with `icacls` |
 
 There is **no plaintext-file fallback**. When no OS store is available, login
 fails with `CREDENTIAL_STORE_UNAVAILABLE`; automation should use
 `CODERAX_TOKEN`, which is read from the environment and never persisted.
+
+On Windows, POSIX mode bits are ignored. The shared secure-store helper removes inherited ACLs and grants the current account explicit access to the config directory, the atomically written config file and the DPAPI ciphertext file. It verifies the resulting ACL with `icacls`; a file that still grants Everyone, Authenticated Users or BUILTIN\Users is repaired when safe or rejected with `CONFIG_PERMISSIONS`/`STORE_PERMISSIONS`. This is the same implementation used by the interactive terminal for private history and attachment files.
 
 Credentials never enter:
 
