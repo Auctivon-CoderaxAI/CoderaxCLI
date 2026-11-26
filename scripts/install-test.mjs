@@ -219,7 +219,6 @@ const CAPABILITIES = [
  */
 async function withEngine(mode, run) {
   const authorization = `Bearer ${TOKEN}`;
-  const compatible = mode !== "api-incompatible";
   const apiVersion = mode === "api-incompatible" ? "2" : mode === "unavailable" ? null : "1";
   const deploymentVersion = mode === "older" ? "0.7.9" : mode === "unavailable" ? null : "0.8.8";
   const unauthenticated = mode === "unauthenticated";
@@ -228,7 +227,14 @@ async function withEngine(mode, run) {
     const url = new URL(req.url, "http://127.0.0.1");
     const authenticated = req.headers.authorization === authorization;
     const json = (status, payload) => {
-      res.writeHead(status, { "content-type": "application/json", "x-coderax-api-version": compatible ? "1" : "2" });
+      // An unavailable deployment publishes no version signal at all: no
+      // /api/meta document, no OpenAPI document and no header. The SDK treats
+      // an x-coderax-api-version response header as authoritative, so sending
+      // one here would make the "unknown" case advertise API 1.
+      res.writeHead(status, {
+        "content-type": "application/json",
+        ...(apiVersion === null ? {} : { "x-coderax-api-version": apiVersion }),
+      });
       res.end(JSON.stringify(payload));
     };
     if (unauthenticated) return json(401, { message: "unauthorized" });
