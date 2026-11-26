@@ -483,6 +483,13 @@ try {
 
       const configMode = (await stat(configPath)).mode & 0o777;
       if (!IS_WINDOWS) assert.equal(configMode, 0o600, `config mode is ${configMode.toString(8)}`);
+
+      // Later scenarios start fresh ephemeral deployments on new ports. A
+      // stored credential is deliberately bound to its origin, so use the
+      // supported process-scoped token for those scenarios after proving the
+      // real OS store and owner gate above.
+      fallbackToken = true;
+      env.CODERAX_TOKEN = TOKEN;
       return "owner verified, token stored 0600, no token in output";
     });
   });
