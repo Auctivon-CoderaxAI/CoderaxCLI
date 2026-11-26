@@ -98,8 +98,8 @@ const OWNER_SID = "S-1-5-21-1111-2222-3333-1001";
 function windowsRun(aclOutput, { whoami = WHOAMI, onCall = () => {} } = {}) {
   return async (command, args, options) => {
     onCall({ command, args, options });
-    if (command === "whoami") return whoami;
-    if (command === "powershell.exe" || command === "pwsh") return { stdout: aclOutput };
+    if (/(^|\\)whoami(\.exe)?$/i.test(command)) return whoami;
+    if (/(^|\\)(powershell|pwsh)(\.exe)?$/i.test(command)) return { stdout: aclOutput };
     throw new Error(`unexpected command: ${command}`);
   };
 }
@@ -112,8 +112,9 @@ test("Windows hardening replaces the DACL by SID, not by display name", async ()
     runCommand: windowsRun("", { onCall: (call) => calls.push(call) }),
   });
   assert.equal(calls.length, 2);
-  assert.equal(calls[0].command, "whoami");
-  assert.equal(calls[1].command, "powershell.exe");
+  assert.match(calls[0].command, /(^|\\)whoami(\.exe)?$/i);
+  assert.deepEqual(calls[0].args, ["/user", "/fo", "csv", "/nh"]);
+  assert.match(calls[1].command, /(^|\\)powershell(\.exe)?$/i);
   assert.ok(calls[1].args.includes("-EncodedCommand"));
   assert.equal(calls[1].options.env.CODERAX_ACL_SID, OWNER_SID);
   assert.equal(calls[1].options.env.CODERAX_ACL_PATH, "C:\\tmp\\file");
@@ -121,6 +122,47 @@ test("Windows hardening replaces the DACL by SID, not by display name", async ()
   // The account name is not an argv element: a localized or domain-qualified
   // name cannot change which principal is granted.
   assert.equal(calls[1].args.some((arg) => arg.includes("tester")), false);
+});
+
+test("Windows reads the account SID and interpreter from the system directory", async () => {
+  // A hosted runner put Git for Windows' GNU `whoami` first on PATH, so
+  // `whoami /user` failed with "extra operand". The system binary must be
+  // addressed by path, and a shadowed powershell must never be preferred.
+  const calls = [];
+  await hardenSecurePath("C:\\tmp\\file", {
+    platform: "win32",
+    env: { SystemRoot: "C:\\Windows" },
+    runCommand: windowsRun("", { onCall: (call) => calls.push(call) }),
+  });
+  assert.equal(calls[0].command, "C:\\Windows\\System32\\whoami.exe");
+  assert.equal(
+    calls[1].command,
+    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+  );
+  assert.equal(calls[1].args.some((arg) => arg.includes("whoami")), false);
+
+  const trailing = [];
+  await hardenSecurePath("C:\\tmp\\file", {
+    platform: "win32",
+    env: { SYSTEMROOT: "C:\\Windows\\" },
+    runCommand: windowsRun("", { onCall: (call) => trailing.push(call) }),
+  });
+  assert.equal(trailing[0].command, "C:\\Windows\\System32\\whoami.exe");
+});
+
+test("a missing PowerShell interpreter is reported, not silently ignored", async () => {
+  await assert.rejects(
+    () =>
+      hardenSecurePath("C:\\tmp\\file", {
+        platform: "win32",
+        env: {},
+        runCommand: async (command) => {
+          if (/(^|\\)whoami(\.exe)?$/i.test(command)) return WHOAMI;
+          throw Object.assign(new Error(`missing ${command}`), { code: "ENOENT" });
+        },
+      }),
+    (error) => error.code === "STORE_PERMISSIONS" && /no PowerShell interpreter/.test(error.message),
+  );
 });
 
 test("Windows verifies allow ACEs by SID and fails closed", async () => {

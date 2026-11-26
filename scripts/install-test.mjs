@@ -228,7 +228,12 @@ async function withEngine(mode, run) {
     const url = new URL(req.url, "http://127.0.0.1");
     const authenticated = req.headers.authorization === authorization;
     const json = (status, payload) => {
-      res.writeHead(status, { "content-type": "application/json", "x-coderax-api-version": compatible ? "1" : "2" });
+      // The unavailable engine advertises nothing at all, so it must not send
+      // the version header either: a header on any response is a version
+      // handshake, and this fixture claims there is none to be had.
+      const headers = { "content-type": "application/json" };
+      if (apiVersion !== null) headers["x-coderax-api-version"] = compatible ? "1" : "2";
+      res.writeHead(status, headers);
       res.end(JSON.stringify(payload));
     };
     if (unauthenticated) return json(401, { message: "unauthorized" });

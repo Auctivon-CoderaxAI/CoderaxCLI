@@ -102,6 +102,35 @@ function encodePowerShell(script) {
   return Buffer.from(script, "utf16le").toString("base64");
 }
 
+/**
+ * Absolute path to a Windows system binary.
+ *
+ * Resolving by bare name is not safe here. Git for Windows, Cygwin, MSYS2 and
+ * Strawberry Perl all ship a `whoami` of their own and put their own directory
+ * first on PATH, so `whoami /user` reached the GNU tool on a hosted runner and
+ * exited with "extra operand '/user'". The same hazard would let an unrelated
+ * `powershell.exe` earlier on PATH read the DPAPI payload. Use the system
+ * directory when Windows reports it, and only fall back to PATH when it does
+ * not.
+ */
+function systemBinary(name, env) {
+  const root = env.SystemRoot ?? env.SYSTEMROOT ?? env.windir ?? env.WINDIR;
+  if (typeof root !== "string" || root.trim() === "") return name;
+  return `${root.trim().replace(/[\\/]+$/, "")}\\System32\\${name}`;
+}
+
+function powershellCandidates(env) {
+  const root = env.SystemRoot ?? env.SYSTEMROOT ?? env.windir ?? env.WINDIR;
+  const candidates = [];
+  if (typeof root === "string" && root.trim() !== "") {
+    candidates.push(`${root.trim().replace(/[\\/]+$/, "")}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`);
+  }
+  // Windows PowerShell is present on every supported Windows release; pwsh is
+  // a fallback for stripped server images that removed it.
+  candidates.push("powershell.exe", "pwsh");
+  return candidates;
+}
+
 async function runPowerShell(runCommand, script, env) {
   const args = [
     "-NoProfile",
@@ -111,19 +140,48 @@ async function runPowerShell(runCommand, script, env) {
     "-EncodedCommand",
     encodePowerShell(script),
   ];
-  try {
-    return await runCommand("powershell.exe", args, { env });
-  } catch (error) {
-    // Windows PowerShell is present on every supported Windows release; pwsh
-    // is a fallback for stripped server images that removed it.
-    if (error?.code !== "ENOENT") throw error;
-    return runCommand("pwsh", args, { env });
+  let missing = null;
+  for (const command of powershellCandidates(env)) {
+    try {
+      return await runCommand(command, args, { env });
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        missing = error;
+        continue;
+      }
+      const stderr = String(error?.stderr ?? "")
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line !== "")
+        .slice(-3)
+        .join(" | ");
+      if (stderr !== "") error.powershellDetail = stderr;
+      throw error;
+    }
   }
+  throw Object.assign(new Error("no PowerShell interpreter is available"), {
+    code: missing?.code ?? "ENOENT",
+    powershellDetail: "no PowerShell interpreter is available in System32, on PATH, or as pwsh",
+  });
+}
+
+/**
+ * One sentence for a failed PowerShell call. A kill from the timeout budget is
+ * reported as a timeout, not as an ACL failure: the two need different fixes,
+ * and "Set-Acl failed" for a process that never ran hides that distinction.
+ */
+function describePowerShellFailure(error) {
+  if (error?.killed === true) {
+    return `PowerShell did not finish within the 5s budget (${error?.signal ?? "killed"})`;
+  }
+  const detail = String(error?.powershellDetail ?? "").trim();
+  if (detail !== "") return detail;
+  return error?.code ?? "PowerShell failed";
 }
 
 /** The SID of the account running this process. */
 async function currentWindowsSid(runCommand, env) {
-  const result = await runCommand("whoami", ["/user", "/fo", "csv", "/nh"], { env });
+  const result = await runCommand(systemBinary("whoami.exe", env), ["/user", "/fo", "csv", "/nh"], { env });
   const output = String(result?.stdout ?? result ?? "");
   const match = output.match(/S-1-\d+(?:-\d+)+/i);
   if (match === null) {
@@ -158,7 +216,7 @@ async function verifyWindowsPath(path, options) {
     return {
       ok: false,
       reason: "ACL_UNVERIFIABLE",
-      detail: `could not verify Windows ACL for ${path}: ${error?.code ?? "Get-Acl failed"}`,
+      detail: `could not verify Windows ACL for ${path}: ${describePowerShellFailure(error)}`,
     };
   }
 
@@ -224,7 +282,7 @@ export async function hardenSecurePath(path, options = {}) {
   } catch (error) {
     throw new SecureStoreError(
       "STORE_PERMISSIONS",
-      `could not restrict the Windows ACL on ${path}: ${error?.code ?? "Set-Acl failed"}`,
+      `could not restrict the Windows ACL on ${path}: ${describePowerShellFailure(error)}`,
     );
   }
   return { ok: true, sid };
