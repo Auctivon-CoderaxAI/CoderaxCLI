@@ -143,7 +143,7 @@ export class WorkflowClient {
 
   /**
    * Resolve API version and capabilities without a single write probe. A
-   * deployment without metadata is reported as unverified, not assumed.
+   * deployment without a metadata version or response header is unverified.
    */
   async negotiate() {
     if (this.negotiation === null) {
@@ -157,14 +157,17 @@ export class WorkflowClient {
 
   async #negotiate() {
     let meta = null;
+    let headerVersion = null;
     const attempts = [];
     for (const path of ROUTE.meta) {
       try {
         const response = await this.#json(path);
+        headerVersion ??= response.apiVersion;
         meta = { path, document: response.json };
         break;
       } catch (error) {
         if (error.code === "NOT_FOUND" || error.code === "HTTP_405" || error.code === "HTTP_404") {
+          headerVersion ??= error.apiVersion ?? null;
           attempts.push(`${path}: ${error.code}`);
           continue;
         }
@@ -186,43 +189,12 @@ export class WorkflowClient {
           document.api?.version ??
           null;
         if (raw !== null) {
-          if (this.strict) assertCompatibleVersion(String(raw), meta.path);
-          else {
-            try {
-              assertCompatibleVersion(String(raw), meta.path);
-            } catch (error) {
-              throw error;
-            }
-          }
-          apiVersion = String(raw);
+          const version = assertCompatibleVersion(String(raw), meta.path);
+          if (version !== null) apiVersion = String(raw);
         }
         const normalized = normalizeCapabilities(document.capabilities ?? document.features);
         capabilities = normalized.set;
         declared = normalized.known;
-      }
-    } else {
-      this.report(
-        diagnostic(
-          "API_VERSION_UNVERIFIED",
-          `the deployment publishes no API metadata (${attempts.join("; ")}); ` +
-            `this client sends x-coderax-api-version: ${API_VERSION} and cannot verify compatibility`,
-        ),
-      );
-    }
-
-    if (apiVersion === null && meta !== null) {
-      this.report(
-        diagnostic(
-          "API_VERSION_UNVERIFIED",
-          `${meta.path} does not report an apiVersion; compatibility is unverified`,
-        ),
-      );
-    }
-
-    if (declared) {
-      for (const probe of PROBES) {
-        if (capabilities.has(probe.capability)) continue;
-        // A declared capability list is authoritative: absence is meaningful.
       }
     }
 
@@ -235,15 +207,18 @@ export class WorkflowClient {
         continue;
       }
       try {
-        await this.#json(probe.path);
+        const response = await this.#json(probe.path);
+        headerVersion ??= response.apiVersion;
         probes[probe.capability] = true;
         capabilities.add(probe.capability);
       } catch (error) {
         if (error.code === "NOT_FOUND") {
+          headerVersion ??= error.apiVersion ?? null;
           probes[probe.capability] = false;
           continue;
         }
         if (error.code === "UNAVAILABLE" || error.status === 503) {
+          headerVersion ??= error.apiVersion ?? null;
           probes[probe.capability] = true;
           capabilities.add(probe.capability);
           this.report(
@@ -258,11 +233,23 @@ export class WorkflowClient {
       }
     }
 
-    if (this.strict && apiVersion === null) {
-      throw new SdkError(
-        "API_VERSION_UNVERIFIED",
-        "strict mode requires a deployment API version, but none was published",
-        { details: { attempts } },
+    apiVersion ??= headerVersion;
+    if (apiVersion === null) {
+      if (this.strict) {
+        throw new SdkError(
+          "API_VERSION_UNVERIFIED",
+          "strict mode requires a deployment API version, but none was published",
+          { details: { attempts } },
+        );
+      }
+      this.report(
+        diagnostic(
+          "API_VERSION_UNVERIFIED",
+          meta === null
+            ? `the deployment publishes no API metadata (${attempts.join("; ")}); ` +
+              `this client sends x-coderax-api-version: ${API_VERSION} and cannot verify compatibility`
+            : `${meta.path} does not report an apiVersion; compatibility is unverified`,
+        ),
       );
     }
 
@@ -609,6 +596,12 @@ export class WorkflowClient {
       onEvent?.({ type: "replace", text: assembled });
     };
 
+    const rememberConversationId = (id) => {
+      if (typeof id === "string" && id.trim() !== "" && (!this.token || !id.includes(this.token))) {
+        resolvedConversationId = id;
+      }
+    };
+
     const handleFrame = (frame) => {
       if (frame.done) {
         terminal = true;
@@ -620,8 +613,8 @@ export class WorkflowClient {
       if (payload === null || typeof payload !== "object") return;
       if (Array.isArray(payload)) return;
 
-      if (typeof payload.conversationId === "string") resolvedConversationId = payload.conversationId;
-      if (typeof payload.streamId === "string") resolvedConversationId = payload.streamId;
+      rememberConversationId(payload.conversationId);
+      rememberConversationId(payload.streamId);
       if (payload.created === true && typeof payload.message?.messageId === "string") {
         requestMessageId = payload.message.messageId;
       }
@@ -652,9 +645,7 @@ export class WorkflowClient {
         if (typeof payload.responseMessage?.messageId === "string") {
           responseMessageId = payload.responseMessage.messageId;
         }
-        if (typeof payload.responseMessage?.conversationId === "string") {
-          resolvedConversationId = payload.responseMessage.conversationId;
-        }
+        rememberConversationId(payload.responseMessage?.conversationId);
         const failure = payload.error ?? payload.responseMessage?.error;
         if (failure !== undefined && failure !== null && failure !== false) {
           throw new SdkError(

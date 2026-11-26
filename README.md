@@ -112,7 +112,7 @@ instead of inventing routes:
 
 | Situation | CLI behaviour |
 | --- | --- |
-| no API metadata | `API_VERSION_UNVERIFIED`; `--strict` exits `6` |
+| no API version in metadata or response headers during negotiation | `API_VERSION_UNVERIFIED`; `--strict` exits `6` |
 | chat stream has no ids | `CURSOR_UNSUPPORTED`; POST is not retried |
 | run stream replays seen ids | `CURSOR_IGNORED`; snapshots stay idempotent |
 | no `/api/repos` | `CAPABILITY_UNAVAILABLE` (exit `6`); pass `--repo` to `work submit` |

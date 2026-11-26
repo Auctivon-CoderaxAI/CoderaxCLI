@@ -528,6 +528,87 @@ test("an interrupted chat POST is not retried and exposes the conversation for r
   );
 });
 
+test("failed chat rejects credential-bearing conversation and stream IDs", async (t) => {
+  for (const [label, payload, expected] of [
+    ["conversation ID", { conversationId: `conv-${TOKEN}` }, null],
+    ["stream ID", { conversationId: "conv-safe", streamId: `stream-${TOKEN}` }, "conv-safe"],
+    ["ordinary stream ID", { streamId: "stream-safe" }, "stream-safe"],
+  ]) {
+    await t.test(label, async () => {
+      let posts = 0;
+      await withStub(
+        (req, res) => {
+          assert.equal(req.method, "POST");
+          posts += 1;
+          sse(res, [`data: ${JSON.stringify({ ...payload, error: "turn failed" })}\n\n`]);
+        },
+        async (baseUrl) => {
+          const env = await envFor(baseUrl);
+          const result = await cli(["chat", "hi"], env);
+          assert.equal(result.code, 1);
+          assert.equal(posts, 1);
+          assert.ok(!result.err.includes(TOKEN));
+          if (expected === null) {
+            await assert.rejects(access(env.CODERAX_CONFIG), { code: "ENOENT" });
+          } else {
+            assert.ok(result.err.includes(expected));
+            const stored = JSON.parse(await readFile(env.CODERAX_CONFIG, "utf8"));
+            assert.equal(stored.sessions[baseUrl].conversationId, expected);
+          }
+        },
+      );
+    });
+  }
+});
+
+test("interactive chat refreshes its session after empty and failed turns", { timeout: 10000 }, async (t) => {
+  const requests = [];
+  await withStub(
+    async (req, res) => {
+      assert.equal(req.method, "POST");
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      requests.push(JSON.parse(body));
+      if (requests.length === 1) {
+        return sse(res, ['data: {"final":true,"responseMessage":{"conversationId":"conv-empty"}}\n\n']);
+      }
+      if (requests.length === 2) {
+        return sse(res, ['data: {"error":"turn failed","streamId":"conv-failed"}\n\n']);
+      }
+      return sse(res, ['data: {"final":true,"responseMessage":{"text":"done"}}\n\n']);
+    },
+    async (baseUrl) => {
+      const child = spawn(process.execPath, ["--input-type=module", "-e", `
+        import { runCli } from ${JSON.stringify(new URL("../src/cli.js", import.meta.url).href)};
+        process.exitCode = await runCli(["chat"], { stdinIsTTY: true });
+      `], { env: { ...process.env, ...(await envFor(baseUrl)) }, stdio: ["pipe", "pipe", "pipe"] });
+      t.after(() => child.kill());
+      const lines = ["first", "second", "third", "/exit"];
+      const prompt = "coderax> ";
+      let pending = "";
+      let stderr = "";
+      child.stdout.setEncoding("utf8").on("data", (chunk) => {
+        pending += chunk;
+        let index;
+        while ((index = pending.indexOf(prompt)) !== -1) {
+          pending = pending.slice(index + prompt.length);
+          if (lines.length) child.stdin.write(`${lines.shift()}\n`);
+        }
+      });
+      child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk; });
+      const [code] = await once(child, "close");
+      assert.equal(code, 0, stderr);
+      assert.match(stderr, /streamed no text/);
+      assert.match(stderr, /turn failed/);
+      assert.deepEqual(requests.map(({ text, conversationId }) => [text, conversationId]), [
+        ["first", undefined],
+        ["second", "conv-empty"],
+        ["third", "conv-failed"],
+      ]);
+    },
+  );
+});
+
 test("failed and suspended runs are reported distinctly", async () => {
   await withStub(
     negotiation((req, res) => {

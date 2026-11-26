@@ -190,8 +190,11 @@ export function createTransport({
       signal?.removeEventListener("abort", onAbort);
     }
 
-    const version = response.headers.get("x-coderax-api-version");
-    if (version !== null) assertCompatibleVersion(version, "response header");
+    const version = assertCompatibleVersion(
+      response.headers.get("x-coderax-api-version"),
+      "response header",
+    );
+    const apiVersion = version === null ? null : redact(version.raw, token);
 
     const fullText = redact(text, token);
     let parsed = null;
@@ -205,10 +208,12 @@ export function createTransport({
     const safeJson = redactValue(parsed, token);
 
     if (!response.ok) {
-      throw responseError(response.status, displayPath, parsed ?? text, token);
+      const error = responseError(response.status, displayPath, parsed ?? text, token);
+      error.apiVersion = apiVersion;
+      throw error;
     }
 
-    return { status: response.status, headers: response.headers, json: safeJson, text: fullText };
+    return { status: response.status, headers: response.headers, json: safeJson, text: fullText, apiVersion };
   }
 
   /**

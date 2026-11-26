@@ -168,14 +168,25 @@ async function streamTurn(ctx, client, mode, text, { session }) {
     // The POST is never retried. If a conversation was already identified,
     // surface it so the operator can inspect the existing task instead of
     // submitting the same generation a second time.
-    const conversationId = error?.details?.conversationId ?? session.conversationId ?? null;
+    const isSafeId = (id) =>
+      typeof id === "string" && id.trim() !== "" &&
+      (!ctx.settings.token || !id.includes(ctx.settings.token));
+    const { conversationId: reportedId, streamId, ...details } = error?.details ?? {};
+    const conversationId = [reportedId, streamId, session.conversationId].find(isSafeId);
+    if (error instanceof SdkError && (error.details || conversationId)) {
+      error.details = {
+        ...details,
+        ...(conversationId ? { conversationId } : {}),
+        ...(isSafeId(streamId) ? { streamId } : {}),
+      };
+    }
     if (conversationId) {
       // Persist the accepted turn before reporting the failure so the next
       // invocation continues it instead of silently starting a new one.
       try {
         const sessions = withSession(ctx.settings.sessions, ctx.settings.baseUrl, {
           conversationId,
-          parentMessageId: session.parentMessageId ?? null,
+          parentMessageId: isSafeId(session.parentMessageId) ? session.parentMessageId : null,
         });
         ctx.settings.sessions = sessions;
         await saveConfig({ sessions }, { filePath: ctx.settings.configPath });
@@ -183,7 +194,6 @@ async function streamTurn(ctx, client, mode, text, { session }) {
         ctx.err(`coderax: warning: could not save conversation ${conversationId}`);
       }
       if (error instanceof SdkError) {
-        error.details = { ...(error.details ?? {}), conversationId };
         if (!error.message.includes(conversationId)) {
           error.message +=
             `; conversation ${conversationId}. Inspect it with \`coderax tasks\`; the message was not resent.`;
@@ -321,9 +331,10 @@ async function interactiveChat(ctx, client) {
 
       try {
         const code = await streamTurn(ctx, client, "chat", text, { session });
-        if (code !== EXIT.OK) continue;
         session = getSession(ctx.settings, ctx.settings.baseUrl);
+        if (code !== EXIT.OK) continue;
       } catch (error) {
+        session = getSession(ctx.settings, ctx.settings.baseUrl);
         if (error instanceof SdkError && error.code === "CANCELLED") return EXIT.CANCELLED;
         ctx.err(`coderax: ${error.code ?? "ERROR"}: ${error.message}`);
         if (error?.code === "UNAUTHENTICATED" || error?.code === "FORBIDDEN") return EXIT.UNAUTHENTICATED;
