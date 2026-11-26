@@ -103,13 +103,26 @@ if (-not $Rollback -and -not $AllowDowngrade -and (Test-Path -LiteralPath $Prefi
   }
 }
 
+function Get-ShortPath([string]$Path) {
+  # cmd.exe batch files use the OEM/ANSI code page. A path containing non-ASCII
+  # characters is safely representable through its 8.3 short name where the
+  # volume provides one; otherwise the system encoding is still used.
+  try {
+    $fso = New-Object -ComObject Scripting.FileSystemObject
+    return $fso.GetFolder($Path).ShortPath
+  } catch {
+    return $Path
+  }
+}
+
 function Set-Launcher([string]$Target) {
   New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
-  $shim = "@echo off`r`ncall `"$Target\bin\coderax.cmd`" %*`r`nexit /b %ERRORLEVEL%`r`n"
+  $program = Get-ShortPath (Join-Path $Target "bin\coderax.cmd")
+  $shim = "@echo off`r`ncall `"$program`" %*`r`nexit /b %ERRORLEVEL%`r`n"
   # Stage beside the launcher, then rename over it, so an interrupted install
   # leaves either the old launcher or the new one, never a half-written file.
   $staged = "$launcher.new.$PID"
-  Set-Content -LiteralPath $staged -Value $shim -Encoding ascii -NoNewline
+  [System.IO.File]::WriteAllText($staged, $shim, [System.Text.Encoding]::Default)
   Move-Item -LiteralPath $staged -Destination $launcher -Force
 }
 
