@@ -17,6 +17,17 @@ function Fail([string]$Message, [int]$Code = 1) {
   exit $Code
 }
 
+function Get-ShortPath([string]$Path) {
+  # The installer may have written the launcher with an 8.3 path. Resolve the
+  # same spelling here so ownership is still recognised.
+  try {
+    $fso = New-Object -ComObject Scripting.FileSystemObject
+    return $fso.GetFolder($Path).ShortPath
+  } catch {
+    return $Path
+  }
+}
+
 if ([string]::IsNullOrWhiteSpace($Prefix) -or $Prefix -eq "/" -or $Prefix -eq $env:USERPROFILE) {
   Fail "refusing to remove '$Prefix'" 2
 }
@@ -53,7 +64,8 @@ foreach ($target in $targets) {
 # Only remove the launcher when it came from this prefix.
 if (Test-Path -LiteralPath $launcher) {
   $content = Get-Content -Raw -LiteralPath $launcher
-  if ($content -and $content.Contains($Prefix)) {
+  $shortPrefix = Get-ShortPath $Prefix
+  if ($content -and ($content.Contains($Prefix) -or $content.Contains($shortPrefix))) {
     Remove-Item -LiteralPath $launcher -Force
   } else {
     Write-Warning "leaving $launcher (it does not reference $Prefix)"
