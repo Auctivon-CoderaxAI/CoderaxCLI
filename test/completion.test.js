@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { KNOWN_COMMANDS, runCli } from "../src/cli.js";
+import { runCli } from "../src/cli.js";
+import { COMMAND_NAMES } from "../src/command-registry.js";
 import {
   COMPLETION_COMMANDS,
   COMPLETION_FLAGS,
@@ -25,7 +26,7 @@ function capture() {
 test("the completion table covers every known command", () => {
   assert.deepEqual(
     COMPLETION_COMMANDS.map(([name]) => name).sort(),
-    [...KNOWN_COMMANDS].sort(),
+    [...COMMAND_NAMES].sort(),
   );
 });
 

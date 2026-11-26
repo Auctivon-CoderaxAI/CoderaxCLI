@@ -21,12 +21,13 @@ page). Releases follow semantic versioning:
 | Change | Version bump |
 | --- | --- |
 | Bug fix, redaction fix, documentation | patch (`0.2.0` → `0.2.1`) |
-| New command, new flag, wider engine range | minor (`0.2.x` → `0.3.0`) |
+| New command, new flag, new API contract | minor (`0.2.x` → `0.3.0`) |
 | Breaking CLI or config change | major (after `1.0.0`) |
 | Security fix | patch, with an advisory |
 
-The supported WorkflowEngine range is part of each release and reported by
-`coderax version --json` as `supportedWorkflowEngine`.
+The pinned API contract is reported by `coderax version --json` as
+`clientApiVersion` and `clientApiMajor`; `coderax compat` negotiates it with the
+deployment.
 
 ## Standalone installs (Linux, macOS, Windows)
 

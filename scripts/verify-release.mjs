@@ -13,7 +13,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 import { readTar, readZip } from "./lib/archive.mjs";
-import { SUPPORTED_ENGINE_RANGE } from "../src/compat.js";
+import { API_MAJOR, API_VERSION } from "../packages/workflow-sdk/src/index.js";
 import { NODE_REQUIREMENT, PACKAGE_NAME, VERSION } from "../src/version.js";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -51,8 +51,12 @@ check(manifest.name === PACKAGE_NAME, "manifest name does not match package.json
 check(manifest.version === VERSION, "manifest version does not match package.json");
 check(manifest.node === NODE_REQUIREMENT, "manifest node requirement does not match package.json");
 check(
-  manifest.supportedWorkflowEngine === SUPPORTED_ENGINE_RANGE,
-  "manifest WorkflowEngine range does not match src/compat.js",
+  manifest.clientApiVersion === API_VERSION && manifest.clientApiMajor === API_MAJOR,
+  "manifest API contract does not match the pinned WorkflowEngine SDK",
+);
+check(
+  manifest.sdkPackage === "@coderax/workflow-sdk" && manifest.sdkVersion === "0.1.0",
+  "manifest does not identify the pinned WorkflowEngine SDK",
 );
 
 // --- checksums -------------------------------------------------------------
@@ -117,20 +121,27 @@ if (npmCli) {
   check(npmCli.data.toString("utf8").startsWith("#!/usr/bin/env node"), "src/cli.js must start with a node shebang");
   check((npmCli.mode & 0o111) !== 0, "src/cli.js must be executable inside the npm tarball");
 }
-for (const file of ["config.js", "client.js", "discover.js", "product-commands.js", "product-registry.js", "version.js", "compat.js", "diagnostics.js", "maintenance.js"]) {
+for (const file of ["config.js", "client.js", "discover.js", "cli.js", "command-registry.js", "completion.js", "diagnostics.js", "maintenance.js", "product-commands.js", "product-registry.js", "semver.js", "session.js", "render.js", "approval.js", "task-store.js", "workflow-commands.js", "version.js"]) {
   check(npmEntries.has(`package/src/${file}`), `npm tarball is missing src/${file}`);
+}
+for (const file of ["contract.js", "client.js", "http.js", "task-client.js", "task-events.js", "task-state.js", "index.js"]) {
+  check(npmEntries.has(`package/packages/workflow-sdk/src/${file}`), `npm tarball is missing the SDK file ${file}`);
 }
 check(npmEntries.has("package/README.md"), "npm tarball is missing README.md");
 
-// The CLI is an access client, not an installer: shipping code that spawns
-// processes would make it possible to start runtimes or services behind the
-// operator's back.
+// The CLI is an access client, not a runtime host. One spawn is permitted:
+// the explicit `--notify-command` hook, which runs only what the operator
+// named for that invocation. Every other module must stay process-free.
+const NOTIFICATION_MODULE = "package/src/workflow-commands.js";
 for (const [path, entry] of npmEntries) {
   if (!path.endsWith(".js")) continue;
-  check(
-    !entry.data.toString("utf8").includes("child_process"),
-    `${path} must not spawn processes`,
-  );
+  const source = entry.data.toString("utf8");
+  if (path === NOTIFICATION_MODULE) {
+    check(source.includes("notify-command"), "the notification module must gate on --notify-command");
+    check(source.includes("spawn(expanded"), "the notification module must spawn only the user's command");
+    continue;
+  }
+  check(!source.includes("child_process"), `${path} must not spawn processes`);
 }
 
 // --- standalone tree -------------------------------------------------------

@@ -1,180 +1,154 @@
 # Coderax CLI
 
-Command-line **access and control interface** for a cloud-hosted Coderax
-deployment. It configures a deployment URL and token, chats and runs Work mode,
-lists products, agents and models, checks health, reads the deployment's own
-OpenAPI document, and issues authenticated calls.
+Owner-only command-line client for a Coderax deployment. It is a thin
+authenticated cloud client: interactive Chat, autonomous Work, agent and model
+selection, streaming output, durable run monitoring, approvals, cancellation,
+resume/retry, diagnostics and owner-verified authentication. All execution stays in
+the deployment; the CLI ships no local inference, database, Docker workload or
+agent process.
 
-The CLI does not run models, agents, containers, or databases locally. Inference
-and state live in the Coderax deployment; this program makes HTTP requests and
-exits. Installing it never pulls in Ollama, Docker, a local AI runtime, a
-database, or a background service.
+- Repository: `Auctivon-CoderaxAI/CoderaxCLI` (branch: `main`)
+- Runtime: Node.js 24+, standard library only, zero runtime dependencies
+- Shared contract: `packages/workflow-sdk` (imported directly; not published)
+- Backend: [`Auctivon-CoderaxAI/Coderax`](https://github.com/Auctivon-CoderaxAI/Coderax)
+- Backend gaps: [`BACKEND-DEFECTS.md`](BACKEND-DEFECTS.md)
+- Wire contract: [`docs/CONTRACT.md`](docs/CONTRACT.md)
 
-- Repository: `Auctivon-CoderaxAI/CoderaxCLI` (private)
-- Runtime: Node.js 24 or newer, standard library only, no runtime dependencies
-- Companion: [`Coderax`](https://github.com/Auctivon-CoderaxAI/Coderax) (deployment)
-- Distribution: GitHub Releases (canonical); npm-ready but not published
+## Install (Windows, Linux, macOS)
 
-This repository is the **canonical** Coderax CLI. The in-repo `Coderax/cli`
-package is deprecated; it is replaced by this implementation.
-
-## Install
-
-| Method | Command | Notes |
-| --- | --- | --- |
-| Linux / macOS | `sh install.sh --version 0.2.0` | Verifies SHA-256, installs to `~/.coderax/cli/0.2.0` |
-| Windows | `powershell -File install.ps1 -Version 0.2.0` | Installs to `%LOCALAPPDATA%\Coderax\cli\0.2.0` |
-| npm tarball | `npm install --global ./coderax-cli-0.2.0.tgz` | Works today; registry publication is not enabled |
-| Source | `npm ci --ignore-scripts && node src/cli.js --help` | For development |
-
-Full instructions, checksum verification, offline installs and PATH setup:
-[docs/INSTALL.md](docs/INSTALL.md).
+Requires Node.js 24 or newer.
 
 ```sh
-coderax config set --base-url https://coderax.example.com --token "<token>"
-coderax doctor
-coderax compat
-coderax chat "Summarize this repository"
+npm install -g .          # installs the `coderax` command
+# or, without a global install:
+npm link
+node src/cli.js --help
 ```
 
-Requirements: Node.js 24 or newer, HTTPS access to your deployment, and nothing
-else. No administrator rights, services, daemons, or open ports.
+The package has no install scripts, native modules or platform-specific paths.
+`npm pack` + install is covered by `npm run smoke:install` on each OS in CI.
+On Windows, use PowerShell or Git Bash; no `sudo` is required for a user-local
+prefix.
 
-## Status
-
-| Capability | Status |
-| --- | --- |
-| `config show` / `config set` with `0600` persistence | ✅ implemented, tested |
-| Environment precedence (`CODERAX_BASE_URL`, `CODERAX_TOKEN`, `CODERAX_TIMEOUT_MS`) | ✅ implemented, tested |
-| HTTPS enforcement (HTTP only on loopback) | ✅ implemented, tested |
-| `login` / `logout` / `status` with token masking | ✅ implemented, tested |
-| `chat` / `work` streaming with SSE parsing | ✅ implemented, tested |
-| `products`, `cloud` and `projects` status | ✅ implemented, tested |
-| `doctor` diagnostics | ✅ implemented, tested |
-| `health` with fallback probes | ✅ implemented, tested |
-| `openapi` discovery and operation listing | ✅ implemented, tested |
-| `call <METHOD> <PATH> [--data]` | ✅ implemented, tested |
-| `agents` / `models` resolved from OpenAPI | ✅ implemented, tested |
-| Token redaction in every output path | ✅ implemented, tested |
-| Reproducible artifacts, SHA-256 checksums, SPDX SBOM | ✅ implemented, verified |
-| Cross-platform installation tests | ✅ Linux verified; macOS/Windows in CI |
-| `version` diagnostics, `compat`, `uninstall` | ✅ implemented, tested |
-| Shell completion (bash, zsh, fish, PowerShell) | ✅ implemented, tested |
-| npm registry publication | ⛔ not enabled — owner authorization required |
-| Automatic updates | ⛔ deliberately not implemented |
-| File upload, agent mutation | ⛔ not implemented — use `call` |
-
-## Why paths are discovered, not hardcoded
-
-Coderax exposes its API through an OpenAPI document with Swagger UI. This CLI
-reads that document for `openapi`, `agents`, and `models`. If a deployment does
-not expose one of those routes, the CLI says so (`OPERATION_NOT_FOUND`) instead
-of sending a request to a guessed path. `health` probes fixed paths, `login`
-checks `/api/user`, `doctor` checks `/api/health`, `chat` and `work` use the
-configured chat path, and `coderax call` uses the path you supply.
-
-## Configure
+## Sign in as the owner
 
 ```sh
-coderax config set --base-url https://coderax.example.com --token "<token>"
+coderax config set --base-url https://coderax.example.com
+coderax login                 # prompts for the token on stdin
+coderax whoami                # verifies role === ADMIN
 ```
 
-Config is written to `~/.coderax/config.json` with mode `0600` (override with
-`CODERAX_CONFIG`). Environment variables win over the file:
+`login` calls `/api/user` and **stores nothing** unless the deployment reports
+`role: "ADMIN"`. The token is written to `~/.coderax/config.json` with mode
+`0600` (directory `0700`), through a fresh temporary file and an atomic rename.
+This is file-based protection, not an OS keychain; OS credential storage is a
+known gap documented in [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md).
+A symlinked config path is refused. Environment variables override the file:
 
 ```sh
 export CODERAX_BASE_URL=https://coderax.example.com
-export CODERAX_TOKEN=...
+export CODERAX_TOKEN=...      # useful in CI; never written to disk
 ```
 
-Remote deployments must be HTTPS. `http://localhost`, `127.0.0.1`, and `::1` are
-allowed for local development.
+Remote deployments must use HTTPS. Plain HTTP is accepted only for loopback
+(`localhost`, `127.0.0.1`, `::1`). Redirects are refused so a token cannot be
+forwarded to another origin.
 
-## Use
+## Commands
 
-```sh
-coderax login
-coderax status
-coderax version --json
-coderax compat
-coderax chat "Summarize this repository"
-coderax work "Draft a release checklist"
-coderax products
-coderax models --json
-coderax agents --json
-coderax health
-coderax openapi
-coderax call GET /api/models --json
-coderax call POST /api/ask --data '{"text":"hello"}'
-coderax update
-coderax completion bash        # print a completion script for your shell
-```
+| Command | Purpose |
+| --- | --- |
+| `coderax login` / `logout` / `whoami` / `status` | owner-only authentication and account state |
+| `coderax chat [message] [--agent <id>] [--model <id>] [--conversation <id>] [--new]` | interactive Chat with streaming output |
+| `coderax work [message]` | streaming Work-mode turn |
+| `coderax work submit <prompt> --repo <owner/name> --agent <id> [--base-ref <ref>] [--mode turbo15\|autonomous\|verified] [--workspace <name>] [--follow]` | autonomous cloud coding run |
+| `coderax tasks [taskId]` | durable Work conversations and their resolved state |
+| `coderax workflows` | workflows visible to the owner |
+| `coderax runs --workflow <id>` | runs for one workflow (the backend has no global run list) |
+| `coderax run <runId> [--no-follow] [--approval ask\|allow\|deny] [--notify] [--notify-command <cmd>] [--cancel-on-interrupt]` | monitor, approve, detach, notify |
+| `coderax cancel <runId\|taskId> [--task]` | cancel a run, or a durable Work task |
+| `coderax resume <runId>` / `coderax retry <runId>` | resume a paused run or start a fresh run from a failed/completed one |
+| `coderax approve <runId> <stepIndex>` | explicit approval |
+| `coderax repos` | connected repositories when the deployment advertises them |
+| `coderax agents --work` / `coderax models --work` | Work-eligible agents and models |
+| `coderax doctor` / `diagnostics` | configuration, auth, connectivity and dependency checks |
+| `coderax compat` / `version [--json]` | negotiated API contract and install report |
+| `coderax completion <bash\|zsh\|fish\|powershell>` | shell completion generated from the command registry |
+| `coderax uninstall [--yes] [--dry-run] [--purge]` | remove credentials and optionally the config |
+| `coderax config show` / `get` / `set` | inspect or change deployment settings |
 
-`openapi`, `agents`, and `models` use the deployment's OpenAPI document. `health`
-probes fixed paths, `login` checks `/api/user`, `doctor` checks `/api/health`,
-`chat` and `work` use the configured chat path, and `call` uses the path you
-supply.
+`chat` and interactive `work` keep conversation continuity per deployment in
+the config (`--new` resets it, `--conversation <id>` overrides it). JSON output
+is a single document; run monitoring emits NDJSON.
 
-`coderax version --json` reports the CLI version, Node runtime, platform,
-install method, install path, and the supported WorkflowEngine range.
-`coderax compat` compares the deployment's reported engine version with that
-range. Neither command changes anything.
+### Streaming, reconnection and detachment
 
-## Upgrade, rollback, uninstall
+- Chat POSTs are **never retried**: a retry would start a second generation.
+  An interrupted turn exits `7` with its conversation id.
+- Durable run monitoring reconnects with `Last-Event-ID` when the deployment
+  supplies event ids, re-reads safe snapshots otherwise, and de-duplicates
+  replays.
+- Ctrl-C detaches without cancelling; the run continues server-side. Resume
+  with `coderax run <runId>`. `--cancel-on-interrupt` opts into cancellation.
+- `--notify` rings the terminal bell at a terminal status; `--notify-command`
+  runs an operator-supplied command with `{id}` and `{status}`.
+- Approval is fail-closed: `ask` needs a TTY and an explicit yes; a
+  non-interactive session never auto-approves.
 
-```sh
-coderax update                 # prints upgrade commands; never installs anything
-coderax version --json         # what is installed, and how
-coderax uninstall --dry-run    # what user data would be removed
-coderax uninstall --yes        # remove user data (the program stays)
-```
-
-- Upgrade procedures: [docs/UPGRADE.md](docs/UPGRADE.md)
-- Rollback procedures: [docs/ROLLBACK.md](docs/ROLLBACK.md)
-- Uninstallation and cleanup: [docs/INSTALL.md](docs/INSTALL.md) and
-  [docs/RELEASE.md](docs/RELEASE.md)
-
-Standalone installs keep every version side by side, so a rollback is normally
-`ln -sfn "$HOME/.coderax/cli/0.2.0/bin/coderax" "$HOME/.local/bin/coderax"`.
-
-## Releases
-
-Every release publishes a GitHub Release with an npm tarball, a POSIX standalone
-tarball, a Windows zip, `SHA256SUMS`, a release manifest, and an SPDX SBOM.
-Builds are reproducible: `npm run repro` rebuilds twice and compares hashes.
-
-Maintainer documentation: [docs/RELEASE.md](docs/RELEASE.md).
-Distribution research and channel decisions: [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md).
-Supported runtimes and engine versions: [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
-
-```sh
-npm run release:check    # syntax, tests, build, verify, repro, install-test
-```
-
-## Exit codes
+### Exit codes
 
 | Code | Meaning |
 | --- | --- |
-| `0` | success |
-| `1` | other operational failure (missing operation, unavailable health check, other non-2xx HTTP status) |
-| `2` | usage error or invalid configuration (bad URL, insecure transport, bad timeout) |
-| `3` | authentication or authorization failure (HTTP 401/403) |
+| `0` | success (including completed and paused runs) |
+| `1` | failed run or other operational failure |
+| `2` | usage or configuration error |
+| `3` | unauthenticated, forbidden, or not the owner |
 | `4` | network failure or timeout |
-| `5` | not found (HTTP 404) |
-| `6` | unavailable (Cloud/projects) |
-| `130` | cancelled |
+| `5` | not found |
+| `6` | capability or API version unavailable — fail closed |
+| `7` | contract violation, including an incomplete stream |
+| `130` | cancelled or detached locally |
 
-Errors print as `coderax: <CODE>: <message>` for typed failures, with the token
-redacted if a server ever echoes it. `coderax compat` exits `1` when the engine
-is outside the supported range or did not report a version.
+## Backend dependencies and fail-closed behaviour
+
+The reference deployment publishes no API-version document, no SSE event ids,
+no global run index and no repository inventory. The CLI names these gaps
+instead of inventing routes:
+
+| Situation | CLI behaviour |
+| --- | --- |
+| no API metadata | `API_VERSION_UNVERIFIED`; `--strict` exits `6` |
+| chat stream has no ids | `CURSOR_UNSUPPORTED`; POST is not retried |
+| run stream replays seen ids | `CURSOR_IGNORED`; snapshots stay idempotent |
+| no `/api/repos` | `CAPABILITY_UNAVAILABLE` (exit `6`); pass `--repo` to `work submit` |
+| no `/api/workflows` | durable commands exit `6`; chat is unaffected |
+| no `/api/user` | `OWNER_UNVERIFIABLE`; nothing is stored |
+| JSON `200` on an SSE route | `CONTRACT_VIOLATION` (exit `7`) |
+
+See [`docs/CONTRACT.md`](docs/CONTRACT.md) for the exact routes, frame shapes
+and reconnection rules, and [`BACKEND-DEFECTS.md`](BACKEND-DEFECTS.md) for the
+changes requested from the WorkflowEngine owners.
 
 ## Development
 
 ```sh
-npm ci --ignore-scripts   # dependency tree is empty by design
-npm test                  # unit, CLI, redaction, and release tests
-npm run check             # syntax check for every module
-npm run build             # deterministic artifacts in dist/
-npm run verify            # checksums, archive contents, install safety
-npm run install-test      # install → authenticate → SDK → uninstall
+npm run check               # node --check over every source file
+npm test                    # 114 offline tests, no deployment required
+npm run test:contract       # contract + SSE/session suites
+npm run smoke:install       # npm pack + install the tarball in a temp prefix
 ```
+
+The suite uses injected `fetch`, `env`, stdout/stderr and temporary config
+files. It never contacts a real deployment and never needs a token.
+
+Cross-surface visibility against a real deployment is read-only and gated:
+
+```sh
+CODERAX_VERIFY_BASE_URL=https://... \
+CODERAX_VERIFY_TOKEN=... \
+CODERAX_VERIFY_TASK_ID=<task seen in the web app> \
+npm run verify:cross-surface
+```
+
+It exits `6` when the environment or a shared id is missing, and creates no
+task, run or spend. See [`SECURITY.md`](SECURITY.md).

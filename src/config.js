@@ -1,4 +1,4 @@
-import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -65,6 +65,25 @@ export function normalizeBaseUrl(raw) {
 
 async function readStoredConfig(path, readFileImpl) {
   try {
+    const info = await lstat(path);
+    if (info.isSymbolicLink()) {
+      throw new ConfigError(
+        "CONFIG_SYMLINK",
+        `${path} is a symbolic link; refusing to read credentials through it. ` +
+          "Replace it with a regular file owned by you.",
+      );
+    }
+    if (!info.isFile()) {
+      throw new ConfigError("CONFIG_INVALID", `${path} is not a regular file`);
+    }
+  } catch (error) {
+    if (error instanceof ConfigError) throw error;
+    if (error?.code !== "ENOENT") {
+      throw new ConfigError("CONFIG_UNREADABLE", `could not inspect ${path}`);
+    }
+  }
+
+  try {
     const raw = await readFileImpl(path, "utf8");
     const parsed = JSON.parse(raw);
     if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
@@ -86,6 +105,23 @@ export async function loadConfig({ env = process.env, filePath, readFileImpl = r
   const path = filePath ?? configPath(env);
   const stored = await readStoredConfig(path, readFileImpl);
 
+  // A credential file readable by another account is refused rather than used.
+  // Windows has no POSIX mode bits; ACL inheritance is the platform control.
+  if (stored.token && process.platform !== "win32") {
+    try {
+      const info = await stat(path);
+      if ((info.mode & 0o077) !== 0) {
+        throw new ConfigError(
+          "CONFIG_INSECURE_PERMISSIONS",
+          `${path} is readable by group or others (mode ${(info.mode & 0o777).toString(8)}); run \`chmod 600 ${path}\``,
+        );
+      }
+    } catch (error) {
+      if (error instanceof ConfigError) throw error;
+      throw new ConfigError("CONFIG_UNREADABLE", `could not check permissions on ${path}`);
+    }
+  }
+
   const baseUrlRaw = overrides.baseUrl ?? envText(env.CODERAX_BASE_URL) ?? stored.baseUrl;
   const token = env.CODERAX_TOKEN?.trim() || stored.token || null;
   const timeoutRaw = overrides.timeoutMs ?? envText(env.CODERAX_TIMEOUT_MS) ?? stored.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -103,8 +139,14 @@ export async function loadConfig({ env = process.env, filePath, readFileImpl = r
     chatPath: env.CODERAX_CHAT_PATH?.trim() || stored.chatPath || DEFAULT_CHAT_PATH,
     endpoint: env.CODERAX_ENDPOINT?.trim() || stored.endpoint || DEFAULT_ENDPOINT,
     model: env.CODERAX_MODEL?.trim() || stored.model || "",
+    agent: env.CODERAX_AGENT?.trim() || stored.agent || "",
     output: stored.output || "text",
     account: typeof stored.account === "string" ? stored.account : null,
+    role: typeof stored.role === "string" ? stored.role : null,
+    sessions:
+      stored.sessions !== null && typeof stored.sessions === "object" && !Array.isArray(stored.sessions)
+        ? stored.sessions
+        : {},
   };
 }
 
@@ -124,14 +166,39 @@ export async function saveConfig(
   const stored = await readStoredConfig(path, readFileImpl);
   const next = { ...stored };
 
+  // Never write credentials through a symlink an attacker could have planted.
+  try {
+    const info = await lstat(path);
+    if (info.isSymbolicLink()) {
+      throw new ConfigError("CONFIG_SYMLINK", `${path} is a symbolic link; refusing to write credentials through it`);
+    }
+  } catch (error) {
+    if (error instanceof ConfigError) throw error;
+    if (error?.code !== "ENOENT") {
+      throw new ConfigError("CONFIG_UNREADABLE", `could not inspect ${path}`);
+    }
+  }
+
   if (patch.baseUrl !== undefined) next.baseUrl = normalizeBaseUrl(patch.baseUrl).baseUrl;
   if (patch.token !== undefined) next.token = patch.token === null ? null : String(patch.token);
   if (patch.timeoutMs !== undefined) next.timeoutMs = Number(patch.timeoutMs);
   if (patch.chatPath !== undefined) next.chatPath = String(patch.chatPath);
   if (patch.endpoint !== undefined) next.endpoint = String(patch.endpoint);
   if (patch.model !== undefined) next.model = String(patch.model);
+  if (patch.agent !== undefined) next.agent = String(patch.agent);
   if (patch.output !== undefined) next.output = String(patch.output);
   if (patch.account !== undefined) next.account = patch.account === null ? null : String(patch.account);
+  if (patch.role !== undefined) next.role = patch.role === null ? null : String(patch.role);
+  if (patch.sessions !== undefined) {
+    next.sessions =
+      patch.sessions === null
+        ? {}
+        : Object.fromEntries(
+            Object.entries(patch.sessions).filter(
+              ([, entry]) => entry !== null && typeof entry === "object" && !Array.isArray(entry),
+            ),
+          );
+  }
 
   await mkdirImpl(dirname(path), { recursive: true, mode: 0o700 });
 
@@ -170,7 +237,10 @@ export function describeConfig(config) {
     chatPath: config.chatPath,
     endpoint: config.endpoint,
     model: config.model,
+    agent: config.agent ?? "",
     account: config.account ?? null,
+    role: config.role ?? null,
+    conversationCount: Object.keys(config.sessions ?? {}).length,
     output: config.output,
   };
 }

@@ -10,8 +10,9 @@ verified artifacts and, when authorized, a published GitHub Release.
   to publish a tag that disagrees with it.
 - While `0.x`, a minor release may change behaviour. Every release documents
   changes in `CHANGELOG.md`.
-- The supported WorkflowEngine range (`src/compat.js`) is part of the release
-  contract. Widening or narrowing it is at least a minor release.
+- The pinned WorkflowEngine SDK contract (`packages/workflow-sdk`) is part of
+  the release contract. Changing `API_VERSION` or the negotiated surface is at
+  least a minor release and requires SDK-owner confirmation.
 
 ## What a release contains
 

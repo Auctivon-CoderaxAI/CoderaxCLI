@@ -1,10 +1,40 @@
 import { PRODUCTS, STATUS_LABELS, getOrderedProducts } from "./product-registry.js";
-import { checkEngineCompatibility, compareSemver, parseSemver } from "./compat.js";
-import { CoderaxError, request, streamRequest } from "./client.js";
-import { collectVersionInfo } from "./diagnostics.js";
+import { CoderaxError, request } from "./client.js";
 import { dirname } from "node:path";
 import { configDir, loadConfig, maskToken, saveConfig } from "./config.js";
 import { VERSION } from "./version.js";
+import { collectVersionInfo } from "./diagnostics.js";
+import { compareSemver, parseSemver } from "./semver.js";
+import {
+  API_MAJOR,
+  API_VERSION,
+  CAPABILITY,
+  SdkError,
+  WorkflowClient,
+} from "../packages/workflow-sdk/src/index.js";
+
+const RELEASE_FEED = "https://api.github.com/repos/Auctivon-CoderaxAI/CoderaxCLI/releases/latest";
+
+/**
+ * Upgrade commands are printed, never executed. Installing a new build is the
+ * operator's decision; a CLI that silently replaces itself is a supply-chain
+ * hazard, not a feature.
+ */
+export function upgradeCommands(installMethod, version) {
+  switch (installMethod) {
+    case "npm-global":
+      return [`npm install --global coderax-cli@${version}`];
+    case "npm-local":
+      return [`npm install --save-exact coderax-cli@${version}`];
+    case "standalone":
+      return [
+        `curl -fsSLO https://github.com/Auctivon-CoderaxAI/CoderaxCLI/releases/download/v${version}/install.sh`,
+        `sh install.sh --version ${version}`,
+      ];
+    default:
+      return [`git fetch --tags && git checkout v${version}`];
+  }
+}
 
 export const EXIT = Object.freeze({
   OK: 0,
@@ -121,11 +151,12 @@ export async function projects(ctx) {
 
 export async function status(ctx) {
   const settings = ctx.settings;
-  const install = ctx.install ?? collectVersionInfo({ env: ctx.env ?? process.env });
   const payload = {
     version: VERSION,
     baseUrl: settings.baseUrl || null,
     authenticated: Boolean(settings.token),
+    role: settings.role ?? null,
+    owner: settings.role === "ADMIN",
     token: maskToken(settings.token),
     tokenSource: ctx.env.CODERAX_TOKEN
       ? "environment"
@@ -137,10 +168,6 @@ export async function status(ctx) {
     configDir: configDir(ctx.env),
     model: settings.model || null,
     endpoint: settings.endpoint,
-    installMethod: install.installMethod,
-    installPath: install.installPath,
-    node: install.node,
-    supportedWorkflowEngine: install.supportedWorkflowEngine,
   };
 
   if (ctx.json) {
@@ -153,10 +180,13 @@ export async function status(ctx) {
   ctx.out(
     `Authentication   ${payload.authenticated ? `yes (${payload.token}, via ${payload.tokenSource})` : "no \u2014 run `coderax login`"}`,
   );
+  if (payload.authenticated) {
+    ctx.out(
+      `Owner            ${payload.role === "ADMIN" ? "verified" : payload.role ? `no (role ${payload.role})` : "unverified \u2014 run `coderax whoami`"}`,
+    );
+  }
   if (payload.account) ctx.out(`Account          ${payload.account}`);
-  ctx.out(`Install          ${payload.installMethod} (${payload.installPath})`);
   ctx.out(`Config           ${payload.configPath}`);
-  ctx.out(`Engine support   ${payload.supportedWorkflowEngine}`);
   return EXIT.OK;
 }
 
@@ -167,27 +197,55 @@ export async function login(ctx) {
     throw new CoderaxError("USAGE", "no token provided; use `coderax login --token <token>` or pipe it on stdin");
   }
 
-  let account = null;
+  // Owner-only gate. A token is not persisted until the deployment confirms
+  // that this identity is the instance owner (SystemRoles.ADMIN).
+  const client = new WorkflowClient({
+    baseUrl: ctx.settings.baseUrl,
+    token,
+    timeoutMs: ctx.settings.timeoutMs,
+    fetchImpl: ctx.fetchImpl,
+    clientVersion: VERSION,
+    signal: ctx.signal,
+  });
+
+  let identity;
   try {
-    const user = await request({
-      baseUrl: ctx.settings.baseUrl,
-      token,
-      path: "/api/user",
-      timeoutMs: ctx.settings.timeoutMs,
-      fetchImpl: ctx.fetchImpl,
-    });
-    account = user.json?.email ?? user.json?.username ?? user.json?.name ?? null;
+    identity = await client.requireOwner();
   } catch (error) {
-    // A 404 means the deployment does not expose /api/user; anything else is a
-    // real rejection and must not be stored.
-    if (error?.status !== 404) throw error;
+    if (error instanceof SdkError && error.code === "NOT_FOUND") {
+      throw new SdkError(
+        "OWNER_UNVERIFIABLE",
+        "/api/user is not exposed by this deployment, so owner-only access cannot be verified; " +
+          "the token was not stored",
+        { status: 404, details: { endpoint: "/api/user" } },
+      );
+    }
+    throw error;
   }
 
-  await saveConfig({ token, account, baseUrl: ctx.settings.baseUrl }, { filePath: ctx.settings.configPath });
+  await saveConfig(
+    {
+      token,
+      account: identity.account,
+      role: identity.role,
+      baseUrl: ctx.settings.baseUrl,
+    },
+    { filePath: ctx.settings.configPath },
+  );
   ctx.out(
     ctx.json
-      ? JSON.stringify({ authenticated: true, token: maskToken(token), account }, null, 2)
-      : `Signed in${account ? ` as ${account}` : ""}. Token stored with 0600 permissions.`,
+      ? JSON.stringify(
+          {
+            authenticated: true,
+            token: maskToken(token),
+            account: identity.account,
+            role: identity.role,
+            owner: true,
+          },
+          null,
+          2,
+        )
+      : `Signed in as the deployment owner${identity.account ? ` (${identity.account})` : ""}. Token stored with 0600 permissions.`,
   );
   return EXIT.OK;
 }
@@ -196,7 +254,10 @@ export async function logout(ctx) {
   const stored = await loadConfig({ env: {}, filePath: ctx.settings.configPath });
   const removed = Boolean(stored.token);
   const environmentTokenActive = Boolean(ctx.env.CODERAX_TOKEN?.trim());
-  await saveConfig({ token: null, account: null }, { filePath: ctx.settings.configPath });
+  await saveConfig(
+    { token: null, account: null, role: null, sessions: {} },
+    { filePath: ctx.settings.configPath },
+  );
   const message = environmentTokenActive
     ? "Stored credentials cleared. CODERAX_TOKEN is still set; unset it to sign out of this environment."
     : removed
@@ -278,14 +339,22 @@ export async function work(ctx) {
 
 export async function doctor(ctx) {
   const checks = [];
-  const install = ctx.install ?? collectVersionInfo({ env: ctx.env ?? process.env });
+  let backendDependencies = [];
+  const add = (name, ok, detail, hint, severity = "error") => {
+    checks.push({ name, ok, detail, hint, severity });
+  };
+
   const major = Number(process.versions.node.split(".")[0]);
-  checks.push({
-    name: "node",
-    ok: major >= 24,
-    detail: process.versions.node,
-    hint: major >= 24 ? "" : "Node 24 or newer is required.",
-  });
+  add("node", major >= 24, process.versions.node, major >= 24 ? "" : "Node 24 or newer is required.");
+
+  const install = ctx.install ?? collectVersionInfo({ env: ctx.env });
+  add(
+    "install",
+    true,
+    `${install.installMethod} (${install.installPath})`,
+    "Run `coderax version --json` for the complete install report.",
+    "warning",
+  );
 
   const directory = dirname(ctx.settings.configPath);
   let dirMode = null;
@@ -294,37 +363,137 @@ export async function doctor(ctx) {
   } catch {
     dirMode = null;
   }
-  checks.push({
-    name: "install",
-    ok: true,
-    detail: `${install.installMethod} (${install.installPath})`,
-    hint: "",
-  });
+  add(
+    "config-dir",
+    process.platform === "win32" || dirMode === null || dirMode === 0o700,
+    dirMode === null ? `${directory} (not created yet)` : `${directory} (${dirMode.toString(8)})`,
+    process.platform === "win32" || dirMode === null || dirMode === 0o700
+      ? ""
+      : "Run `chmod 700` on the config directory.",
+  );
 
-  checks.push({
-    name: "config-dir",
-    ok: process.platform === "win32" || dirMode === null || dirMode === 0o700,
-    detail: dirMode === null ? `${directory} (not created yet)` : `${directory} (${dirMode.toString(8)})`,
-    hint:
-      process.platform === "win32" || dirMode === null || dirMode === 0o700
-        ? ""
-        : "Run `chmod 700` on the config directory.",
-  });
+  add(
+    "config-file",
+    true,
+    ctx.settings.configPath,
+    "The config file is created with mode 0600 and refused if group/other readable.",
+    "warning",
+  );
 
-  checks.push({
-    name: "base-url",
-    ok: Boolean(ctx.settings.baseUrl),
-    detail: ctx.settings.baseUrl || "(unset)",
-    hint: ctx.settings.baseUrl ? "" : "Run `coderax config set base-url https://your-deployment`.",
-  });
-  checks.push({
-    name: "auth",
-    ok: Boolean(ctx.settings.token),
-    detail: ctx.settings.token
+  add(
+    "base-url",
+    Boolean(ctx.settings.baseUrl),
+    ctx.settings.baseUrl || "(unset)",
+    ctx.settings.baseUrl ? "" : "Run `coderax config set base-url https://your-deployment`.",
+  );
+  add(
+    "auth",
+    Boolean(ctx.settings.token),
+    ctx.settings.token
       ? `${maskToken(ctx.settings.token)} via ${ctx.env.CODERAX_TOKEN ? "environment" : "config file"}`
       : "no token",
-    hint: ctx.settings.token ? "" : "Run `coderax login`.",
-  });
+    ctx.settings.token ? "" : "Run `coderax login`.",
+  );
+
+  if (ctx.settings.baseUrl && ctx.settings.token) {
+    const client = new WorkflowClient({
+      baseUrl: ctx.settings.baseUrl,
+      token: ctx.settings.token,
+      timeoutMs: ctx.settings.timeoutMs,
+      fetchImpl: ctx.fetchImpl,
+      clientVersion: VERSION,
+      signal: ctx.signal,
+      strict: false,
+    });
+
+    try {
+      const identity = await client.requireOwner();
+      add("owner", true, `role ${identity.role}${identity.account ? ` (${identity.account})` : ""}`, "");
+    } catch (error) {
+      add(
+        "owner",
+        false,
+        error.message,
+        error.code === "OWNER_UNVERIFIABLE"
+          ? "The deployment must expose /api/user with the authenticated role."
+          : "Sign in with the deployment owner's token; the CLI is owner-only.",
+      );
+    }
+
+    try {
+      const state = await client.negotiate();
+      if (state.apiVersion === null) {
+        add(
+          "api-version",
+          true,
+          "unverified (no /api/meta)",
+          "Publish /api/meta with { apiVersion, capabilities }; without it the CLI cannot pin compatibility or verify replay support.",
+          "warning",
+        );
+      } else {
+        add("api-version", true, state.apiVersion, "");
+      }
+
+      const capabilities = [...state.capabilities].sort();
+      add(
+        "capabilities",
+        capabilities.length > 0,
+        capabilities.length > 0 ? capabilities.join(", ") : "none advertised",
+        "The deployment publishes no capability metadata; the CLI probed safe GET routes.",
+        "warning",
+      );
+
+      const workflows = state.capabilities.has(CAPABILITY.workflows);
+      backendDependencies = [
+        {
+          capability: CAPABILITY.chat,
+          status: "enforced-per-request",
+          endpoint: "/api/work/chat",
+          note: "SSE vs JSON is rejected at the response boundary",
+        },
+        {
+          capability: CAPABILITY.workTasks,
+          status: state.capabilities.has(CAPABILITY.workTasks) ? "available" : "missing",
+          endpoint: "/api/work/tasks",
+        },
+        {
+          capability: CAPABILITY.workflows,
+          status: workflows ? "available" : "missing",
+          endpoint: "/api/workflows",
+        },
+        {
+          capability: CAPABILITY.builds,
+          status: workflows ? "inferred" : "missing",
+          endpoint: "/api/workflows/builds",
+          note: "POST 404 is reported as CAPABILITY_UNAVAILABLE",
+        },
+        {
+          capability: CAPABILITY.runStream,
+          status: workflows ? "inferred" : "missing",
+          endpoint: "/api/workflows/runs/:id/stream",
+          note: "snapshot-only; no Last-Event-ID support in the current backend",
+        },
+        {
+          capability: CAPABILITY.repos,
+          status: state.capabilities.has(CAPABILITY.repos) ? "available" : "missing",
+          endpoint: "/api/repos",
+          note: "absent: pass --repo <owner/name> to work submit",
+        },
+      ];
+      const missing = backendDependencies.filter((entry) => entry.status === "missing");
+      add(
+        "backend",
+        missing.length === 0,
+        missing.length === 0
+          ? "required routes present"
+          : `missing: ${missing.map((entry) => entry.capability).join(", ")}`,
+        "Deploy the matching Coderax backend; dependent commands fail closed.",
+        "warning",
+      );
+    } catch (error) {
+      add("api-version", false, error.message, "Check the deployment URL and token.");
+    }
+  }
 
   if (ctx.settings.baseUrl) {
     try {
@@ -334,80 +503,91 @@ export async function doctor(ctx) {
         timeoutMs: ctx.settings.timeoutMs,
         fetchImpl: ctx.fetchImpl,
       });
-      checks.push({ name: "reachability", ok: true, detail: `GET ${path} HTTP ${response.status}`, hint: "" });
+      add("reachability", true, `GET ${path} HTTP ${response.status}`, "");
     } catch (error) {
-      checks.push({
-        name: "reachability",
-        ok: false,
-        detail: error.message,
-        hint: "Confirm the deployment URL and that a health endpoint is exposed.",
-      });
-    }
-
-    try {
-      const compat = await checkEngineCompatibility({
-        baseUrl: ctx.settings.baseUrl,
-        token: ctx.settings.token,
-        timeoutMs: ctx.settings.timeoutMs,
-        fetchImpl: ctx.fetchImpl,
-      });
-      checks.push({
-        name: "engine",
-        // Unknown is not failure: an older deployment may simply not report a
-        // version, and the CLI still works against the documented contract.
-        ok: compat.supported !== false,
-        detail:
-          compat.engineVersion === null
-            ? `not reported; CLI supports ${compat.range}`
-            : `${compat.engineVersion} (${compat.engineSource}) ${compat.supported ? "compatible" : "unsupported"}`,
-        hint:
-          compat.supported === false
-            ? `Engine ${compat.engineVersion} is ${compat.reason}. Upgrade the deployment or install a CLI release that supports it; run \`coderax compat\`.`
-            : "",
-      });
-    } catch (error) {
-      checks.push({
-        name: "engine",
-        ok: true,
-        detail: `check skipped (${error.code ?? "error"})`,
-        hint: "",
-      });
+      add(
+        "reachability",
+        false,
+        error.message,
+        "Confirm the deployment URL and that a health endpoint is exposed.",
+      );
     }
   }
 
-  const ok = checks.every((check) => check.ok);
+  const failed = checks.filter((check) => !check.ok && check.severity !== "warning");
+  const ok = failed.length === 0;
   if (ctx.json) {
-    ctx.out(JSON.stringify({ ok, version: VERSION, checks }, null, 2));
+    ctx.out(
+      JSON.stringify({ ok, version: VERSION, checks, backendDependencies }, null, 2),
+    );
     return ok ? EXIT.OK : EXIT.ERROR;
   }
   for (const check of checks) {
-    ctx.out(`${check.ok ? "\u2713" : "\u2717"} ${check.name.padEnd(14)} ${check.detail}`);
+    const mark = check.ok ? "\u2713" : check.severity === "warning" ? "!" : "\u2717";
+    ctx.out(`${mark} ${check.name.padEnd(14)} ${check.detail}`);
     if (!check.ok && check.hint) ctx.out(`  \u2192 ${check.hint}`);
   }
   return ok ? EXIT.OK : EXIT.ERROR;
 }
 
-const RELEASE_FEED = "https://api.github.com/repos/Auctivon-CoderaxAI/CoderaxCLI/releases/latest";
-
 /**
- * Upgrade commands are printed, never executed. Installing a new build is the
- * operator's decision; a CLI that silently replaces itself is a supply-chain
- * hazard, not a feature.
+ * Report the negotiated API contract. There is no guessed engine version range:
+ * the pinned SDK declares API major 1, and the deployment either advertises a
+ * compatible version, advertises an incompatible one, or advertises nothing.
  */
-export function upgradeCommands(installMethod, version) {
-  switch (installMethod) {
-    case "npm-global":
-      return [`npm install --global coderax-cli@${version}`];
-    case "npm-local":
-      return [`npm install --save-exact coderax-cli@${version}`];
-    case "standalone":
-      return [
-        `curl -fsSLO https://github.com/Auctivon-CoderaxAI/CoderaxCLI/releases/download/v${version}/install.sh`,
-        `sh install.sh --version ${version}`,
-      ];
-    default:
-      return [`git fetch --tags && git checkout v${version}`];
+export async function compat(ctx) {
+  requireBase(ctx);
+  requireAuth(ctx);
+
+  const client = new WorkflowClient({
+    baseUrl: ctx.settings.baseUrl,
+    token: ctx.settings.token,
+    timeoutMs: ctx.settings.timeoutMs,
+    fetchImpl: ctx.fetchImpl,
+    clientVersion: VERSION,
+    signal: ctx.signal,
+    strict: false,
+  });
+
+  let state;
+  try {
+    state = await client.negotiate();
+  } catch (error) {
+    if (error.code !== "API_VERSION_UNSUPPORTED") throw error;
+    const payload = {
+      supported: false,
+      apiVersion: error.details?.serverVersion ?? null,
+      clientApiVersion: `${API_MAJOR}.x`,
+      reason: error.message,
+    };
+    ctx.out(ctx.json ? JSON.stringify(payload, null, 2) : `incompatible: ${error.message}`);
+    return EXIT.UNAVAILABLE;
   }
+
+  const identity = await client.requireOwner();
+  const capabilities = [...state.capabilities].sort();
+  const payload = {
+    supported: state.apiVersion === null ? null : true,
+    apiVersion: state.apiVersion,
+    clientApiVersion: `${API_MAJOR}.x`,
+    clientApiVersionExact: API_VERSION,
+    owner: identity.role,
+    capabilities,
+    reason:
+      state.apiVersion === null
+        ? "the deployment did not report apiVersion; compatibility is unverified"
+        : null,
+  };
+
+  if (ctx.json) {
+    ctx.out(JSON.stringify(payload, null, 2));
+  } else if (payload.supported === null) {
+    ctx.out(`API version unverified: ${payload.reason}`);
+  } else {
+    ctx.out(`API version ${payload.apiVersion} is compatible with client major ${API_MAJOR}`);
+    if (capabilities.length > 0) ctx.out(`capabilities: ${capabilities.join(", ")}`);
+  }
+  return payload.supported === null ? EXIT.ERROR : EXIT.OK;
 }
 
 export async function update(ctx) {

@@ -9,7 +9,7 @@
 import { existsSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { SUPPORTED_ENGINE_RANGE } from "./compat.js";
+import { API_MAJOR, API_VERSION } from "../packages/workflow-sdk/src/index.js";
 import { configDir, configPath } from "./config.js";
 import { NODE_REQUIREMENT, PACKAGE_NAME, VERSION } from "./version.js";
 
@@ -91,7 +91,11 @@ export function collectVersionInfo({ env = process.env } = {}) {
     configPath: configPath(env),
     configDir: configDir(env),
     channel: env.CODERAX_CHANNEL?.trim() || "stable",
-    supportedWorkflowEngine: SUPPORTED_ENGINE_RANGE,
+    // The compatibility contract is the pinned SDK, not a guessed engine range.
+    clientApiVersion: API_VERSION,
+    clientApiMajor: API_MAJOR,
+    sdkPackage: "@coderax/workflow-sdk",
+    sdkVersion: "0.1.0",
   };
 }
 
@@ -104,7 +108,7 @@ export function formatVersionInfo(info) {
     `install      ${info.installMethod} (${info.installPath})`,
     `config       ${info.configPath}`,
     `channel      ${info.channel}`,
-    `engine       ${info.supportedWorkflowEngine}`,
+    `api          v${info.clientApiVersion} (major ${info.clientApiMajor}, SDK ${info.sdkVersion})`,
   ];
   return `${lines.join("\n")}\n`;
 }

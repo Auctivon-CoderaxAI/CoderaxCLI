@@ -8,8 +8,8 @@
  *   3. runs the installed launcher (version, help, doctor),
  *   4. authenticates against a stub Coderax WorkflowEngine and makes
  *      authenticated calls (login, status, health, compat, agents, doctor),
- *   5. checks the compatibility boundaries with stub engines below, inside,
- *      and above the supported range,
+ *   5. checks API-version negotiation against stub deployments on the same
+ *      major, a newer major, and one that advertises no version,
  *   6. installs the npm tarball into a scratch project and imports the public
  *      SDK surface through the package exports map,
  *   7. uninstalls and verifies that program and user data are gone.
@@ -25,7 +25,7 @@ import { once } from "node:events";
 import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -76,7 +76,9 @@ function spawn(command, args, options) {
   return take(spawnSync(command, args, { encoding: "utf8", ...options }));
 }
 
-const sandbox = await mkdtemp(join(tmpdir(), "coderax-install-test-"));
+// A space and a non-ASCII character exercise quoting in every installer,
+// launcher, completion path, and uninstaller on the real host.
+const sandbox = await mkdtemp(join(tmpdir(), "coderax install-ü-"));
 const prefix = join(sandbox, "prefix");
 const binDir = join(sandbox, "bin");
 const home = join(sandbox, "home");
@@ -219,8 +221,14 @@ async function withEngine(version, run) {
       if (version !== null) payload.workflowEngine = { version };
       return json(200, payload);
     }
+    if (url.pathname === "/api/meta") {
+      if (version === null) return json(404, { message: "not found" });
+      return json(200, { apiVersion: version, capabilities: ["work.chat", "work.agents"] });
+    }
     if (url.pathname === "/api/user") {
-      return authenticated ? json(200, { email: "release-ci@coderax.test" }) : json(401, { message: "unauthorized" });
+      return authenticated
+        ? json(200, { email: "release-ci@coderax.test", role: "ADMIN" })
+        : json(401, { message: "unauthorized" });
     }
     if (url.pathname === "/api/agents") {
       return authenticated ? json(200, { agents: [{ id: "agent-1", name: "Reviewer" }] }) : json(401, { message: "unauthorized" });
@@ -283,6 +291,17 @@ try {
     assert.ok(existsSync(join(prefix, VERSION, "src", "cli.js")), "installed sources are missing");
     assert.ok(existsSync(join(prefix, VERSION, "uninstall.sh")), "the offline uninstaller is missing");
     return `${prefix}/${VERSION}`;
+  });
+
+  await step("the launcher is discoverable through PATH", async () => {
+    const pathKey = Object.keys(env).find((key) => key.toLowerCase() === "path") ?? "PATH";
+    const result = spawn("coderax", ["--version"], {
+      env: { ...env, [pathKey]: `${binDir}${delimiter}${env[pathKey] ?? ""}` },
+      shell: IS_WINDOWS,
+    });
+    assert.equal(result.status, 0, tail(result));
+    assert.equal(result.stdout.trim(), `coderax-cli ${VERSION}`);
+    return `coderax resolved from ${binDir}`;
   });
 
   await step("shell completion is generated for every supported shell", async () => {
@@ -398,6 +417,13 @@ try {
     return `${VERSION} -> ${NEXT_VERSION}`;
   });
 
+  await step("an older version cannot silently replace a newer install", async () => {
+    const result = installer(["--force"], { version: VERSION });
+    assert.equal(result.status, 2, tail(result));
+    assert.match(result.stderr, /refusing to downgrade/);
+    return "downgrade refused; --rollback remains the supported path";
+  });
+
   await step("rollback repoints the launcher to the installed previous version", async () => {
     const result = installer(["--rollback"], { version: VERSION });
     assert.equal(result.status, 0, tail(result));
@@ -427,7 +453,9 @@ try {
     assert.equal(info.cliVersion, VERSION);
     assert.equal(info.installMethod, "standalone");
     assert.equal(info.nodeSupported, true);
-    assert.match(info.supportedWorkflowEngine, /^>=0\.8\.0 <1\.0\.0$/);
+    assert.equal(info.clientApiVersion, "1");
+    assert.equal(info.clientApiMajor, 1);
+    assert.equal(info.sdkPackage, "@coderax/workflow-sdk");
     assert.equal(info.installPath, join(prefix, VERSION));
     return `${info.cliVersion} on node ${info.node} (${info.platform}-${info.arch})`;
   });
@@ -450,8 +478,8 @@ try {
     return "node and install checks pass; auth is correctly reported missing";
   });
 
-  await step("authenticated communication with a compatible WorkflowEngine (0.8.8)", async () => {
-    return withEngine("0.8.8", async (baseUrl) => {
+  await step("authenticated communication with a compatible API (1.1)", async () => {
+    return withEngine("1.1", async (baseUrl) => {
       const login = await cli(["login", "--base-url", baseUrl, "--token", TOKEN, "--json"]);
       assert.equal(login.status, 0, tail(login));
       assert.equal(JSON.parse(login.stdout).authenticated, true);
@@ -470,7 +498,8 @@ try {
       assert.equal(compat.status, 0, tail(compat));
       const verdict = JSON.parse(compat.stdout);
       assert.equal(verdict.supported, true);
-      assert.equal(verdict.engineVersion, "0.8.8");
+      assert.equal(verdict.apiVersion, "1.1");
+      assert.equal(verdict.clientApiVersion, "1.x");
 
       const agents = await cli(["agents", "--json"]);
       assert.equal(agents.status, 0, tail(agents));
@@ -483,24 +512,23 @@ try {
     });
   });
 
-  await step("engine compatibility boundaries (0.7.9 / 0.8.0 / 0.9.5 / 1.0.0)", async () => {
+  await step("API version boundaries (1.0 / 1.9 / 2.0)", async () => {
     const expectations = [
-      ["0.7.9", 1, false],
-      ["0.8.0", 0, true],
-      ["0.9.5", 0, true],
-      ["1.0.0", 1, false],
+      ["1.0", 0, true],
+      ["1.9", 0, true],
+      ["2.0", 6, false],
     ];
-    for (const [engine, code, supported] of expectations) {
-      await withEngine(engine, async (baseUrl) => {
+    for (const [apiVersion, code, supported] of expectations) {
+      await withEngine(apiVersion, async (baseUrl) => {
         const result = await cli(["compat", "--base-url", baseUrl, "--json"]);
-        assert.equal(result.status, code, `engine ${engine}: ${tail(result)}`);
-        assert.equal(JSON.parse(result.stdout).supported, supported, `engine ${engine} verdict`);
+        assert.equal(result.status, code, `API ${apiVersion}: ${tail(result)}`);
+        assert.equal(JSON.parse(result.stdout).supported, supported, `API ${apiVersion} verdict`);
       });
     }
-    return "below, inside, and above the declared range behave as documented";
+    return "same-major versions pass and a new major fails with API_VERSION_UNSUPPORTED";
   });
 
-  await step("an engine that reports no version is reported as unknown", async () => {
+  await step("a deployment that advertises no API version is reported as unknown", async () => {
     return withEngine(null, async (baseUrl) => {
       const result = await cli(["compat", "--base-url", baseUrl, "--json"]);
       assert.equal(result.status, 1, tail(result));
@@ -512,7 +540,7 @@ try {
   });
 
   await step("Work SSE streaming through the installed launcher", async () => {
-    return withEngine("0.8.8", async (baseUrl) => {
+    return withEngine("1.1", async (baseUrl) => {
       const result = await cli(["work", "verify installation", "--base-url", baseUrl, "--json"]);
       assert.equal(result.status, 0, tail(result));
       assert.equal(JSON.parse(result.stdout).text, "installed and authenticated");
@@ -536,11 +564,12 @@ try {
     await writeFile(script, `
 import assert from "node:assert/strict";
 const sdk = await import("coderax-cli");
-const compat = await import("coderax-cli/compat");
+const registry = await import("coderax-cli/command-registry");
 const version = await import("coderax-cli/version");
 const diagnostics = await import("coderax-cli/diagnostics");
 assert.equal(typeof sdk.runCli, "function");
-assert.equal(typeof compat.isSupportedEngineVersion, "function");
+assert.equal(registry.COMMAND_NAMES.has("completion"), true);
+assert.equal(registry.COMMAND_NAMES.has("uninstall"), true);
 assert.equal(version.VERSION, ${JSON.stringify(VERSION)});
 assert.equal(diagnostics.detectInstallMethod(), "npm-local");
 console.log(version.VERSION);
@@ -581,13 +610,15 @@ console.log(version.VERSION);
     return "global shim runs and reports the npm-global install method";
   });
 
-  await step("reinstalling the same version is refused; --force upgrades in place", async () => {
-    const again = installer();
+  await step("reinstalling the same version is refused; --force replaces it in place", async () => {
+    const upgrade = await buildUpgradeArtifact();
+    const options = { version: NEXT_VERSION, tarball: upgrade.tarball, checksum: upgrade.checksum };
+    const again = installer([], options);
     assert.equal(again.status, 1, "a second install of the same version must be refused");
-    const forced = installer(["--force"]);
+    const forced = installer(["--force"], options);
     assert.equal(forced.status, 0, tail(forced));
     const version = await cli(["--version"]);
-    assert.equal(version.stdout.trim(), `coderax-cli ${VERSION}`);
+    assert.equal(version.stdout.trim(), `coderax-cli ${NEXT_VERSION}`);
     return "idempotency guard and in-place replacement both verified";
   });
 
@@ -636,7 +667,10 @@ console.log(version.VERSION);
     arch: process.arch,
     node: process.versions.node,
     release: { name: manifest.name, version: manifest.version, commit: manifest.commit },
-    workflowEngineRange: manifest.supportedWorkflowEngine,
+    clientApiVersion: manifest.clientApiVersion,
+    clientApiMajor: manifest.clientApiMajor,
+    sdkPackage: manifest.sdkPackage,
+    sdkVersion: manifest.sdkVersion,
     checks: results,
   };
   const evidencePath = process.argv.includes("--evidence")

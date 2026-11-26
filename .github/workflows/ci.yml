@@ -1,93 +1,96 @@
 name: ci
 
+# One authoritative CI pipeline. Every branch and every pull request runs the
+# same suite that the release workflow runs before publishing. No paid runners,
+# secrets, or third-party services are used.
 on:
   push:
-    branches: [main]
+    branches: ["**"]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    permissions:
-      contents: read
+  verify:
+    name: verify (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        # Standard GitHub-hosted runners only. Free and unlimited for public
-        # repositories; drawn from the plan's included compute when private.
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
     steps:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+
       - name: Set up Node
         uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b # v4.0.3
         with:
           node-version: "24"
-          cache: npm
+
       - name: Install from the lockfile
         run: npm ci --ignore-scripts
+
       - name: Syntax check
         run: npm run check
-      - name: Unit and CLI tests
+
+      - name: Unit, CLI, contract and release tests
         run: npm test
+
       - name: Build release artifacts
         run: npm run build
-      - name: Verify artifacts, checksums, and install safety
+
+      - name: Verify checksums, archives and install safety
         run: npm run verify
-      - name: Installation test (install, authenticate, uninstall)
+
+      - name: Install zsh and fish (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zsh fish
+
+      - name: Install fish (macOS)
+        if: runner.os == 'macOS'
+        run: brew install fish
+
+      - name: Native install, completion, auth, streaming, upgrade, rollback and uninstall
         run: npm run install-test
-      - name: Reproducibility check
+
+      - name: Reproducible build (Linux)
         if: runner.os == 'Linux'
         run: npm run repro
-      - name: Upload install evidence
-        if: always()
+
+      - name: Dependency vulnerability scan
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Native install evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: install-evidence-${{ matrix.os }}
           path: dist/install-evidence.json
-          if-no-files-found: ignore
-          retention-days: 14
+          if-no-files-found: error
+          retention-days: 7
 
-  dependencies:
-    name: dependency audit
+  # The protected branch requires the check context named exactly "test".
+  test:
+    name: test
+    needs: verify
+    if: always()
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
+    timeout-minutes: 5
     steps:
-      - name: Check out source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          persist-credentials: false
-      - name: Set up Node
-        uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b # v4.0.3
-        with:
-          node-version: "24"
-          cache: npm
-      - name: Install from the lockfile
-        run: npm ci --ignore-scripts
-      - name: Runtime dependencies must remain empty
+      - name: Require every platform to pass
         shell: bash
         run: |
-          node -e '
-            const pkg = require("./package.json");
-            const deps = Object.keys(pkg.dependencies ?? {});
-            if (deps.length > 0) {
-              console.error("runtime dependencies are not allowed: " + deps.join(", "));
-              process.exit(1);
-            }
-            console.log("runtime dependencies: 0");
-          '
-      - name: Audit the dependency tree
-        run: npm audit --audit-level=high
-      - name: Show the full dependency tree
-        run: npm ls --all
+          result="${{ needs.verify.result }}"
+          echo "verify result: $result"
+          if [ "$result" != "success" ]; then
+            echo "One or more platform jobs did not pass."
+            exit 1
+          fi

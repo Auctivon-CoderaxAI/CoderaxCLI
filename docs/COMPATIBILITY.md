@@ -1,164 +1,107 @@
 # Compatibility
 
-Coderax CLI is a thin client: one HTTP request at a time (plus SSE for chat and
-Work) against a deployment's documented API. Compatibility is therefore about
-the Node runtime, the operating system, the CLI's public module surface, and the
-WorkflowEngine version the deployment reports.
+Coderax CLI is a thin access client: HTTP requests and SSE against a Coderax
+deployment. Compatibility is defined by one versioned client contract, not by a
+guessed WorkflowEngine release range.
 
 ## Runtime
 
-| Component | Supported | Notes |
+| Component | Supported | Verification |
 | --- | --- | --- |
-| Node.js | `>=24.0.0` | Declared in `engines`; `coderax doctor` fails below it |
-| Linux | x64, arm64 | Verified in this environment on `linux-x64`, Node 24.22.1 |
-| macOS | arm64, x64 | Covered by the CI matrix (`macos-latest`) |
-| Windows | x64 | Covered by the CI matrix (`windows-latest`) |
-| Shell | sh, bash, zsh, PowerShell 5.1+, cmd.exe | POSIX launcher plus `coderax.cmd` |
+| Node.js | `>=24.0.0` | `coderax doctor` fails below it |
+| Linux | x64 | Installed-artifact suite passes on `linux-x64`, Node 24.22.1 |
+| macOS | arm64, x64 | GitHub-hosted `macos-latest` job in the CI matrix |
+| Windows | x64 | GitHub-hosted `windows-latest` job in the CI matrix |
+| Shell | sh, bash, zsh, fish, PowerShell 5.1+, cmd.exe | Completion scripts are generated for all four shells |
 
-No native modules, no build step, no optional dependencies.
+No native modules, no build step, no runtime dependencies.
 
-## WorkflowEngine
+## The API contract
 
-| Field | Value |
-| --- | --- |
-| Supported range | `>=0.8.0 <1.0.0` |
-| Prereleases | Not supported (reported, never trusted) |
-| Declared in | `src/compat.js` (`SUPPORTED_ENGINE_RANGE`) |
-| Reported by | `coderax version --json`, `coderax compat`, `coderax doctor` |
+The authoritative contract is the pinned SDK at
+`packages/workflow-sdk` (`@coderax/workflow-sdk` 0.1.0). It declares:
 
-### How the version is detected
+| Field | Value | Source |
+| --- | --- | --- |
+| `API_VERSION` | `1` | `packages/workflow-sdk/src/contract.js` |
+| `API_MAJOR` | `1` | `packages/workflow-sdk/src/contract.js` |
+| Client header | `x-coderax-api-version: 1` | SDK transport |
+| Metadata routes | `/api/meta`, `/.well-known/coderax.json`, `/api/version` | `ROUTE.meta` |
 
-In order:
+There is **no** hardcoded WorkflowEngine package-version range. The CLI does not
+infer an engine version from `/health` or an OpenAPI `info.version`, because
+those fields describe the web service, not the API surface the client uses.
 
-1. `GET /health`, `/api/health`, `/healthz` — read `workflowEngine.version`,
-   `workflowEngineVersion`, `engine.version`,
-   `services.workflowEngine.version`, or `capabilities.workflowEngine`.
-2. The OpenAPI document (`/openapi.json`, `/api/openapi.json`,
-   `/.well-known/openapi.json`) — read `info.version`.
+### Negotiation
 
-A bare `version` field in a health payload is deliberately **ignored**: many
-deployments report their web-service version there, and treating it as the
-engine version would produce a confidently wrong answer.
-
-### What happens when versions disagree
+`WorkflowClient.negotiate()` reads the first metadata route that responds and
+accepts `apiVersion`, `api_version`, `version`, or `api.version`. A reported
+version must parse and match API major `1`. `assertCompatibleVersion()` throws
+`API_VERSION_UNSUPPORTED` for any other major; a missing or unparseable version
+is reported as `API_VERSION_UNVERIFIED`.
 
 | Situation | `coderax compat` | `coderax doctor` | Other commands |
 | --- | --- | --- | --- |
-| Inside the range | exit `0`, `supported: true` | passes | run normally |
-| Outside the range | exit `1`, `supported: false` with a reason | `engine` check fails | still run |
-| Version not reported | exit `1`, `supported: null` | `engine` check passes with "not reported" | run normally |
-| Unparseable version | exit `1`, `supported: null` | passes with "not reported" | run normally |
+| Same major (`1.x`) | exit `0`, `supported: true` | `api-version` passes | run normally |
+| Different major (`2.x`) | exit `6`, `supported: false` | `api-version` fails | fail closed with `API_VERSION_UNSUPPORTED` |
+| No metadata route | exit `1`, `supported: null` | warning | run with an unverified-version diagnostic |
+| `--strict` and no metadata | exit `6` | fails | fail closed |
 
-The CLI warns rather than blocks. Refusing to run against a newer engine would
-turn a compatibility question into an outage, and `coderax call` is explicitly
-an escape hatch. Automation that must enforce the range should check
-`coderax compat --json` and treat a non-zero exit as a hard failure.
+`coderax compat --json` returns `supported`, `apiVersion`, `clientApiVersion`,
+`owner`, and advertised `capabilities`. Automation can use the exit code as a
+hard gate; a non-zero result must not be treated as compatible.
+
+### Provenance of this contract
+
+`contracts/PROVENANCE.md` records that the shapes were read from the Coderax
+backend at commit `a5d237b0`. That is evidence of a reviewed reconstruction, not
+owner sign-off. The WorkflowEngine SDK owner must still confirm the pinned
+contract before this release is described as production-compatible. No live
+Coderax deployment or authenticated gateway was available during this work, so
+live integration is **not** verified.
+
+## Evidence levels
+
+| Evidence | What it proves |
+| --- | --- |
+| `npm test` (157 checks) | parser, SSE, redaction, task sync, API negotiation, release policy |
+| `npm run install-test` (21 checks) | real install, launchers, checksums, completions, stub auth, upgrade/rollback, uninstall |
+| GitHub Actions matrix | native Windows, macOS and Linux execution of the same suites |
+| Stub deployment | protocol behavior against a local contract server |
+| Live deployment | **not available**; no claim of live compatibility |
+
+PowerShell-on-Linux is not used as evidence for Windows; Windows is verified
+only by the native `windows-latest` job.
 
 ## CLI surface
 
-Commands: `products`, `chat`, `work`, `models`, `agents`, `cloud`, `projects`,
-`login`, `logout`, `status`, `config show|get|set`, `doctor`, `version`,
-`compat`, `update`, `uninstall`/`cleanup`, `completion`, `health`, `openapi`,
-`call`, `help`.
+`products`, `chat`, `work`, `work submit`, `tasks`, `workflows`, `runs`, `run`,
+`cancel`, `resume`, `retry`, `approve`, `repos`, `agents`, `models`, `login`,
+`logout`, `whoami`, `status`, `doctor`, `diagnostics`, `compat`, `health`,
+`openapi`, `call`, `cloud`, `projects`, `update`, `version`, `config`,
+`uninstall`, `cleanup`, `completion`, `help`.
 
-Exit codes are part of the contract:
+The parser and all four completion scripts are generated from
+`src/command-registry.js`. `test/completion.test.js` fails if a command or flag
+is missing from a script.
 
-| Code | Meaning |
+## Public module surface
+
+| Specifier | Exports |
 | --- | --- |
-| `0` | success |
-| `1` | operational failure, missing operation, incompatible/unknown engine |
-| `2` | usage error or invalid configuration |
-| `3` | authentication or authorization failure |
-| `4` | network failure or timeout |
-| `5` | not found |
-| `6` | unavailable (Cloud/projects) |
-| `130` | cancelled |
-
-`coderax version --json` emits a stable, additive schema (`schemaVersion: 1`):
-`cli`, `packageName`, `cliVersion`, `node`, `nodeRequirement`, `nodeSupported`,
-`platform`, `arch`, `installMethod`, `installPath`, `configPath`, `configDir`,
-`channel`, `supportedWorkflowEngine`.
-
-## SDK surface
-
-The package exposes an exports map, so consumers depend on named subpaths rather
-than internal file layout:
-
-| Import | Contents |
-| --- | --- |
-| `coderax-cli` | `runCli`, `parseArgv`, `isEntrypoint`, `VERSION` |
-| `coderax-cli/client` | `request`, `streamRequest`, `redact`, `redactValue`, `formatJson`, `CoderaxError` |
-| `coderax-cli/config` | `loadConfig`, `saveConfig`, `describeConfig`, `normalizeBaseUrl`, `maskToken` |
-| `coderax-cli/discover` | `discoverOpenApi`, `summarizeOperations`, `findOperation` |
-| `coderax-cli/compat` | `SUPPORTED_ENGINE_RANGE`, `parseSemver`, `compareSemver`, `isSupportedEngineVersion`, `checkEngineCompatibility` |
-| `coderax-cli/diagnostics` | `collectVersionInfo`, `detectInstallMethod`, `formatVersionInfo` |
-| `coderax-cli/product-registry` | `PRODUCTS`, `STATUS_LABELS`, product helpers |
+| `coderax-cli` | `runCli`, `VERSION`, `isEntrypoint` |
+| `coderax-cli/command-registry` | `COMMANDS`, `COMMAND_NAMES`, `FLAGS`, `SUBCOMMANDS` |
+| `coderax-cli/completion` | `completionScript`, `COMPLETION_SHELLS`, `COMPLETION_MARKER` |
+| `coderax-cli/diagnostics` | `collectVersionInfo`, `formatVersionInfo`, `detectInstallMethod` |
 | `coderax-cli/version` | `VERSION`, `PACKAGE_NAME`, `NODE_REQUIREMENT` |
-| `coderax-cli/package.json` | Package metadata |
 
-Adding an export is a minor release. Removing or renaming one is a major
-release. The installation test imports every public entry point from an
-installed tarball, so a broken exports map fails CI before release.
+The npm tarball also contains `packages/workflow-sdk/src` for the CLI's runtime
+import. The SDK is not a published package.
 
-## Evidence
+## Credential storage
 
-`npm run install-test` runs against the built release artifacts. This run
-(Linux, Node 24.22.1) passed all 21 checks:
-
-| Check | Result |
-| --- | --- |
-| Artifact verification (checksums, contents, modes, safety) | pass |
-| Installer rejects unknown options | pass |
-| Standalone install from tarball with checksum verification | pass |
-| Shell completion generated for bash, zsh, fish and PowerShell | pass |
-| Installer writes completion for the shells it found; `--no-completion` writes none | pass |
-| Rehearsal release `0.2.1` installs side by side and takes over the launcher | pass |
-| `--rollback` repoints the launcher to `0.2.0`, keeping `0.2.1` on disk | pass |
-| Launcher reports the released version | pass |
-| `version --json` identifies a standalone install | pass |
-| Help works with no configuration | pass |
-| `doctor` reports node/install checks and missing auth | pass |
-| Authenticated flow against engine `0.8.8` (`login`, `status`, `health`, `compat`, `agents`, `doctor`) | pass |
-| Engine boundaries `0.7.9` (unsupported), `0.8.0` (supported), `0.9.5` (supported), `1.0.0` (unsupported) | pass |
-| Engine reporting no version → `supported: null` | pass |
-| Work SSE streaming through the installed launcher | pass |
-| npm tarball imports through the exports map; `.bin/coderax` works | pass |
-| npm global install into a sandbox prefix; reports `npm-global` | pass |
-| Same-version reinstall refused; `--force` replaces in place | pass |
-| No bearer token in any output (25,979 bytes scanned) | pass |
-| Uninstall removes launcher, program directory, credentials and generated completion; a hand-written completion file survives | pass |
-
-Compatibility was exercised against a stub deployment that implements the
-documented contract: OpenAPI 3.1 discovery, bearer authentication, `/api/user`,
-`/api/agents`, health reporting, and the cumulative-snapshot Work SSE stream.
-
-**Limitation:** no live Coderax deployment or credentials were available in this
-environment, so these results prove conformance to the published contract, not
-behaviour against a specific production engine build. Run the same checks
-against your deployment with:
-
-```sh
-coderax compat --json
-coderax doctor --json
-coderax work "compatibility probe" --json
-```
-
-The macOS and Windows jobs perform the same installation test in CI; they are
-defined but were not executed in this environment. The Windows installer logic
-and PowerShell completion script were additionally executed with PowerShell 7
-on Linux (local zip install, rollback and uninstall), but native `cmd.exe`
-shims, user `PATH` handling and the macOS runtime were not exercised here. Treat
-those as "configured" until the workflow has run.
-
-## Repeating the evidence
-
-```sh
-npm ci --ignore-scripts
-npm run build
-npm run verify
-npm run repro
-npm run install-test
-```
-
-The install test writes `dist/install-evidence.json` with every check, its
-duration, the platform, and the release commit.
+The token is stored in the CLI config file with mode `0600` inside a `0700`
+directory, or supplied through `CODERAX_TOKEN`. This is file-based protection,
+not an OS keychain integration. A native credential-store backend (Windows
+Credential Manager, macOS Keychain, libsecret) is **not implemented** and must
+be completed and verified before the CLI claims OS credential storage.

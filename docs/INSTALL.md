@@ -60,7 +60,7 @@ Get-Content SHA256SUMS | ForEach-Object {
 }
 ```
 
-Replace `0.2.0` below with the release you are installing. The latest release is
+Replace `0.3.0` below with the release you are installing. The latest release is
 listed at <https://github.com/Auctivon-CoderaxAI/CoderaxCLI/releases>.
 
 > Release downloads require access to the repository. While the repository is
@@ -70,7 +70,7 @@ listed at <https://github.com/Auctivon-CoderaxAI/CoderaxCLI/releases>.
 ## Option A — standalone installer (Linux and macOS)
 
 ```sh
-version=0.2.0
+version=0.3.0
 base="https://github.com/Auctivon-CoderaxAI/CoderaxCLI/releases/download/v$version"
 
 curl -fsSLO "$base/install.sh"
@@ -105,7 +105,7 @@ The installer never edits your shell profile. If `~/.local/bin` is not on
 ## Option B — standalone installer (Windows)
 
 ```powershell
-$version = "0.2.0"
+$version = "0.3.0"
 $base = "https://github.com/Auctivon-CoderaxAI/CoderaxCLI/releases/download/v$version"
 
 Invoke-WebRequest "$base/install.ps1" -OutFile install.ps1
@@ -137,20 +137,20 @@ The package is currently **not published**: `package.json` contains
 ```sh
 npm install --global coderax-cli
 # or pin a version
-npm install --global coderax-cli@0.2.0
+npm install --global coderax-cli@0.3.0
 ```
 
 Today you can install a release tarball directly; it contains no dependencies,
 so npm has nothing else to fetch:
 
 ```sh
-npm install --global ./coderax-cli-0.2.0.tgz
+npm install --global ./coderax-cli-0.3.0.tgz
 ```
 
 To install into a project instead of globally:
 
 ```sh
-npm install --save-exact ./coderax-cli-0.2.0.tgz
+npm install --save-exact ./coderax-cli-0.3.0.tgz
 npx coderax --version
 ```
 
@@ -223,16 +223,16 @@ On a connected machine, download these five files from the release:
 Transfer them, verify the checksums, then install without network access:
 
 ```sh
-sh install.sh --version 0.2.0 \
-  --from-file ./coderax-cli-0.2.0-standalone.tar.gz \
+sh install.sh --version 0.3.0 \
+  --from-file ./coderax-cli-0.3.0-standalone.tar.gz \
   --checksum "<sha256 from SHA256SUMS>"
 ```
 
 Without the installer, extraction is enough:
 
 ```sh
-tar -xzf coderax-cli-0.2.0-standalone.tar.gz -C "$HOME/.coderax/cli"
-ln -sfn "$HOME/.coderax/cli/0.2.0/bin/coderax" "$HOME/.local/bin/coderax"
+tar -xzf coderax-cli-0.3.0-standalone.tar.gz -C "$HOME/.coderax/cli"
+ln -sfn "$HOME/.coderax/cli/0.3.0/bin/coderax" "$HOME/.local/bin/coderax"
 ```
 
 ## First run
@@ -255,14 +255,15 @@ Remote deployments must use HTTPS. Plain HTTP is accepted only for `localhost`,
 ## Confirm the installation
 
 ```sh
-coderax --version            # coderax-cli 0.2.0
+coderax --version            # coderax-cli 0.3.0
 coderax version --json       # machine-readable install report
+coderax completion bash      # shell completion (also zsh, fish, powershell)
 coderax help                 # command list
 ```
 
 `coderax version --json` reports `cliVersion`, `node`, `platform`, `arch`,
 `installMethod` (`standalone`, `npm-global`, `npm-local`, or `source`),
-`installPath`, `configPath`, and `supportedWorkflowEngine`.
+`installPath`, `configPath`, `clientApiVersion`, `clientApiMajor`, and `sdkVersion`.
 
 ## PATH setup
 

@@ -23,20 +23,20 @@ Every installed version stays under the install root. Repoint the launcher and
 refresh completion with one command:
 
 ```sh
-sh install.sh --version 0.2.0 --rollback
+sh install.sh --version 0.3.0 --rollback
 coderax --version
 ```
 
 If the old version was removed, reinstall it; the download is checksum-verified:
 
 ```sh
-sh install.sh --version 0.2.0
+sh install.sh --version 0.3.0
 ```
 
 Manual equivalent, if you prefer to relink yourself:
 
 ```sh
-ln -sfn "$HOME/.coderax/cli/0.2.0/bin/coderax" "$HOME/.local/bin/coderax"
+ln -sfn "$HOME/.coderax/cli/0.3.0/bin/coderax" "$HOME/.local/bin/coderax"
 ```
 
 ### Standalone (Windows)
@@ -45,18 +45,18 @@ The previous version directory is still under `%LOCALAPPDATA%\Coderax\cli`.
 Repoint the launcher at it without downloading anything:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Version 0.2.0 -Rollback
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Version 0.3.0 -Rollback
 coderax --version
 ```
 
 If that version is no longer on disk, reinstall it normally with `-Version
-0.2.0` (the download is checksum-verified).
+0.3.0` (the download is checksum-verified).
 
 ### npm
 
 ```sh
-npm install --global coderax-cli@0.2.0      # published package
-npm install --global ./coderax-cli-0.2.0.tgz  # release tarball
+npm install --global coderax-cli@0.3.0      # published package
+npm install --global ./coderax-cli-0.3.0.tgz  # release tarball
 coderax --version
 ```
 
@@ -66,7 +66,7 @@ Remove a broken version first if npm refuses to overwrite the shims:
 ### Source checkout
 
 ```sh
-git checkout v0.2.0
+git checkout v0.3.0
 npm ci --ignore-scripts
 node src/cli.js --version
 ```

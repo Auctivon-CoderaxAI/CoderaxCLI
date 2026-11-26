@@ -1,67 +1,26 @@
 import { VERSION } from "./version.js";
+import { COMMANDS, FLAGS, SUBCOMMANDS } from "./command-registry.js";
 
 /**
- * Shell completion scripts.
+ * Shell completion scripts, generated from the authoritative command registry.
  *
- * The command and flag tables here are the single source of truth for every
- * generated script. `test/completion.test.js` asserts they cover the CLI's
- * command whitelist, so adding a command without updating completion fails the
- * build rather than shipping a script that silently omits it.
- *
- * Scripts are plain text with no runtime dependency beyond the shell itself.
- * `install.sh` and `install.ps1` write the output of `coderax completion
- * <shell>` into the shell's conventional completion directory.
+ * `scripts/install.sh` and `scripts/install.ps1` write the output of `coderax
+ * completion <shell>` into the shell's conventional completion directory.
+ * `test/completion.test.js` asserts every registry command and flag appears, so
+ * a new command cannot ship with a stale completion script.
  */
 export const COMPLETION_SHELLS = Object.freeze(["bash", "zsh", "fish", "powershell"]);
 
 /** Marker used by the uninstallers to remove only files this tool generated. */
 export const COMPLETION_MARKER = "# coderax-cli shell completion";
 
-export const COMPLETION_COMMANDS = Object.freeze([
-  ["products", "Show the five-product status"],
-  ["chat", "Chat with the deployment"],
-  ["work", "Run a Work mode request"],
-  ["models", "List models from OpenAPI"],
-  ["agents", "List agents from OpenAPI"],
-  ["cloud", "Show Coderax Cloud status"],
-  ["projects", "Show Cloud projects"],
-  ["login", "Store a deployment token"],
-  ["logout", "Remove the stored token"],
-  ["status", "Show the current configuration"],
-  ["config", "Show or change configuration"],
-  ["doctor", "Diagnose configuration and connectivity"],
-  ["version", "Show version and compatibility details"],
-  ["compat", "Check WorkflowEngine compatibility"],
-  ["update", "Show upgrade instructions"],
-  ["uninstall", "Remove user data and print removal steps"],
-  ["cleanup", "Alias for uninstall"],
-  ["health", "Probe the deployment health endpoint"],
-  ["openapi", "List operations from the OpenAPI document"],
-  ["call", "Issue an authenticated request"],
-  ["completion", "Print a shell completion script"],
-  ["help", "Show help"],
-]);
-
-export const COMPLETION_FLAGS = Object.freeze([
-  ["--json", "Machine-readable output"],
-  ["--base-url", "Deployment URL"],
-  ["--token", "Bearer token"],
-  ["--timeout", "Request timeout in milliseconds"],
-  ["--model", "Model id"],
-  ["--endpoint", "Chat endpoint name"],
-  ["--chat-path", "Streaming path"],
-  ["--url", "Streaming path for one invocation"],
-  ["--data", "JSON body for call"],
-  ["--yes", "Confirm uninstall"],
-  ["--dry-run", "Preview uninstall"],
-  ["--purge", "Remove stored credentials with uninstall"],
-  ["--no-color", "Accepted for compatibility"],
-  ["--help", "Show help"],
-  ["--version", "Show the version"],
-]);
+export const COMPLETION_COMMANDS = Object.freeze(COMMANDS.map(({ name, summary }) => [name, summary]));
+export const COMPLETION_FLAGS = Object.freeze(
+  FLAGS.map(({ name, summary, takesValue }) => [`--${name}`, summary, takesValue]),
+);
 
 const COMMAND_NAMES = COMPLETION_COMMANDS.map(([name]) => name);
-const VALUE_FLAGS = "--base-url|--token|--timeout|--model|--endpoint|--chat-path|--url|--data";
+const VALUE_FLAGS = COMPLETION_FLAGS.filter(([, , takesValue]) => takesValue).map(([flag]) => flag);
 
 function bashScript() {
   return `# coderax-cli ${VERSION} bash completion
@@ -80,7 +39,7 @@ _coderax_complete() {
   fi
 
   case "$prev" in
-    ${VALUE_FLAGS})
+    ${VALUE_FLAGS.join("|")})
       return 0
       ;;
   esac
@@ -88,9 +47,15 @@ _coderax_complete() {
   case "\${COMP_WORDS[1]}" in
     config)
       if [ "$COMP_CWORD" -eq 2 ]; then
-        COMPREPLY=( $(compgen -W "show list get set" -- "$cur") )
+        COMPREPLY=( $(compgen -W "${SUBCOMMANDS.config.join(" ")}" -- "$cur") )
       elif [ "$COMP_CWORD" -eq 3 ]; then
-        COMPREPLY=( $(compgen -W "base-url chat-path endpoint model" -- "$cur") )
+        COMPREPLY=( $(compgen -W "base-url chat-path endpoint model agent" -- "$cur") )
+      fi
+      return 0
+      ;;
+    work)
+      if [ "$COMP_CWORD" -eq 2 ]; then
+        COMPREPLY=( $(compgen -W "${SUBCOMMANDS.work.join(" ")}" -- "$cur") )
       fi
       return 0
       ;;
@@ -120,7 +85,7 @@ complete -F _coderax_complete coderax
 function zshScript() {
   const commandLines = COMPLETION_COMMANDS.map(([name, description]) => `    '${name}:${description}'`).join("\n");
   const flagLines = COMPLETION_FLAGS.map(
-    ([flag, description]) => `    '${flag}[${description}]${flag === "--base-url" || flag === "--token" || flag === "--timeout" || flag === "--model" || flag === "--endpoint" || flag === "--chat-path" || flag === "--url" || flag === "--data" ? ":value:" : ""}' \\`,
+    ([flag, description, takesValue]) => `    '${flag}[${description}]${takesValue ? ":value:" : ""}' \\`,
   ).join("\n");
   return `#compdef coderax
 ${COMPLETION_MARKER}
@@ -144,7 +109,8 @@ ${flagLines}
       ;;
     args)
       case $words[1] in
-        config) _values 'config action' show list get set ;;
+        config) _values 'config action' ${SUBCOMMANDS.config.join(" ")} ;;
+        work) _values 'work action' ${SUBCOMMANDS.work.join(" ")} ;;
         completion) _values 'shell' ${COMPLETION_SHELLS.join(" ")} ;;
         call) _values 'HTTP method' GET POST PUT PATCH DELETE HEAD OPTIONS ;;
         *) _files ;;
@@ -160,18 +126,18 @@ function fishScript() {
   const commandLines = COMPLETION_COMMANDS.map(
     ([name, description]) => `complete -c coderax -n '__fish_use_subcommand' -a ${name} -d '${description}'`,
   ).join("\n");
-  const flagLines = COMPLETION_FLAGS.map(([flag, description]) => {
-    const long = flag.replace(/^--/, "");
-    const takesValue = ["base-url", "token", "timeout", "model", "endpoint", "chat-path", "url", "data"].includes(long);
-    return `complete -c coderax -l ${long}${takesValue ? " -r" : ""} -d '${description}'`;
-  }).join("\n");
+  const flagLines = COMPLETION_FLAGS.map(
+    ([flag, description, takesValue]) =>
+      `complete -c coderax -l ${flag.replace(/^--/, "")}${takesValue ? " -r" : ""} -d '${description}'`,
+  ).join("\n");
   return `# coderax-cli ${VERSION} fish completion
 ${COMPLETION_MARKER}
 # Generated by \`coderax completion fish\`. Install:
 #   coderax completion fish > "$HOME/.config/fish/completions/coderax.fish"
 complete -c coderax -f
 ${commandLines}
-complete -c coderax -n '__fish_seen_subcommand_from config' -a 'show list get set' -d 'config action'
+complete -c coderax -n '__fish_seen_subcommand_from config' -a '${SUBCOMMANDS.config.join(" ")}' -d 'config action'
+complete -c coderax -n '__fish_seen_subcommand_from work' -a '${SUBCOMMANDS.work.join(" ")}' -d 'work action'
 complete -c coderax -n '__fish_seen_subcommand_from completion' -a '${COMPLETION_SHELLS.join(" ")}' -d 'shell'
 complete -c coderax -n '__fish_seen_subcommand_from call' -a 'GET POST PUT PATCH DELETE HEAD OPTIONS' -d 'HTTP method'
 ${flagLines}
@@ -199,7 +165,7 @@ ${commandEntries}
   $flags = @(
 ${flagEntries}
   )
-  $valueFlags = @(${quoted(["--base-url", "--token", "--timeout", "--model", "--endpoint", "--chat-path", "--url", "--data"])})
+  $valueFlags = @(${quoted(VALUE_FLAGS)})
 
   $elements = @($commandAst.CommandElements | ForEach-Object { $_.ToString() })
   $firstArg = if ($elements.Count -ge 2) { $elements[1] } else { '' }
@@ -207,14 +173,17 @@ ${flagEntries}
   $completingCommand = ($elements.Count -le 1) -or ($elements.Count -eq 2 -and $wordToComplete -ne '')
 
   if ($valueFlags -contains $previous) { return }
-  if ($firstArg -eq 'config' -and $previous -in @('base-url', 'chat-path', 'endpoint', 'model')) { return }
+  if ($firstArg -eq 'config' -and $previous -in @('base-url', 'chat-path', 'endpoint', 'model', 'agent')) { return }
 
   $candidates = @()
   if (-not ($wordToComplete.StartsWith('-')) -and $completingCommand) {
     $candidates = $commands
   } elseif ($firstArg -eq 'config') {
     if ($elements.Count -ge 4) { return }
-    $candidates = @(${quoted(["show", "list", "get", "set"])}) | ForEach-Object { @{ Name = $_; Description = 'config action' } }
+    $candidates = @(${quoted(SUBCOMMANDS.config)}) | ForEach-Object { @{ Name = $_; Description = 'config action' } }
+  } elseif ($firstArg -eq 'work') {
+    if ($elements.Count -ge 4) { return }
+    $candidates = @(${quoted(SUBCOMMANDS.work)}) | ForEach-Object { @{ Name = $_; Description = 'work action' } }
   } elseif ($firstArg -eq 'completion') {
     $candidates = @(${quoted(COMPLETION_SHELLS)}) | ForEach-Object { @{ Name = $_; Description = 'shell' } }
   } elseif ($firstArg -eq 'call') {

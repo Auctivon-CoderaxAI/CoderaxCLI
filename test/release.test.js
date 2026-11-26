@@ -7,13 +7,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runCli } from "../src/cli.js";
-import {
-  SUPPORTED_ENGINE_RANGE,
-  compareSemver,
-  engineVersionFrom,
-  isSupportedEngineVersion,
-  parseSemver,
-} from "../src/compat.js";
+import { API_MAJOR, API_VERSION } from "../packages/workflow-sdk/src/index.js";
+import { compareSemver, parseSemver } from "../src/semver.js";
 import { VERSION } from "../src/version.js";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -42,14 +37,19 @@ async function withServer(handler, run) {
   }
 }
 
-function engineServer(version) {
+function metaServer({ apiVersion, role = "ADMIN", authenticated = true } = {}) {
   return (req, res) => {
     const url = new URL(req.url, "http://127.0.0.1");
     const json = (status, payload) => {
       res.writeHead(status, { "content-type": "application/json" });
       res.end(JSON.stringify(payload));
     };
-    if (url.pathname === "/health") return json(200, { status: "ok", workflowEngine: { version } });
+    if (url.pathname === "/api/meta") {
+      return json(200, { apiVersion, capabilities: ["work.chat"] });
+    }
+    if (url.pathname === "/api/user") {
+      return authenticated ? json(200, { role, email: "owner@coderax.test" }) : json(401, { message: "unauthorized" });
+    }
     return json(404, { message: "not found" });
   };
 }
@@ -69,33 +69,12 @@ test("prerelease versions sort below their release", () => {
   assert.equal(compareSemver(parseSemver("0.10.0"), parseSemver("0.9.9")), 1);
 });
 
-test("the supported engine range has exact boundaries", () => {
-  const cases = [
-    ["0.7.9", false],
-    ["0.8.0-rc.1", false],
-    ["0.8.0", true],
-    ["0.8.8", true],
-    ["0.9.5", true],
-    ["0.99.99", true],
-    ["1.0.0", false],
-    ["1.0.0-rc.1", false],
-  ];
-  for (const [version, expected] of cases) {
-    assert.equal(isSupportedEngineVersion(version).supported, expected, version);
-  }
-  assert.equal(isSupportedEngineVersion("not-a-version").supported, null);
-  assert.equal(SUPPORTED_ENGINE_RANGE, ">=0.8.0 <1.0.0");
+test("the compatibility contract comes from the pinned SDK, not a guessed engine range", () => {
+  assert.equal(API_VERSION, "1");
+  assert.equal(API_MAJOR, 1);
 });
 
-test("engine versions are read from explicit contract fields only", () => {
-  assert.equal(engineVersionFrom({ workflowEngine: { version: "0.9.1" } }), "0.9.1");
-  assert.equal(engineVersionFrom({ info: { version: "0.9.2" } }), "0.9.2");
-  // A bare health `version` is the service version and must not be trusted.
-  assert.equal(engineVersionFrom({ status: "ok", version: "9.9.9" }), null);
-  assert.equal(engineVersionFrom(null), null);
-});
-
-test("version --json reports the install and compatibility contract", async () => {
+test("version --json reports the install and API contract", async () => {
   const io = capture();
   const code = await runCli(["version", "--json"], { env: {}, stdout: io.stdout, stderr: io.stderr });
   assert.equal(code, 0);
@@ -103,7 +82,9 @@ test("version --json reports the install and compatibility contract", async () =
   assert.equal(info.cliVersion, VERSION);
   assert.equal(info.nodeSupported, true);
   assert.ok(["source", "npm-local", "npm-global", "standalone"].includes(info.installMethod));
-  assert.equal(info.supportedWorkflowEngine, SUPPORTED_ENGINE_RANGE);
+  assert.equal(info.clientApiVersion, API_VERSION);
+  assert.equal(info.clientApiMajor, API_MAJOR);
+  assert.equal(info.sdkPackage, "@coderax/workflow-sdk");
   assert.match(info.configPath, /config\.json$/);
 });
 
@@ -115,54 +96,73 @@ test("version works even when the config file is corrupt", async () => {
   const code = await runCli(["version"], { env: { CODERAX_CONFIG: file }, stdout: io.stdout, stderr: io.stderr });
   assert.equal(code, 0);
   assert.match(io.out(), new RegExp(`coderax-cli ${VERSION.replaceAll(".", "\\.")}`));
+  assert.match(io.out(), /api\s+v1 \(major 1/);
 });
 
-test("compat reports a supported engine", async () => {
-  await withServer(engineServer("0.8.8"), async (baseUrl) => {
+test("compat accepts a deployment on the same API major", async () => {
+  await withServer(metaServer({ apiVersion: "1.4" }), async (baseUrl) => {
     const io = capture();
     const code = await runCli(
-      ["compat", "--base-url", baseUrl, "--json"],
+      ["compat", "--base-url", baseUrl, "--token", "test-token", "--json"],
       { env: {}, stdout: io.stdout, stderr: io.stderr },
     );
-    assert.equal(code, 0);
+    assert.equal(code, 0, io.err());
     const verdict = JSON.parse(io.out());
     assert.equal(verdict.supported, true);
-    assert.equal(verdict.engineVersion, "0.8.8");
-    assert.equal(verdict.range, SUPPORTED_ENGINE_RANGE);
+    assert.equal(verdict.apiVersion, "1.4");
+    assert.equal(verdict.clientApiVersion, "1.x");
+    assert.equal(verdict.owner, "ADMIN");
   });
 });
 
-test("compat distinguishes an unsupported engine from an unknown one", async () => {
-  await withServer(engineServer("1.4.0"), async (baseUrl) => {
+test("compat rejects an incompatible API major with the SDK error code", async () => {
+  await withServer(metaServer({ apiVersion: "2.0" }), async (baseUrl) => {
     const io = capture();
-    const code = await runCli(["compat", "--base-url", baseUrl, "--json"], { env: {}, stdout: io.stdout, stderr: io.stderr });
-    assert.equal(code, 1);
-    assert.equal(JSON.parse(io.out()).supported, false);
+    const code = await runCli(
+      ["compat", "--base-url", baseUrl, "--token", "test-token", "--json"],
+      { env: {}, stdout: io.stdout, stderr: io.stderr },
+    );
+    assert.equal(code, 6);
+    const verdict = JSON.parse(io.out());
+    assert.equal(verdict.supported, false);
+    assert.equal(verdict.apiVersion, "2.0");
   });
+});
 
-  await withServer(engineServer(undefined), async (baseUrl) => {
+test("compat reports an unadvertised API version as unknown, not compatible", async () => {
+  await withServer((req, res) => {
+    const json = (status, payload) => {
+      res.writeHead(status, { "content-type": "application/json" });
+      res.end(JSON.stringify(payload));
+    };
+    if (urlPath(req) === "/api/user") return json(200, { role: "ADMIN" });
+    return json(404, { message: "not found" });
+  }, async (baseUrl) => {
     const io = capture();
-    const code = await runCli(["compat", "--base-url", baseUrl, "--json"], { env: {}, stdout: io.stdout, stderr: io.stderr });
-    assert.equal(code, 1);
+    const code = await runCli(
+      ["compat", "--base-url", baseUrl, "--token", "test-token", "--json"],
+      { env: {}, stdout: io.stdout, stderr: io.stderr },
+    );
+    assert.equal(code, 1, io.err());
     const verdict = JSON.parse(io.out());
     assert.equal(verdict.supported, null);
     assert.match(verdict.reason, /did not report/);
   });
 });
 
+function urlPath(req) {
+  return new URL(req.url, "http://127.0.0.1").pathname;
+}
+
 test("compat surfaces an authentication failure instead of calling it unknown", async () => {
-  await withServer((req, res) => {
-    res.writeHead(401, { "content-type": "application/json" });
-    res.end(JSON.stringify({ message: "unauthorized" }));
-  }, async (baseUrl) => {
+  await withServer(metaServer({ apiVersion: "1.0", authenticated: false }), async (baseUrl) => {
     const io = capture();
-    const code = await runCli(["compat", "--base-url", baseUrl, "--json"], {
-      env: {},
-      stdout: io.stdout,
-      stderr: io.stderr,
-    });
+    const code = await runCli(
+      ["compat", "--base-url", baseUrl, "--token", "bad-token", "--json"],
+      { env: {}, stdout: io.stdout, stderr: io.stderr },
+    );
     assert.equal(code, 3);
-    assert.match(io.err(), /HTTP_401/);
+    assert.match(io.err(), /UNAUTHENTICATED|HTTP_401/);
   });
 });
 
@@ -217,11 +217,19 @@ test("the package stays install-safe and publish-locked", async () => {
   }
 });
 
-test("no shipped module can spawn a runtime or background service", async () => {
+test("only the operator-requested notification hook may spawn a process", async () => {
   const directory = join(ROOT, "src");
   for (const file of await readdir(directory)) {
     if (!file.endsWith(".js")) continue;
     const source = await readFile(join(directory, file), "utf8");
+    if (file === "workflow-commands.js") {
+      // `--notify-command` is an explicit, per-invocation operator choice. It
+      // must stay a detached shell notification, never a runtime launcher.
+      assert.match(source, /notify-command/, "the spawn must be the notification hook");
+      assert.match(source, /spawn\(expanded/, "the notification hook must spawn the user's command");
+      assert.equal(source.includes("execSync"), false, "synchronous execution is not allowed");
+      continue;
+    }
     assert.equal(source.includes("child_process"), false, `${file} must not spawn processes`);
   }
 });

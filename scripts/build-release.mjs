@@ -25,7 +25,7 @@ import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createTarGz, createZip } from "./lib/archive.mjs";
-import { SUPPORTED_ENGINE_RANGE } from "../src/compat.js";
+import { API_MAJOR, API_VERSION } from "../packages/workflow-sdk/src/index.js";
 import { NODE_REQUIREMENT, PACKAGE_NAME, VERSION as PACKAGE_VERSION } from "../src/version.js";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -298,7 +298,10 @@ const manifest = {
   sourceDate: new Date(MTIME).toISOString(),
   sourceDateEpoch: SOURCE_DATE_EPOCH,
   node: NODE_REQUIREMENT,
-  supportedWorkflowEngine: SUPPORTED_ENGINE_RANGE,
+  clientApiVersion: API_VERSION,
+  clientApiMajor: API_MAJOR,
+  sdkPackage: "@coderax/workflow-sdk",
+  sdkVersion: "0.1.0",
   commit: commit(),
   reproducible: "Run `npm run repro`; identical source and SOURCE_DATE_EPOCH produce identical artifact hashes.",
   artifacts: artifacts.map((artifact) => ({

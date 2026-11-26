@@ -57,7 +57,7 @@ test("login verifies and stores a token, then status masks it and logout removes
   const env = { CODERAX_CONFIG: file };
   const fetchImpl = async (url) => {
     assert.match(String(url), /\/api\/user$/);
-    return new Response(JSON.stringify({ email: "dev@coderax.test" }), {
+    return new Response(JSON.stringify({ email: "dev@coderax.test", role: "ADMIN" }), {
       status: 200,
       headers: { "Content-Type": "application/json" },
     });

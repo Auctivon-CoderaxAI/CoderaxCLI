@@ -5,6 +5,36 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the major
 version is `0`, a minor release may add or change behaviour.
 
+## [0.3.0] - 2026-11-26
+
+### Added
+
+- Consolidated release pipeline for native Windows, macOS and Linux from one
+  command registry and one CI workflow.
+- Interactive Chat and Work, durable task synchronization, the reviewed
+  WorkflowEngine SDK, workflows, runs, approvals, resume/retry, notifications
+  and repository operations from the owner-authored capability branches.
+- `coderax compat` and `coderax version --json` now report the SDK's pinned API
+  contract (`API_VERSION`/`API_MAJOR`). The speculative engine semver range and
+  `src/compat.js` are removed.
+- Shell completion for bash, zsh, fish and PowerShell is generated from
+  `src/command-registry.js`; a test fails if any command or flag is missing.
+- `coderax uninstall`/`cleanup`, install/rollback documentation, release
+  manifest, SPDX SBOM, SHA-256 checksums, reproducible builds and dependency
+  scanning in CI.
+- Installer hardening: archive traversal and symlink rejection, atomic launcher
+  replacement, explicit downgrade refusal (`--allow-downgrade`), and paths with
+  spaces and non-ASCII characters in the installed-artifact suite.
+
+### Known gaps
+
+- OS keychain/Credential Manager integration is not implemented; tokens use a
+  `0600` config file or `CODERAX_TOKEN`.
+- No live Coderax deployment was available, so live gateway integration is not
+  verified. API negotiation is tested against contract stubs.
+- The pinned SDK contract still needs confirmation from the WorkflowEngine SDK
+  owner before production-compatibility claims.
+
 ## [0.2.0] - 2026-11-26
 
 ### Added

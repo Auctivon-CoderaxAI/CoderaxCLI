@@ -17,7 +17,8 @@ param(
   [switch]$SkipVerify,
   [switch]$Force,
   [switch]$NoCompletion,
-  [switch]$Rollback
+  [switch]$Rollback,
+  [switch]$AllowDowngrade
 )
 
 $ErrorActionPreference = "Stop"
@@ -76,10 +77,27 @@ $asset = "coderax-cli-$Version-standalone.zip"
 $destination = Join-Path $Prefix $Version
 $launcher = Join-Path $BinDir "coderax.cmd"
 
+# Installing an older release is an explicit decision, never a stale-URL side
+# effect. `-Rollback` remains the supported way to switch between installed
+# versions.
+if (-not $Rollback -and -not $AllowDowngrade -and (Test-Path -LiteralPath $Prefix)) {
+  $newest = Get-ChildItem -LiteralPath $Prefix -Directory -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -match '^\d+\.\d+\.\d+$' } |
+    Sort-Object { [version]$_.Name } -Descending |
+    Select-Object -First 1
+  if ($newest -and $Version -match '^\d+\.\d+\.\d+$' -and ([version]$newest.Name) -gt ([version]$Version)) {
+    Fail "refusing to downgrade $($newest.Name) -> $Version (use -AllowDowngrade or -Rollback)" 2
+  }
+}
+
 function Set-Launcher([string]$Target) {
   New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
   $shim = "@echo off`r`ncall `"$Target\bin\coderax.cmd`" %*`r`nexit /b %ERRORLEVEL%`r`n"
-  Set-Content -LiteralPath $launcher -Value $shim -Encoding ascii -NoNewline
+  # Stage beside the launcher, then rename over it, so an interrupted install
+  # leaves either the old launcher or the new one, never a half-written file.
+  $staged = "$launcher.new.$PID"
+  Set-Content -LiteralPath $staged -Value $shim -Encoding ascii -NoNewline
+  Move-Item -LiteralPath $staged -Destination $launcher -Force
 }
 
 function Set-Completion([string]$Target) {
@@ -155,6 +173,23 @@ try {
     } else {
       Write-Warning "checksum verification disabled"
     }
+  }
+
+  # Reject traversal, absolute paths, and drive-qualified entries before
+  # Expand-Archive writes anything outside the staging directory.
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  $zip = [System.IO.Compression.ZipFile]::OpenRead($archive)
+  try {
+    $bad = @($zip.Entries | Where-Object {
+      $_.FullName -match '(^[/\\]|(^|[/\\])\.\.([/\\]|$)|^[A-Za-z]:)'
+    })
+    if ($bad.Count -gt 0) {
+      Fail "archive contains an unsafe path: $($bad[0].FullName)" 3
+    }
+    $links = @($zip.Entries | Where-Object { ($_.ExternalAttributes -band 0xF000) -eq 0xA000 })
+    if ($links.Count -gt 0) { Fail "archive contains a symbolic link: $($links[0].FullName)" 3 }
+  } finally {
+    $zip.Dispose()
   }
 
   Expand-Archive -LiteralPath $archive -DestinationPath $temp -Force
