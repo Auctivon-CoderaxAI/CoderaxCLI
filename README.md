@@ -59,6 +59,7 @@ else. No administrator rights, services, daemons, or open ports.
 | Reproducible artifacts, SHA-256 checksums, SPDX SBOM | ✅ implemented, verified |
 | Cross-platform installation tests | ✅ Linux verified; macOS/Windows in CI |
 | `version` diagnostics, `compat`, `uninstall` | ✅ implemented, tested |
+| Shell completion (bash, zsh, fish, PowerShell) | ✅ implemented, tested |
 | npm registry publication | ⛔ not enabled — owner authorization required |
 | Automatic updates | ⛔ deliberately not implemented |
 | File upload, agent mutation | ⛔ not implemented — use `call` |
@@ -106,6 +107,7 @@ coderax openapi
 coderax call GET /api/models --json
 coderax call POST /api/ask --data '{"text":"hello"}'
 coderax update
+coderax completion bash        # print a completion script for your shell
 ```
 
 `openapi`, `agents`, and `models` use the deployment's OpenAPI document. `health`

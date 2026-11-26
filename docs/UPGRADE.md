@@ -51,7 +51,8 @@ to a custom location, pass the same `--prefix`/`--bin-dir` (or `-Prefix`/
 `installPath` if you are unsure.
 
 Upgrading does **not** require `--force`; that flag only replaces an existing
-installation of the *same* version.
+installation of the *same* version. The installer also refreshes shell completion
+for the shells it finds, so completion keeps matching the active version.
 
 ### Offline upgrades
 
@@ -139,4 +140,5 @@ in its output, so it is safe to run as a diagnostic without failing a pipeline.
 ## Rolling back
 
 See [ROLLBACK.md](ROLLBACK.md). Standalone installs keep prior versions, so a
-rollback is usually a single `ln -sfn` or a reinstall of the old version.
+rollback is one command: `sh install.sh --version 0.2.0 --rollback` (Windows:
+`-Rollback`).

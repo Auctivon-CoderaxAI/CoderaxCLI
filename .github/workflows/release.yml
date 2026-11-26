@@ -84,7 +84,17 @@ jobs:
             echo "::error::release $TAG already exists; cut a new version instead of reusing a tag"
             exit 1
           fi
-          gh release create "$TAG" dist/* \
+          gh release create "$TAG" \
+            dist/coderax-cli-*.tgz \
+            dist/coderax-cli-*.tar.gz \
+            dist/coderax-cli-*.zip \
+            dist/SHA256SUMS \
+            dist/release-manifest.json \
+            dist/sbom.spdx.json \
+            dist/install.sh \
+            dist/install.ps1 \
+            dist/uninstall.sh \
+            dist/uninstall.ps1 \
             --title "Coderax CLI $TAG" \
             --notes-file dist/release-notes.md \
             --verify-tag

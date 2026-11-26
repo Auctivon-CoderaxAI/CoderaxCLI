@@ -19,30 +19,38 @@ version is usually still present.
 
 ### Standalone (Linux, macOS)
 
-The launcher is a symlink into a versioned directory. Repoint it:
+Every installed version stays under the install root. Repoint the launcher and
+refresh completion with one command:
 
 ```sh
-ln -sfn "$HOME/.coderax/cli/0.2.0/bin/coderax" "$HOME/.local/bin/coderax"
+sh install.sh --version 0.2.0 --rollback
 coderax --version
 ```
 
-If the old version was removed, reinstall it:
+If the old version was removed, reinstall it; the download is checksum-verified:
 
 ```sh
 sh install.sh --version 0.2.0
 ```
 
+Manual equivalent, if you prefer to relink yourself:
+
+```sh
+ln -sfn "$HOME/.coderax/cli/0.2.0/bin/coderax" "$HOME/.local/bin/coderax"
+```
+
 ### Standalone (Windows)
 
-Reinstall the old version; the installer rewrites `coderax.cmd` to point at it:
+The previous version directory is still under `%LOCALAPPDATA%\Coderax\cli`.
+Repoint the launcher at it without downloading anything:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Version 0.2.0
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Version 0.2.0 -Rollback
 coderax --version
 ```
 
-The previous version directory is still under `%LOCALAPPDATA%\Coderax\cli`, so
-the download is small and the install is quick.
+If that version is no longer on disk, reinstall it normally with `-Version
+0.2.0` (the download is checksum-verified).
 
 ### npm
 

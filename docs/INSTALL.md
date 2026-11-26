@@ -94,6 +94,8 @@ place, which makes rollback a one-line change.
 | `--checksum <sha256>` | — | Required to verify `--from-file` |
 | `--base-url <url>` | GitHub Releases | Releases mirror |
 | `--force` | off | Replace an existing install of the same version |
+| `--rollback` | off | Repoint the launcher to an installed version (needs `--version`) |
+| `--no-completion` | off | Do not install shell completion |
 | `--dry-run` | off | Print the plan and change nothing |
 | `--skip-verify` | off | Skip checksum verification (not recommended) |
 
@@ -119,7 +121,8 @@ Defaults: program in `%LOCALAPPDATA%\Coderax\cli\<version>`, launcher
 it prints the command to add the launcher directory to your user `PATH`.
 
 Options mirror the POSIX installer: `-Version`, `-Prefix`, `-BinDir`,
-`-FromFile`, `-Checksum`, `-BaseUrl`, `-Force`, `-DryRun`, `-SkipVerify`.
+`-FromFile`, `-Checksum`, `-BaseUrl`, `-Force`, `-Rollback`, `-NoCompletion`,
+`-CompletionDir`, `-DryRun`, `-SkipVerify`.
 
 `-ExecutionPolicy Bypass` applies to that one process only. If your
 organisation forbids it, unblock the file instead:
@@ -151,7 +154,47 @@ npm install --save-exact ./coderax-cli-0.2.0.tgz
 npx coderax --version
 ```
 
-npm creates the `coderax` and `coderax.cmd` shims automatically.
+npm creates the `coderax` and `coderax.cmd` shims automatically. npm installs do
+not add shell completion; print it with `coderax completion <shell>` and write it
+to the path for your shell (see below).
+
+## Shell completion
+
+`coderax completion <bash|zsh|fish|powershell>` prints a completion script. The
+standalone installers write the file for every shell they find and never edit a
+shell profile.
+
+| Shell | Installed path | To enable |
+| --- | --- | --- |
+| bash | `~/.local/share/bash-completion/completions/coderax` | Open a new shell |
+| zsh | `~/.local/share/zsh/site-functions/_coderax` | Add that directory to `fpath` before `compinit` |
+| fish | `~/.config/fish/completions/coderax.fish` | Automatic |
+| PowerShell | `%LOCALAPPDATA%\Coderax\completions\coderax.ps1` | Dot-source it from `$PROFILE` |
+
+POSIX paths honour `XDG_DATA_HOME` and `XDG_CONFIG_HOME`; PowerShell honours
+`CODERAX_COMPLETION_DIR`. To install manually:
+
+```sh
+coderax completion bash > "${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion/completions/coderax"
+coderax completion zsh > "${XDG_DATA_HOME:-$HOME/.local/share}/zsh/site-functions/_coderax"
+coderax completion fish > "${XDG_CONFIG_HOME:-$HOME/.config}/fish/completions/coderax.fish"
+```
+
+For zsh, add this to `~/.zshrc` before `compinit`:
+
+```zsh
+fpath=("${XDG_DATA_HOME:-$HOME/.local/share}/zsh/site-functions" $fpath)
+```
+
+PowerShell, add this line to `$PROFILE`:
+
+```powershell
+. "$env:LOCALAPPDATA\Coderax\completions\coderax.ps1"
+```
+
+Skip automatic installation with `--no-completion` (POSIX) or `-NoCompletion`
+(Windows). Uninstall removes only files carrying the `coderax-cli shell
+completion` marker, so a hand-written completion file with the same name is kept.
 
 ## Option D — from source
 
@@ -250,6 +293,7 @@ Open a new terminal afterwards.
 | `checksum mismatch` | Truncated download, proxy, or tampering | Re-download; do not use `--skip-verify` |
 | `version X is already installed` | Re-running the same version | Use `--force` to replace it |
 | `coderax: command not found` | Launcher directory not on `PATH` | See PATH setup above |
+| Completion does nothing | Shell has not loaded the generated file | Check the path and enable it as shown in [Shell completion](#shell-completion) |
 | `BASE_URL_INSECURE` | Remote URL is `http://` | Use `https://`; HTTP is loopback-only |
 | `HTTP_401` / `HTTP_403` | Missing, expired, or revoked token | `coderax login --token "<token>"` |
 | `compat` says unsupported | Engine outside `>=0.8.0 <1.0.0` | See [COMPATIBILITY.md](COMPATIBILITY.md) |

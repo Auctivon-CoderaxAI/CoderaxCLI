@@ -26,7 +26,7 @@ import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createTarGz, createZip } from "./lib/archive.mjs";
 import { SUPPORTED_ENGINE_RANGE } from "../src/compat.js";
-import { NODE_REQUIREMENT, PACKAGE_NAME, VERSION } from "../src/version.js";
+import { NODE_REQUIREMENT, PACKAGE_NAME, VERSION as PACKAGE_VERSION } from "../src/version.js";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const pkg = JSON.parse(await readFile(join(ROOT, "package.json"), "utf8"));
@@ -42,6 +42,13 @@ function option(name, fallback) {
 }
 
 const OUT = resolve(ROOT, option("out", "dist"));
+// `--version` builds a rehearsal artifact of a future release (used by the
+// upgrade/rollback test). The shipped version always comes from package.json.
+const OVERRIDE_VERSION = option("version", null);
+if (OVERRIDE_VERSION !== null && !/^\d+\.\d+\.\d+([-.][0-9A-Za-z.]+)?$/.test(OVERRIDE_VERSION)) {
+  throw new Error("--version must be a semantic version such as 1.2.3");
+}
+const VERSION = OVERRIDE_VERSION ?? PACKAGE_VERSION;
 const SOURCE_DATE_EPOCH = Number(process.env.SOURCE_DATE_EPOCH ?? DEFAULT_SOURCE_DATE_EPOCH);
 if (!Number.isInteger(SOURCE_DATE_EPOCH) || SOURCE_DATE_EPOCH <= 0) {
   throw new Error("SOURCE_DATE_EPOCH must be a positive integer");
@@ -215,8 +222,14 @@ function commit() {
   }
 }
 
-if (pkg.version !== VERSION) throw new Error("package.json and src/version.js disagree about the version");
+if (pkg.version !== PACKAGE_VERSION) throw new Error("package.json and src/version.js disagree about the version");
 if (pkg.name !== PACKAGE_NAME) throw new Error("package name mismatch between package.json and src/version.js");
+
+// An override changes the version inside the artifact too, including the
+// manifest that `src/version.js` reads, so the installed launcher reports it.
+const versionOverride = OVERRIDE_VERSION === null
+  ? new Map()
+  : new Map([["package.json", `${JSON.stringify({ ...pkg, version: VERSION }, null, 2)}\n`]]);
 
 await rm(OUT, { recursive: true, force: true });
 await mkdir(OUT, { recursive: true });
@@ -227,10 +240,11 @@ for (const script of scriptFiles) {
   if (!existsSync(join(ROOT, "scripts", script))) throw new Error(`missing installer: scripts/${script}`);
 }
 
-const npmEntries = npmOrder(await entriesFrom("package/", packageList));
+const npmEntries = npmOrder(await entriesFrom("package/", packageList, versionOverride));
 
 const standaloneFiles = [...packageList, ...scriptFiles];
 const overrides = new Map([
+  ...versionOverride,
   ["bin/coderax", POSIX_LAUNCHER],
   ["bin/coderax.cmd", WINDOWS_LAUNCHER],
   ...scriptFiles.map((file) => [file, null]),
@@ -316,6 +330,9 @@ for (const name of checksumTargets) {
 await writeFile(join(OUT, "SHA256SUMS"), `${checksumLines.join("\n")}\n`);
 
 console.log(`coderax-cli ${VERSION} release artifacts -> ${portable(relative(ROOT, OUT)) || "."}`);
+if (OVERRIDE_VERSION !== null) {
+  console.log(`  note: rehearsal artifact for ${OVERRIDE_VERSION}; package.json still declares ${PACKAGE_VERSION}`);
+}
 for (const artifact of artifacts) {
   console.log(`  ${artifact.name.padEnd(46)} ${String(artifact.data.length).padStart(9)} bytes  ${sha256(artifact.data)}`);
 }

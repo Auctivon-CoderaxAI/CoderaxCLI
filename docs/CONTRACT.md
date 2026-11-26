@@ -1,6 +1,6 @@
 # CLI ↔ deployment contract
 
-Version: CLI `0.1.0`, targeting Coderax deployments that publish an OpenAPI 3.x
+Version: CLI `0.2.0`, targeting Coderax deployments that publish an OpenAPI 3.x
 document.
 
 ## Authentication

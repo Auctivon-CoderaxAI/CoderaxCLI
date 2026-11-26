@@ -79,6 +79,9 @@ environment, never in a workflow reachable from a pull request.
   with `contents: write` scoped to that job.
 - Installation from the GitHub Release (`install.sh`, `install.ps1`) and from
   the npm tarball (`npm install --global ./coderax-cli-<version>.tgz`).
+- Shell completion for bash, zsh, fish and PowerShell, written by the standalone
+  installers and removed by the uninstallers only when the file carries the
+  generated marker.
 - No registry, no package publication, no ownership change.
 
 ### What still needs the owner

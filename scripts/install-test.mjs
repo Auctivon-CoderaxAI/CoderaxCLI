@@ -40,6 +40,12 @@ const TARBALL = join(DIST, `coderax-cli-${VERSION}-standalone.tar.gz`);
 const tarballRecord = manifest.artifacts.find((artifact) => artifact.name.endsWith("-standalone.tar.gz"));
 assert.ok(tarballRecord, "the manifest must list the standalone tarball");
 
+// A rehearsal of the next release, built from the same source with a bumped
+// version, exercises a real side-by-side upgrade and rollback. Nothing is
+// downloaded and no release is published.
+const [major, minor, patch] = VERSION.split(".").map((part) => Number.parseInt(part, 10));
+const NEXT_VERSION = `${major}.${minor}.${patch + 1}`;
+
 const results = [];
 const transcript = [];
 
@@ -75,6 +81,8 @@ const prefix = join(sandbox, "prefix");
 const binDir = join(sandbox, "bin");
 const home = join(sandbox, "home");
 const configPath = join(sandbox, "coderax", "config.json");
+const completionDir = join(sandbox, "completions");
+const bashCompletion = join(home, ".local", "share", "bash-completion", "completions", "coderax");
 await mkdir(home, { recursive: true });
 
 const env = {
@@ -120,27 +128,56 @@ function cli(args, extraEnv = {}) {
   });
 }
 
-function installer(extra = []) {
-  const args = [
-    "--version", VERSION,
-    "--from-file", TARBALL,
-    "--checksum", tarballRecord.sha256,
+function installer(extra = [], options = {}) {
+  const runEnv = options.env ?? env;
+  const version = options.version ?? VERSION;
+  const archive = options.tarball ?? TARBALL;
+  const checksum = options.checksum ?? tarballRecord.sha256;
+  if (IS_WINDOWS) {
+    const local = extra.includes("--rollback")
+      ? []
+      : ["-FromFile", archive, "-Checksum", checksum];
+    return spawn("powershell.exe", [
+      "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", join(ROOT, "scripts", "install.ps1"),
+      "-Version", version,
+      ...local,
+      "-Prefix", prefix,
+      "-BinDir", binDir,
+      "-CompletionDir", options.completionDir ?? completionDir,
+      ...extra.map((value) => (value === "--force" ? "-Force" : value === "--no-completion" ? "-NoCompletion" : value === "--rollback" ? "-Rollback" : value === "--dry-run" ? "-DryRun" : value)),
+    ], { env: runEnv });
+  }
+  return spawn("sh", [
+    join(ROOT, "scripts", "install.sh"),
+    "--version", version,
+    ...(extra.includes("--rollback") ? [] : ["--from-file", archive, "--checksum", checksum]),
     "--prefix", prefix,
     "--bin-dir", binDir,
     ...extra,
-  ];
-  if (IS_WINDOWS) {
-    return spawn("powershell.exe", [
-      "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", join(ROOT, "scripts", "install.ps1"),
-      "-Version", VERSION,
-      "-FromFile", TARBALL,
-      "-Checksum", tarballRecord.sha256,
-      "-Prefix", prefix,
-      "-BinDir", binDir,
-      ...extra.map((value) => (value === "--force" ? "-Force" : value)),
-    ], { env });
-  }
-  return spawn("sh", [join(ROOT, "scripts", "install.sh"), ...args], { env });
+  ], { env: runEnv });
+}
+
+async function buildUpgradeArtifact() {
+  const upgradeDist = join(sandbox, "upgrade-dist");
+  const result = spawn(process.execPath, [
+    join(ROOT, "scripts", "build-release.mjs"),
+    "--version", NEXT_VERSION,
+    "--out", upgradeDist,
+  ], { cwd: ROOT, env });
+  assert.equal(result.status, 0, tail(result));
+  const upgradeManifest = JSON.parse(await readFile(join(upgradeDist, "release-manifest.json"), "utf8"));
+  assert.equal(upgradeManifest.version, NEXT_VERSION);
+  const record = upgradeManifest.artifacts.find((artifact) => artifact.name.endsWith("-standalone.tar.gz"));
+  assert.ok(record, "the rehearsal manifest must list the standalone tarball");
+  return {
+    tarball: join(upgradeDist, `coderax-cli-${NEXT_VERSION}-standalone.tar.gz`),
+    checksum: record.sha256,
+  };
+}
+
+function hasTool(name, args = ["--version"]) {
+  const result = spawnSync(name, args, { encoding: "utf8" });
+  return result.error === undefined && result.status === 0;
 }
 
 function uninstaller(extra = []) {
@@ -149,6 +186,7 @@ function uninstaller(extra = []) {
       "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", join(ROOT, "scripts", "uninstall.ps1"),
       "-Prefix", prefix,
       "-BinDir", binDir,
+      "-CompletionDir", completionDir,
       "-Yes",
       "-Purge",
       ...extra,
@@ -245,6 +283,134 @@ try {
     assert.ok(existsSync(join(prefix, VERSION, "src", "cli.js")), "installed sources are missing");
     assert.ok(existsSync(join(prefix, VERSION, "uninstall.sh")), "the offline uninstaller is missing");
     return `${prefix}/${VERSION}`;
+  });
+
+  await step("shell completion is generated for every supported shell", async () => {
+    const work = join(sandbox, "completion-syntax");
+    await mkdir(work, { recursive: true });
+    const files = {};
+    for (const shell of ["bash", "zsh", "fish", "powershell"]) {
+      const result = await cli(["completion", shell]);
+      assert.equal(result.status, 0, tail(result));
+      assert.match(result.stdout, /coderax-cli shell completion/, `${shell} marker missing`);
+      assert.doesNotMatch(result.stdout, /undefined/, `${shell} contains an unresolved value`);
+      files[shell] = join(work, shell === "powershell" ? "coderax.ps1" : shell === "fish" ? "coderax.fish" : shell);
+      await writeFile(files[shell], result.stdout);
+    }
+
+    const checked = [];
+    const skipped = [];
+    const grammar = [
+      ["bash", "bash", [files.bash]],
+      ["zsh", "zsh", [files.zsh]],
+      ["fish", "fish", ["--no-execute", files.fish]],
+    ];
+    for (const [shell, tool, args] of grammar) {
+      // Git Bash on Windows does not reliably resolve a backslash path in
+      // `bash -n`; the POSIX jobs already check bash grammar.
+      if (shell === "bash" && IS_WINDOWS) {
+        skipped.push(shell);
+        continue;
+      }
+      if (!hasTool(tool, ["--version"])) {
+        skipped.push(shell);
+        continue;
+      }
+      const result = shell === "bash"
+        ? spawn("bash", ["-n", ...args], { env })
+        : spawn(tool, shell === "fish" ? args : ["-n", ...args], { env });
+      assert.equal(result.status, 0, `${shell} rejected its completion script:\n${tail(result)}`);
+      checked.push(shell);
+    }
+
+    const powershell = hasTool("pwsh", ["-NoProfile", "-Command", "exit 0"])
+      ? "pwsh"
+      : hasTool("powershell", ["-NoProfile", "-Command", "exit 0"])
+        ? "powershell"
+        : null;
+    if (powershell === null) {
+      skipped.push("powershell");
+    } else {
+      const result = spawn(powershell, [
+        "-NoProfile",
+        "-Command",
+        `$null = [scriptblock]::Create((Get-Content -Raw -LiteralPath "${files.powershell}"))`,
+      ], { env });
+      assert.equal(result.status, 0, `PowerShell rejected its completion script:\n${tail(result)}`);
+      checked.push("powershell");
+    }
+
+    return `grammar checked: ${checked.join(", ") || "none"}${skipped.length ? `; not installed: ${skipped.join(", ")}` : ""}`;
+  });
+
+  await step("the installer wrote completion for the shells it found", async () => {
+    if (IS_WINDOWS) {
+      const file = join(completionDir, "coderax.ps1");
+      assert.ok(existsSync(file), `missing ${file}`);
+      const body = await readFile(file, "utf8");
+      assert.match(body, /Register-ArgumentCompleter -Native -CommandName coderax/);
+      return file;
+    }
+    if (!hasTool("bash", ["--version"])) {
+      return "bash is not installed; generation was verified through the launcher";
+    }
+    assert.ok(existsSync(bashCompletion), `missing ${bashCompletion}`);
+    const generated = await cli(["completion", "bash"]);
+    assert.equal((await readFile(bashCompletion, "utf8")).trim(), generated.stdout.trim());
+    return bashCompletion;
+  });
+
+  await step("the installer keeps completion optional", async () => {
+    const quietHome = join(sandbox, "home-no-completion");
+    await mkdir(quietHome, { recursive: true });
+    const quietDir = join(sandbox, "completions-no-completion");
+    const result = installer(["--force", "--no-completion"], {
+      env: IS_WINDOWS ? env : { ...env, HOME: quietHome, USERPROFILE: quietHome },
+      completionDir: quietDir,
+    });
+    assert.equal(result.status, 0, tail(result));
+    if (IS_WINDOWS) {
+      assert.equal(existsSync(join(quietDir, "coderax.ps1")), false, "-NoCompletion wrote a file");
+    } else if (hasTool("bash", ["--version"])) {
+      assert.equal(
+        existsSync(join(quietHome, ".local", "share", "bash-completion", "completions", "coderax")),
+        false,
+        "--no-completion wrote a file",
+      );
+    }
+    return "no completion file created";
+  });
+
+  await step("a newer version installs side by side and takes over the launcher", async () => {
+    const upgrade = await buildUpgradeArtifact();
+    const result = installer([], {
+      version: NEXT_VERSION,
+      tarball: upgrade.tarball,
+      checksum: upgrade.checksum,
+    });
+    assert.equal(result.status, 0, tail(result));
+    assert.ok(existsSync(join(prefix, VERSION)), "the previous version was removed");
+    assert.ok(existsSync(join(prefix, NEXT_VERSION)), "the newer version is missing");
+    const reported = await cli(["--version"]);
+    assert.equal(reported.stdout.trim(), `coderax-cli ${NEXT_VERSION}`);
+    const info = await cli(["version", "--json"]);
+    assert.equal(JSON.parse(info.stdout).installPath, join(prefix, NEXT_VERSION));
+    return `${VERSION} -> ${NEXT_VERSION}`;
+  });
+
+  await step("rollback repoints the launcher to the installed previous version", async () => {
+    const result = installer(["--rollback"], { version: VERSION });
+    assert.equal(result.status, 0, tail(result));
+    const reported = await cli(["--version"]);
+    assert.equal(reported.stdout.trim(), `coderax-cli ${VERSION}`);
+    const info = await cli(["version", "--json"]);
+    assert.equal(JSON.parse(info.stdout).installPath, join(prefix, VERSION));
+    assert.ok(existsSync(join(prefix, NEXT_VERSION)), "rollback removed the newer version");
+
+    const dryRun = installer(["--rollback", "--dry-run"], { version: VERSION });
+    assert.equal(dryRun.status, 0, tail(dryRun));
+    assert.match(dryRun.stdout, /rollback plan/);
+    return `${NEXT_VERSION} -> ${VERSION}; newer version retained`;
   });
 
   await step("launcher reports the released version", async () => {
@@ -431,14 +597,31 @@ console.log(version.VERSION);
     return `${transcript.join("\n").length} bytes of output scanned`;
   });
 
-  await step("uninstall removes the program, launcher, and user data", async () => {
+  await step("uninstall removes the program, launcher, credentials and its completion", async () => {
     assert.ok(await pathExists(configPath), "login should have written a config file");
+
+    // A hand-written file with the same name must survive: the uninstaller only
+    // deletes files that carry the generated-file marker.
+    const handWritten = join(home, ".local", "share", "zsh", "site-functions", "_coderax");
+    if (!IS_WINDOWS) {
+      await mkdir(join(home, ".local", "share", "zsh", "site-functions"), { recursive: true });
+      await writeFile(handWritten, "# hand-written by the user, must survive\n");
+    }
+
     const result = uninstaller();
     assert.equal(result.status, 0, tail(result));
     assert.equal(await pathExists(launcher), false, "launcher still exists");
     assert.equal(await pathExists(join(prefix, VERSION)), false, "program directory still exists");
     assert.equal(await pathExists(configPath), false, "config was not purged");
-    return "launcher, program directory, and credentials removed";
+    if (IS_WINDOWS) {
+      assert.equal(await pathExists(join(completionDir, "coderax.ps1")), false, "completion was not removed");
+    } else {
+      if (hasTool("bash", ["--version"])) {
+        assert.equal(await pathExists(bashCompletion), false, "generated bash completion was not removed");
+      }
+      assert.equal(await pathExists(handWritten), true, "a hand-written completion file was deleted");
+    }
+    return "launcher, program, credentials and generated completion removed; hand-written file kept";
   });
 
   console.log(`\ncoderax install-test: PASS (${results.length} checks on ${process.platform}-${process.arch}, node ${process.versions.node})`);

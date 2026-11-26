@@ -58,7 +58,8 @@ an escape hatch. Automation that must enforce the range should check
 
 Commands: `products`, `chat`, `work`, `models`, `agents`, `cloud`, `projects`,
 `login`, `logout`, `status`, `config show|get|set`, `doctor`, `version`,
-`compat`, `update`, `uninstall`/`cleanup`, `health`, `openapi`, `call`, `help`.
+`compat`, `update`, `uninstall`/`cleanup`, `completion`, `health`, `openapi`,
+`call`, `help`.
 
 Exit codes are part of the contract:
 
@@ -102,13 +103,17 @@ installed tarball, so a broken exports map fails CI before release.
 ## Evidence
 
 `npm run install-test` runs against the built release artifacts. This run
-(Linux, Node 24.22.1) passed all 16 checks:
+(Linux, Node 24.22.1) passed all 21 checks:
 
 | Check | Result |
 | --- | --- |
 | Artifact verification (checksums, contents, modes, safety) | pass |
 | Installer rejects unknown options | pass |
 | Standalone install from tarball with checksum verification | pass |
+| Shell completion generated for bash, zsh, fish and PowerShell | pass |
+| Installer writes completion for the shells it found; `--no-completion` writes none | pass |
+| Rehearsal release `0.2.1` installs side by side and takes over the launcher | pass |
+| `--rollback` repoints the launcher to `0.2.0`, keeping `0.2.1` on disk | pass |
 | Launcher reports the released version | pass |
 | `version --json` identifies a standalone install | pass |
 | Help works with no configuration | pass |
@@ -120,8 +125,8 @@ installed tarball, so a broken exports map fails CI before release.
 | npm tarball imports through the exports map; `.bin/coderax` works | pass |
 | npm global install into a sandbox prefix; reports `npm-global` | pass |
 | Same-version reinstall refused; `--force` replaces in place | pass |
-| No bearer token in any output (8,907 bytes scanned) | pass |
-| Uninstall removes launcher, program directory, and credentials | pass |
+| No bearer token in any output (25,979 bytes scanned) | pass |
+| Uninstall removes launcher, program directory, credentials and generated completion; a hand-written completion file survives | pass |
 
 Compatibility was exercised against a stub deployment that implements the
 documented contract: OpenAPI 3.1 discovery, bearer authentication, `/api/user`,
@@ -139,8 +144,11 @@ coderax work "compatibility probe" --json
 ```
 
 The macOS and Windows jobs perform the same installation test in CI; they are
-defined but were not executed in this environment. Treat the platform column as
-"configured" until the workflow has run.
+defined but were not executed in this environment. The Windows installer logic
+and PowerShell completion script were additionally executed with PowerShell 7
+on Linux (local zip install, rollback and uninstall), but native `cmd.exe`
+shims, user `PATH` handling and the macOS runtime were not exercised here. Treat
+those as "configured" until the workflow has run.
 
 ## Repeating the evidence
 

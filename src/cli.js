@@ -9,6 +9,7 @@ import {
 } from "./config.js";
 import { CoderaxError, formatJson, redact, request } from "./client.js";
 import { checkEngineCompatibility } from "./compat.js";
+import { COMPLETION_SHELLS, completionScript } from "./completion.js";
 import { collectVersionInfo, formatVersionInfo } from "./diagnostics.js";
 import { discoverOpenApi, findOperation } from "./discover.js";
 import * as maintenance from "./maintenance.js";
@@ -42,6 +43,7 @@ Usage:
   coderax health [--json]
   coderax openapi [--json]
   coderax call <METHOD> <PATH> [--data <json>] [--json]
+  coderax completion <bash|zsh|fish|powershell>
 
 Global options:
   --base-url <url>   Override the deployment URL (HTTPS, or HTTP on loopback)
@@ -93,7 +95,7 @@ const CONFIG_KEYS = Object.freeze(Object.assign(Object.create(null), {
 }));
 const CONFIG_FLAGS = ["base-url", "token", "timeout", "chat-path", "endpoint", "model"];
 
-const KNOWN_COMMANDS = new Set([
+export const KNOWN_COMMANDS = new Set([
   "config",
   "health",
   "openapi",
@@ -114,6 +116,7 @@ const KNOWN_COMMANDS = new Set([
   "compat",
   "uninstall",
   "cleanup",
+  "completion",
   "help",
 ]);
 const KNOWN_FLAGS = new Set([
@@ -271,6 +274,19 @@ function preflight(positionals, flags) {
       }
     } else {
       call = { method, path, body: undefined };
+    }
+  }
+
+  if (command === "completion") {
+    const shell = positionals[1];
+    if (shell === undefined) {
+      throw new UsageError(`completion requires a shell: ${COMPLETION_SHELLS.join(", ")}`);
+    }
+    if (!COMPLETION_SHELLS.includes(shell)) {
+      throw new UsageError(`unsupported shell: ${shell}. Supported: ${COMPLETION_SHELLS.join(", ")}`);
+    }
+    if (positionals.length > 2) {
+      throw new UsageError("completion accepts exactly one shell");
     }
   }
 
@@ -535,6 +551,13 @@ export async function runCli(argv, options = {}) {
     if (command === "version") {
       const info = collectVersionInfo({ env: deps.env });
       write(flags.has("json") ? formatJson(info) : formatVersionInfo(info).trimEnd());
+      return EXIT.ok;
+    }
+
+    // Completion is plain text derived from the command table and must work on
+    // a fresh machine, so it runs before configuration resolution.
+    if (command === "completion") {
+      deps.stdout(completionScript(positionals[1]));
       return EXIT.ok;
     }
 

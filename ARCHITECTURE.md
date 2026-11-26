@@ -27,6 +27,7 @@ product commands (chat / work / products / cloud / login / doctor)
 | `src/compat.js` | WorkflowEngine version detection and range evaluation | client, discover |
 | `src/diagnostics.js` | install-method detection, version report | filesystem, config, compat |
 | `src/maintenance.js` | uninstall and cleanup of user data | filesystem, config |
+| `src/completion.js` | generate bash, zsh, fish and PowerShell completion | version |
 | `src/cli.js` | parsing, preflight, dispatch, output | all of the above |
 
 Each layer is injectable: tests pass `fetchImpl`, `env`, `stdout`, and file

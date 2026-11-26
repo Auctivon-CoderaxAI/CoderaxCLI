@@ -26,6 +26,12 @@ version is `0`, a minor release may add or change behaviour.
   compatibility.
 - `coderax update` checks the GitHub release feed and prints upgrade commands
   for the detected install method. It never installs anything.
+- `install.sh --rollback` and `install.ps1 -Rollback` repoint the launcher at a
+  version that is already installed, without downloading or publishing anything.
+- Shell completion for bash, zsh, fish and PowerShell: `coderax completion
+  <shell>`. The standalone installers write the completion file for each shell
+  they find (opt out with `--no-completion` / `-NoCompletion`), and the
+  uninstallers remove only files carrying the generated-file marker.
 
 ### Changed
 
