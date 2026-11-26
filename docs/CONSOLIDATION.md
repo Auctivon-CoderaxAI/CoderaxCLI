@@ -83,10 +83,20 @@ loopback port):
   pointed at a deliberately unreachable inference endpoint; cancellation then
   returned `already_terminal`.
 
+## Verification at this HEAD
+
+- Local suite: **122 passed, 0 failed** (Node 24.22.1, Linux); vendor checksum verified.
+- Real PR #7 engine: the integration evidence above was produced against
+  `node dist/src/main.js` at `9b4cb5c`, over HTTP, not a mock.
+- Hosted matrix: exact-HEAD run
+  [`45888751533`](https://github.com/Auctivon-CoderaxAI/CoderaxCLI/actions/runs/45888751533)
+  passed on `ubuntu-latest`, `macos-latest` and `windows-latest`.
+
 ## Remaining blockers
 
-- No pull request exists for this branch, so exact-HEAD hosted Windows/macOS/Linux
-  CI has not run. The workflow only triggers on `pull_request` and `push` to `main`.
+- No pull request exists for this branch. The workflow was given a push trigger
+  for this branch so exact-HEAD CI could run; publication still needs the owner
+  to open the PR.
 - No authorised GitHub integration is connected to this chat; PR creation needs
   the owner or a token supplied outside the conversation.
 - WorkflowEngine `main` still serves `1.0.0`; the target surface exists only on
