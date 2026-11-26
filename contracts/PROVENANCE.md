@@ -15,7 +15,9 @@ generated OpenAPI document.
 
 `test/contract.test.js` verifies the digest, the version and that every route
 this CLI calls exists in the document with the same operation id. A contract
-change therefore fails the CLI suite instead of drifting silently.
+change therefore fails the CLI suite instead of drifting silently. The digest
+is computed over LF-normalized bytes, and `.gitattributes` pins this artifact
+to LF, so a Windows checkout cannot produce a false drift failure.
 
 ## Why the SDK is mirrored, not installed
 

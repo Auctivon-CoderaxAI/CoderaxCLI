@@ -1,0 +1,3 @@
+# The OpenAPI artifact's SHA-256 is pinned in src/contract.js. A Windows
+# checkout must not rewrite its bytes, so force LF for this document.
+contracts/*.json text eol=lf

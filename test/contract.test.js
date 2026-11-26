@@ -16,10 +16,12 @@ const documentPath = fileURLToPath(
 );
 
 test("the vendored OpenAPI document is the pinned engine artifact", async () => {
-  const bytes = await readFile(documentPath);
-  const digest = createHash("sha256").update(bytes).digest("hex");
+  const text = await readFile(documentPath, "utf8");
+  // The digest is over the engine's LF bytes. Normalize CRLF so a Windows
+  // checkout cannot report contract drift that does not exist.
+  const digest = createHash("sha256").update(text.replace(/\r\n/g, "\n"), "utf8").digest("hex");
   assert.equal(digest, CONTRACT_SOURCE.openapiSha256);
-  const document = JSON.parse(bytes.toString("utf8"));
+  const document = JSON.parse(text);
   assert.equal(document.openapi, "3.1.0");
   assert.equal(document.info.version, CONTRACT_VERSION);
 });
