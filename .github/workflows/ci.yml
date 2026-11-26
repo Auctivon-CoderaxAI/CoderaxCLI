@@ -1,8 +1,11 @@
 name: ci
 
 on:
+  # Every branch is verified at its exact HEAD. Restricting push to main meant
+  # an isolated feature branch could only be checked by opening a PR, so its
+  # head commit was never built on its own. The repository is public, so these
+  # hosted runs stay free.
   push:
-    branches: [main]
   # Only code changes start the matrix. A plain `pull_request` also fires on
   # edits, labels and bot comments; with cancel-in-progress that killed a
   # running Windows job when a review bot updated the PR body.
