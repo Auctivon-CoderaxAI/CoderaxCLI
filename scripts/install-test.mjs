@@ -604,12 +604,14 @@ console.log(version.VERSION);
   });
 
   await step("npm global install creates a working launcher", async () => {
-    const globalPrefix = join(sandbox, "npm-global");
+    // npm's own Windows prefix handling misreads a non-ASCII prefix; the
+    // product installers already exercise Unicode separately.
+    const globalPrefix = await mkdtemp(join(tmpdir(), "coderax-npm-global-"));
     const npm = IS_WINDOWS ? "npm.cmd" : "npm";
     const install = spawn(npm, [
       "install", "--global", "--prefix", globalPrefix,
       "--no-audit", "--no-fund", "--ignore-scripts", "--prefer-offline", NPM_TARBALL,
-    ], { cwd: sandbox, env, shell: IS_WINDOWS });
+    ], { cwd: globalPrefix, env, shell: IS_WINDOWS });
     assert.equal(install.status, 0, tail(install));
 
     const bin = IS_WINDOWS
