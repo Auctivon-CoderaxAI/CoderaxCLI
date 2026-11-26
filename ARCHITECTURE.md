@@ -13,6 +13,14 @@ product commands (chat / work / products / cloud / login / doctor)
   └─► product-commands.js ─► product-registry.js
                            ├─► client.js (HTTP + SSE)
                            └─► config.js (atomic 0600 config)
+
+workflow commands (conversations / tasks / schedules / artifacts / ...)
+  └─► capability-catalog.js (intent + contract)
+        └─► command-surface.js
+              ├─► discover.js (the deployment's OpenAPI operations)
+              ├─► bindOperation (operationId or published path; never invented)
+              ├─► schema validation (args, query, body, enums)
+              └─► client.js (JSON, multipart upload, binary download)
 ```
 
 ## Layers
@@ -24,6 +32,9 @@ product commands (chat / work / products / cloud / login / doctor)
 | `src/discover.js` | find and summarize the OpenAPI document | client |
 | `src/product-registry.js` | canonical five-product status data | none |
 | `src/product-commands.js` | chat, Work, products, Cloud, login, doctor | config, client, registry |
+| `src/capability-catalog.js` | canonical command intents, binding rules, capability report | client (errors) |
+| `src/command-surface.js` | bind and execute workflow commands, validate against the document, upload/download | catalog, discover, client |
+| `src/completions.js` | bash / zsh / fish scripts generated from the catalog | catalog, client |
 | `src/cli.js` | parsing, preflight, dispatch, output | all of the above |
 
 Each layer is injectable: tests pass `fetchImpl`, `env`, `stdout`, and file
@@ -57,5 +68,14 @@ scripts can separate a bad invocation from a failed deployment.
 - No retries. A caller that wants retries wraps the command.
 - No redirects: `redirect: "error"` prevents a token being forwarded to another host.
 - No persistent HTTP agent, cookie jar, or telemetry.
-- One request per command except `agents`/`models`, which discover first.
+- One request per command except the commands that discover first (`agents`,
+  `models`, `openapi`, `capabilities`, and every workflow command).
+- Workflow commands never guess a route. The catalog holds intents; the
+  deployment's OpenAPI document holds concrete operations. No match means
+  `OPERATION_NOT_FOUND` with zero requests to the missing path.
+- No local state for conversations, tasks, schedules, memory, notifications or
+  artifacts: both the CLI and Coderax Web read the deployment, so they cannot
+  drift.
+- Uploads are multipart under the `file` field; downloads are written with mode
+  `0600`, atomically, and never overwrite without `--force`.
 - The token is never serialized into output, config summaries, or error text.

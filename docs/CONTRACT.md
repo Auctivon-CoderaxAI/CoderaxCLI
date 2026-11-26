@@ -39,9 +39,109 @@ authentication problem is not mistaken for a missing endpoint.
 | --- | --- |
 | `agents` | first `GET` operation whose path ends in `/agents` |
 | `models` | first `GET` operation whose path ends in `/models` |
+| `whoami` | fixed `GET /api/user`, the same identity route `login` uses |
 
 No path is hardcoded. When the match is absent the CLI exits `1` with
 `OPERATION_NOT_FOUND` and suggests `coderax openapi`.
+
+## Workflow command contract
+
+`src/capability-catalog.js` declares the command intents. A deployment's
+OpenAPI document is the only source of concrete operations; the `contract`
+strings below describe the shape the CLI needs, not a path the CLI calls
+directly.
+
+### Binding
+
+A command binds to at most one operation, in this order:
+
+1. `--operation <operationId>` (or `--operation "METHOD /path"`) — explicit and
+   intentional.
+2. An exact `operationId` from the command's list, for the command's methods.
+3. The command's path pattern against the published path, for those methods.
+
+When nothing matches, nothing is sent and the command exits `1` with
+`OPERATION_NOT_FOUND`. When two equally specific operations match, the command
+exits `1` with `OPERATION_AMBIGUOUS` and lists the candidates; rerun with
+`--operation`. `coderax capabilities` prints every binding and is the
+machine-readable source of truth for availability.
+
+### Published shapes
+
+| Command | Contract |
+| --- | --- |
+| `conversations list` / `show` | `GET /conversations`, `GET /conversations/{id}` |
+| `tasks list` / `show` | `GET /tasks`, `GET /tasks/{id}` |
+| `tasks cancel` / `retry` / `resume` / `detach` | `POST /tasks/{id}/cancel` and siblings |
+| `permissions list` / `show` | `GET /permissions`, `GET /permissions/{id}` |
+| `memory list` / `show` / `delete` | `GET /memory`, `GET /memory/{id}`, `DELETE /memory/{id}` |
+| `schedules list` / `show` / `create` / `update` / `pause` / `resume` / `delete` | `GET|POST /schedules`, `GET|PATCH|DELETE /schedules/{id}`, `POST /schedules/{id}/pause|resume` |
+| `notifications list` / `read` | `GET /notifications`, `POST /notifications/{id}/read` |
+| `artifacts list` / `show` / `upload` / `download` / `delete` | `GET|POST /artifacts`, `GET|DELETE /artifacts/{id}`, `GET /artifacts/{id}/content` |
+| `plugins list` / `show` | `GET /plugins`, `GET /plugins/{id}` |
+| `tools list` / `show` / `invoke` | `GET /tools`, `GET /tools/{id}`, `POST /tools/{id}/invoke` |
+| `projects list` | `GET /projects` |
+| `capabilities` | optional `GET /capabilities` (server capability document) |
+
+The path patterns are matched against the published document, so a deployment
+that prefixes routes (`/api/v1/...`) or nests them (`/api/work/tasks/...`)
+still binds. A deployment that uses unrelated paths can be driven with
+`--operation` without a CLI release.
+
+### Request rules
+
+- Path template parameters are filled from positional arguments in template
+  order. The count must match; values are percent-encoded.
+- Query: `--limit`, `--cursor`, `--query`, `--status` and repeatable
+  `--param key=value` are sent only when the operation declares that query
+  parameter. If the document declares query parameters, an undeclared flag is a
+  usage error; if it declares none, what the user asked for is sent.
+- Body: `--data <json>` or field flags (never both). Required fields from the
+  command contract and from the operation's inline JSON schema must be present.
+  Declared types, enums and `additionalProperties: false` are enforced. `$ref`
+  bodies are not resolved; the command contract still applies.
+- `schedules create` requires `cron` and `prompt`. `schedules update` requires at
+  least one field.
+- `artifacts upload` sends `multipart/form-data` with the file in the `file`
+  field. The upload operation must declare a multipart request body or no body;
+  a JSON-only upload operation is reported as `UPLOAD_UNSUPPORTED` instead of
+  being attempted.
+- `artifacts download` writes atomically with mode `0600` and refuses to
+  overwrite an existing path without `--force`.
+- Destructive commands require `--yes`.
+
+### Output
+
+Workflow commands use one envelope under `--json`:
+
+```json
+{
+  "command": "tasks cancel",
+  "capability": "tasks",
+  "operation": { "method": "POST", "path": "/api/tasks/{taskId}/cancel", "operationId": "cancelTask" },
+  "status": 200,
+  "data": { "id": "task-1", "status": "cancelled" },
+  "meta": { "count": 1 }
+}
+```
+
+`meta.count`/`meta.total`/`meta.nextCursor` are present for lists, and
+`meta.file` for uploads and downloads. Human output uses tables for lists and
+formatted JSON for resources.
+
+With `--json`, failures print one JSON object to stderr:
+
+```json
+{"error":{"code":"OPERATION_NOT_FOUND","message":"...","command":"tasks list"}}
+```
+
+Legacy commands keep their existing JSON shapes for backward compatibility.
+
+### Parity with Coderax Web
+
+Workflow commands hold no local data. Conversations, tasks, schedules, memory,
+notifications, permissions and artifacts live only on the deployment that also
+serves Coderax Web, so both clients see the same objects.
 
 ## Requests
 
@@ -57,13 +157,13 @@ No path is hardcoded. When the match is absent the CLI exits `1` with
 ## Exit codes
 
 - `0` success
-- `1` other operational failure (missing operation, unavailable health check,
-  other non-2xx HTTP status)
-- `2` usage error or invalid configuration
-- `3` HTTP 401/403 authentication or authorization failure
+- `1` other operational failure (missing operation, ambiguous binding,
+  unsupported upload, unavailable health check, other non-2xx HTTP status)
+- `2` usage error, invalid configuration, missing `--yes`, invalid local file
+- `3` authentication or authorization failure (HTTP 401/403, no token)
 - `4` network failure or timeout
 - `5` HTTP 404 not found
-- `6` Cloud/projects unavailable
+- `6` Cloud/projects fallback unavailable
 - `130` cancelled
 
 ## Compatibility

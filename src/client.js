@@ -119,6 +119,7 @@ export async function request({
   timeoutMs = 15000,
   accept = "application/json",
   includeRaw = false,
+  responseType = "json",
   fetchImpl = fetch,
 } = {}) {
   if (!baseUrl) {
@@ -134,8 +135,14 @@ export async function request({
 
   let payload;
   if (body !== undefined) {
-    headers["content-type"] = "application/json";
-    payload = JSON.stringify(body);
+    if (typeof FormData !== "undefined" && body instanceof FormData) {
+      // fetch sets the multipart boundary itself; a manual content-type would
+      // omit it and the server could not parse the upload.
+      payload = body;
+    } else {
+      headers["content-type"] = "application/json";
+      payload = JSON.stringify(body);
+    }
   }
 
   let response;
@@ -159,6 +166,38 @@ export async function request({
       "REQUEST_FAILED",
       `request to ${displayPath} failed: ${truncate(redact(String(error?.message ?? "network error"), token))}`,
     );
+  }
+
+  if (responseType === "buffer") {
+    let buffer;
+    try {
+      buffer = Buffer.from(await response.arrayBuffer());
+    } catch (error) {
+      const name = error?.name ?? "";
+      if (name === "TimeoutError" || name === "AbortError") {
+        throw new CoderaxError(
+          "REQUEST_TIMEOUT",
+          `request to ${displayPath} timed out after ${timeoutMs}ms`,
+        );
+      }
+      throw new CoderaxError("RESPONSE_UNREADABLE", `could not read the response from ${displayPath}`);
+    }
+    if (!response.ok) {
+      const text = buffer.toString("utf8").slice(0, 2000);
+      let parsed = null;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        parsed = null;
+      }
+      const safeJson = redactValue(parsed, token);
+      const detail = detailText(safeJson?.message ?? safeJson?.error ?? redact(text, token));
+      const message = `HTTP ${response.status} from ${displayPath}${detail ? `: ${truncate(detail)}` : ""}`;
+      const failure = new CoderaxError(`HTTP_${response.status}`, message, { status: response.status });
+      failure.body = safeJson;
+      throw failure;
+    }
+    return { status: response.status, headers: response.headers, json: null, text: "", buffer };
   }
 
   let text = "";

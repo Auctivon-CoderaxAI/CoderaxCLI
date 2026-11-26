@@ -37,7 +37,12 @@ configured chat path, and `coderax call` uses the path you supply.
 | `call <METHOD> <PATH> [--data]` | ✅ implemented, tested |
 | `agents` / `models` resolved from OpenAPI | ✅ implemented, tested |
 | Token redaction in every output path | ✅ implemented, tested |
-| File upload, agent mutation | ⛔ not implemented — use `call` |
+| Workflow surface (`conversations`, `tasks`, `schedules`, `memory`, `notifications`, `permissions`, `artifacts`, `plugins`, `tools`, `projects`, `whoami`) bound to discovered operations | ✅ implemented, tested against a real HTTP harness |
+| `capabilities` report of ready / partial / unavailable commands | ✅ implemented, tested |
+| `bash` / `zsh` / `fish` completion generated from the catalog | ✅ implemented, tested |
+| Artifact upload (multipart) and secure download (`0600`, no silent overwrite) | ✅ implemented, tested |
+| Structured JSON errors on stderr with `--json` | ✅ implemented, tested |
+| Dedicated document / spreadsheet / presentation / image / audio / game commands | ⛔ none — those run through `work`, `tools` and `artifacts` only when the deployment publishes them |
 
 ## Install
 
@@ -78,7 +83,75 @@ coderax health
 coderax openapi
 coderax call GET /api/models --json
 coderax call POST /api/ask --data '{"text":"hello"}'
+
+# Workflow surface — each command binds to an operation the deployment publishes
+coderax capabilities
+coderax conversations --json
+coderax tasks --status running
+coderax tasks cancel task-1 --yes
+coderax resume task-1
+coderax retry task-1
+coderax detach task-1
+coderax schedules create --cron "0 9 * * 1-5" --prompt "Review open pull requests"
+coderax schedules pause sched-1
+coderax schedules resume sched-1
+coderax schedules cancel sched-1 --yes
+coderax artifacts upload ./report.pdf --json
+coderax artifacts download art-1 --output ./report.pdf
+coderax whoami --json
+
+# Shell completion
+coderax completion bash > /etc/bash_completion.d/coderax
+coderax completion zsh  > "${fpath[1]}/_coderax"
+coderax completion fish > ~/.config/fish/completions/coderax.fish
 ```
+
+### Workflow commands and capability binding
+
+`src/capability-catalog.js` is the canonical command catalog. It declares each
+command's *intent* and the contract shape it needs; the concrete method, path
+template, path/query parameters, request-body schema and enums come from the
+deployment's own OpenAPI document at runtime. `coderax capabilities` prints the
+resulting map, for example:
+
+```
+CAPABILITY     STATUS       COMMANDS
+schedules      ready        list, show, create, update, pause, resume, delete, cancel
+conversations  ready        list, show
+```
+
+When the document publishes no matching operation, the command exits `1` with
+`OPERATION_NOT_FOUND` and sends nothing. Ambiguous matches exit `1` with
+`OPERATION_AMBIGUOUS` and ask for `--operation <operationId>`. There are no
+stubbed commands and no guessed endpoints.
+
+Workflow commands accept `--json` (envelope `{command, capability, operation,
+status, data, meta?}`, with errors as JSON on stderr), `--limit`, `--cursor`,
+`--query`, `--status`, repeatable `--param key=value`, and `--operation` to bind
+one invocation to a specific operation. Destructive commands require `--yes`.
+
+### Advanced work
+
+Repository inspection, debugging, architecture analysis, code review, PR
+preparation and CI monitoring run through `coderax work` (and `coderax chat`),
+which stream the deployment's Work engine. They are not separate endpoints:
+
+```sh
+coderax work "Review the diff on this branch for correctness risks"
+coderax work "Inspect CI failures on the release branch and propose fixes"
+coderax work "Prepare a pull request summary for the last three commits"
+```
+
+Document, spreadsheet, presentation, image, audio and game creation are likewise
+not invented: they are reachable only when the deployment publishes matching
+`tools` or `artifacts` operations, which this CLI can list and invoke.
+
+### Same data as Coderax Web
+
+Every workflow command is a thin call to the deployment that also serves Coderax
+Web. The CLI keeps no local cache of conversations, tasks, schedules, memory,
+notifications, permissions or artifacts, so both clients read and write the same
+server-side state.
 
 `openapi`, `agents`, and `models` use the deployment's OpenAPI document. `health`
 probes fixed paths, `login` checks `/api/user`, `doctor` checks `/api/health`,
@@ -95,8 +168,12 @@ supply.
 | `3` | authentication or authorization failure (HTTP 401/403) |
 | `4` | network failure or timeout |
 | `5` | not found (HTTP 404) |
-| `6` | unavailable (Cloud/projects) |
+| `6` | unavailable (Cloud/projects fallback) |
 | `130` | cancelled |
 
+Missing credentials for a command that needs them exit `3` (`UNAUTHENTICATED`).
+Destructive workflow commands without `--yes` exit `2` (`CONFIRMATION_REQUIRED`).
+
 Errors print as `coderax: <CODE>: <message>` for typed failures, with the token
-redacted if a server ever echoes it.
+redacted if a server ever echoes it. With `--json`, errors are a single JSON
+object on stderr: `{"error":{"code","message","status"?,"command"?}}`.

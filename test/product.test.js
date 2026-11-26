@@ -167,10 +167,10 @@ test("work consumes native cumulative message snapshots without duplicating text
   const fetchImpl = async (url) => {
     assert.equal(new URL(url).pathname, "/api/work/chat");
     return sseResponse([
-      'data: {"created":true,"streamId":"task-id"}\\n\\n',
-      'data: {"message":true,"text":"accepted"}\\n\\n',
-      'data: {"message":true,"text":"accepted and verified"}\\n\\n',
-      'data: {"final":true,"responseMessage":{"text":"accepted and verified"}}\\n\\n',
+      'data: {"created":true,"streamId":"task-id"}\n\n',
+      'data: {"message":true,"text":"accepted"}\n\n',
+      'data: {"message":true,"text":"accepted and verified"}\n\n',
+      'data: {"final":true,"responseMessage":{"text":"accepted and verified"}}\n\n',
     ]);
   };
   const code = await runCli(["work", "implement", "--json"], {
@@ -193,9 +193,9 @@ test("work returns the corrected answer when an engine snapshot replaces earlier
     CODERAX_TOKEN: TOKEN,
   };
   const fetchImpl = async () => sseResponse([
-    'data: {"message":true,"text":"old draft"}\\n\\n',
-    'data: {"message":true,"text":"corrected answer"}\\n\\n',
-    'data: {"final":true,"responseMessage":{"text":"corrected answer"}}\\n\\n',
+    'data: {"message":true,"text":"old draft"}\n\n',
+    'data: {"message":true,"text":"corrected answer"}\n\n',
+    'data: {"final":true,"responseMessage":{"text":"corrected answer"}}\n\n',
   ]);
   const code = await runCli(["work", "implement", "--json"], {
     env,

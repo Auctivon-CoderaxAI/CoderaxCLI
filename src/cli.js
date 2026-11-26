@@ -11,6 +11,16 @@ import { CoderaxError, formatJson, redact, request } from "./client.js";
 import { discoverOpenApi, findOperation } from "./discover.js";
 import * as product from "./product-commands.js";
 import { VERSION } from "./version.js";
+import {
+  BUILTIN_COMMANDS,
+  catalogRoots,
+  renderUsageGroups,
+  resolveSurfaceCommand,
+  specHelp,
+  validateSurfaceOptions,
+} from "./capability-catalog.js";
+import { runSurfaceCommand } from "./command-surface.js";
+import { SHELLS, completionCommand } from "./completions.js";
 
 export { VERSION };
 
@@ -36,6 +46,11 @@ Usage:
   coderax health [--json]
   coderax openapi [--json]
   coderax call <METHOD> <PATH> [--data <json>] [--json]
+  coderax completion [bash|zsh|fish]
+
+Workflow commands (bound to operations in the deployment's OpenAPI document):
+${renderUsageGroups()}
+  coderax capabilities
 
 Global options:
   --base-url <url>   Override the deployment URL (HTTPS, or HTTP on loopback)
@@ -45,8 +60,13 @@ Global options:
   --endpoint <name>  Override the chat endpoint name
   --chat-path <path> Override the streaming path
   --url <path>       Override the streaming path for one invocation
-  --json             Machine-readable output
+  --json             Machine-readable output; errors are JSON on stderr
   --no-color         Accepted for compatibility
+  -y, --yes          Confirm a destructive command (cancel, delete, ...)
+  --operation <id>   Bind a workflow command to one operationId
+  --param <k=v>      Extra query parameter, repeatable
+  --output <path>    Destination for artifacts download
+  --force            Overwrite an existing download target
   -h, --help         Show this help
   -v, --version      Show the version
 
@@ -54,10 +74,11 @@ Environment:
   CODERAX_BASE_URL, CODERAX_TOKEN, CODERAX_TIMEOUT_MS, CODERAX_CONFIG,
   CODERAX_CONFIG_DIR, CODERAX_CHAT_PATH, CODERAX_ENDPOINT, CODERAX_MODEL
 
-Discovery: agents, models, and openapi use the deployment's OpenAPI document.
-health probes fixed paths, login checks /api/user, doctor probes the same health
-endpoints, and chat and work use the configured chat path. call uses the path you supply.
-A missing discovered route fails with OPERATION_NOT_FOUND.
+Discovery: agents, models, openapi and every workflow command use the
+deployment's OpenAPI document. health probes fixed paths, login checks /api/user,
+doctor probes the same health endpoints, and chat and work use the configured chat
+path. call uses the path you supply. A missing discovered route fails with
+OPERATION_NOT_FOUND; workflow commands never guess a path.
 `;
 
 const EXIT = Object.freeze({
@@ -79,7 +100,7 @@ const CONFIG_KEYS = Object.freeze(Object.assign(Object.create(null), {
 }));
 const CONFIG_FLAGS = ["base-url", "token", "timeout", "chat-path", "endpoint", "model"];
 
-const KNOWN_COMMANDS = new Set([
+const LEGACY_COMMANDS = new Set([
   "config",
   "health",
   "openapi",
@@ -98,7 +119,9 @@ const KNOWN_COMMANDS = new Set([
   "update",
   "help",
   "version",
+  "completion",
 ]);
+const KNOWN_COMMANDS = new Set([...LEGACY_COMMANDS, ...catalogRoots()]);
 const KNOWN_FLAGS = new Set([
   "help",
   "version",
@@ -112,7 +135,23 @@ const KNOWN_FLAGS = new Set([
   "chat-path",
   "url",
   "no-color",
+  "yes",
+  "force",
+  "operation",
+  "param",
+  "output",
+  "limit",
+  "cursor",
+  "query",
+  "status",
+  "name",
+  "cron",
+  "prompt",
+  "timezone",
+  "enabled",
+  "agent",
 ]);
+const BOOLEAN_FLAGS = new Set(["help", "version", "json", "no-color", "yes", "force"]);
 const ALLOWED_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
 
 export class UsageError extends Error {
@@ -122,27 +161,31 @@ export class UsageError extends Error {
   }
 }
 
+function parseParamValue(raw) {
+  const text = String(raw);
+  const equals = text.indexOf("=");
+  if (equals <= 0) throw new UsageError("--param requires key=value");
+  return [text.slice(0, equals), text.slice(equals + 1)];
+}
+
 export function parseArgv(argv) {
   const flags = new Map();
+  const params = [];
   const positionals = [];
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
 
-    if (arg === "--help" || arg === "-h") {
+    if (arg === "-h") {
       flags.set("help", true);
       continue;
     }
-    if (arg === "--version" || arg === "-v") {
+    if (arg === "-v") {
       flags.set("version", true);
       continue;
     }
-    if (arg === "--json") {
-      flags.set("json", true);
-      continue;
-    }
-    if (arg === "--no-color") {
-      flags.set("no-color", true);
+    if (arg === "-y") {
+      flags.set("yes", true);
       continue;
     }
     if (arg.startsWith("--")) {
@@ -153,14 +196,29 @@ export function parseArgv(argv) {
         throw new UsageError(`unknown option: --${name}`);
       }
       if (equals !== -1) {
-        flags.set(name, body.slice(equals + 1));
+        const value = body.slice(equals + 1);
+        if (BOOLEAN_FLAGS.has(name)) {
+          if (value !== "true" && value !== "false") {
+            throw new UsageError(`--${name} does not take a value`);
+          }
+          flags.set(name, value === "true");
+        } else if (name === "param") {
+          params.push(parseParamValue(value));
+        } else {
+          flags.set(name, value);
+        }
+        continue;
+      }
+      if (BOOLEAN_FLAGS.has(name)) {
+        flags.set(name, true);
         continue;
       }
       const value = argv[index + 1];
       if (value === undefined || value.startsWith("--")) {
         throw new UsageError(`--${name} requires a value`);
       }
-      flags.set(name, value);
+      if (name === "param") params.push(parseParamValue(value));
+      else flags.set(name, value);
       index += 1;
       continue;
     }
@@ -168,11 +226,23 @@ export function parseArgv(argv) {
     positionals.push(arg);
   }
 
-  return { flags, positionals };
+  return { flags, positionals, params };
 }
 
 function emit(write, flags, human, machine) {
   write(flags.has("json") ? formatJson(machine) : human);
+}
+
+function helpFor(positionals) {
+  try {
+    const resolved = resolveSurfaceCommand(positionals);
+    if (resolved?.spec) return specHelp(resolved.spec);
+  } catch {
+    return USAGE;
+  }
+  const builtin = BUILTIN_COMMANDS.find((entry) => entry.command === positionals[0]);
+  if (builtin) return `Usage:\n  ${builtin.usage}\n\n${builtin.summary}\n`;
+  return USAGE;
 }
 
 function responseBody(response) {
@@ -189,6 +259,30 @@ function preflight(positionals, flags) {
 
   if (!KNOWN_COMMANDS.has(command)) {
     throw new UsageError(`unknown command: ${command}. Run \`coderax --help\`.`);
+  }
+
+  const surface = resolveSurfaceCommand(positionals);
+  if (surface) {
+    validateSurfaceOptions(surface.spec, flags);
+    if (flags.has("data")) {
+      try {
+        JSON.parse(flags.get("data"));
+      } catch {
+        throw new UsageError("--data must be valid JSON");
+      }
+    }
+    return { call: null, surface };
+  }
+
+  if (command === "completion") {
+    const shell = positionals[1];
+    if (shell !== undefined && !SHELLS.includes(shell)) {
+      throw new UsageError(`unsupported shell: ${shell}. Supported: ${SHELLS.join(", ")}`);
+    }
+    if (positionals.length > 2) {
+      throw new UsageError("completion accepts at most one shell argument");
+    }
+    return { call: null, surface: null };
   }
 
   if (command === "config") {
@@ -241,7 +335,7 @@ function preflight(positionals, flags) {
     }
   }
 
-  return { call };
+  return { call, surface: null };
 }
 
 async function resolveSettings(flags, deps) {
@@ -424,9 +518,10 @@ async function commandConfig(positionals, context, deps, write, flags) {
 }
 
 function exitFor(error) {
-  if (error instanceof UsageError || error instanceof ConfigError || error.code === "USAGE") {
-    return EXIT.usage;
-  }
+  if (error instanceof UsageError || error instanceof ConfigError) return EXIT.usage;
+  if (error.code === "USAGE") return EXIT.usage;
+  if (error.code === "CONFIRMATION_REQUIRED" || error.code === "FILE_INVALID") return EXIT.usage;
+  if (error.code === "UNAUTHENTICATED") return EXIT.unauthenticated;
   if (error.code === "UNAVAILABLE") return EXIT.unavailable;
   if (error.code === "CANCELLED") return EXIT.cancelled;
   if (error.code === "HTTP_401" || error.code === "HTTP_403") return EXIT.unauthenticated;
@@ -452,10 +547,10 @@ export async function runCli(argv, options = {}) {
   const raw = (text) => deps.stdout(String(text));
 
   try {
-    const { flags, positionals } = parseArgv(argv);
+    const { flags, positionals, params } = parseArgv(argv);
 
     if (flags.has("help")) {
-      deps.stdout(USAGE);
+      deps.stdout(positionals.length > 0 ? helpFor(positionals) : USAGE);
       return EXIT.ok;
     }
     if (flags.has("version")) {
@@ -467,7 +562,7 @@ export async function runCli(argv, options = {}) {
       return EXIT.ok;
     }
 
-    const { call } = preflight(positionals, flags);
+    const { call, surface } = preflight(positionals, flags);
 
     const settings = await resolveSettings(flags, deps);
     const [command] = positionals;
@@ -476,6 +571,7 @@ export async function runCli(argv, options = {}) {
       settings,
       args: positionals.slice(1),
       flags,
+      params,
       env: deps.env,
       json: flags.has("json"),
       out: write,
@@ -490,6 +586,25 @@ export async function runCli(argv, options = {}) {
     if (command === "config") {
       await commandConfig(positionals, settings, deps, write, flags);
       return EXIT.ok;
+    }
+
+    if (command === "completion") {
+      return await completionCommand(positionals, ctx);
+    }
+
+    if (surface) {
+      if (command === "projects") {
+        if (!settings.baseUrl) return await product.projects(ctx);
+        try {
+          return await runSurfaceCommand(surface.spec, surface.args, ctx);
+        } catch (error) {
+          if (error?.code === "OPERATION_NOT_FOUND" || error?.code === "OPENAPI_NOT_FOUND") {
+            return await product.projects(ctx);
+          }
+          throw error;
+        }
+      }
+      return await runSurfaceCommand(surface.spec, surface.args, ctx);
     }
 
     switch (command) {
@@ -514,7 +629,7 @@ export async function runCli(argv, options = {}) {
       case "update":
         return await product.update(ctx);
       case "help":
-        deps.stdout(USAGE);
+        deps.stdout(positionals.length > 1 ? helpFor(positionals.slice(1)) : USAGE);
         return EXIT.ok;
       case "version":
         write(`coderax-cli ${VERSION}`);
@@ -544,9 +659,22 @@ export async function runCli(argv, options = {}) {
     }
   } catch (error) {
     const known = error instanceof UsageError || error instanceof ConfigError || error instanceof CoderaxError;
-    const detail =
-      error instanceof UsageError ? error.message : `${error.code ?? "ERROR"}: ${error.message}`;
-    deps.stderr(`coderax: ${known ? detail : "unexpected failure"}\n`);
+    const usageLike = error instanceof UsageError || error?.code === "USAGE";
+    const code = usageLike ? "USAGE" : `${error?.code ?? "ERROR"}`;
+    const detail = usageLike ? error.message : `${code}: ${error?.message ?? "unexpected failure"}`;
+    if (argv.some((arg) => arg === "--json" || arg === "--json=true")) {
+      const payload = {
+        error: {
+          code,
+          message: error?.message ?? "unexpected failure",
+          ...(error?.status ? { status: error.status } : {}),
+          ...(error?.command ? { command: error.command } : {}),
+        },
+      };
+      deps.stderr(`${JSON.stringify(payload)}\n`);
+    } else {
+      deps.stderr(`coderax: ${known ? detail : "unexpected failure"}\n`);
+    }
     return exitFor(error);
   }
 }

@@ -22,6 +22,53 @@ function serverPathPrefix(document) {
   return expanded.replace(/\/+$/, "");
 }
 
+function mergeParameters(pathItem, operation) {
+  const merged = [
+    ...(Array.isArray(pathItem?.parameters) ? pathItem.parameters : []),
+    ...(Array.isArray(operation?.parameters) ? operation.parameters : []),
+  ];
+  const byKey = new Map();
+  for (const parameter of merged) {
+    if (!parameter || typeof parameter !== "object") continue;
+    if (typeof parameter.name !== "string" || typeof parameter.in !== "string") continue;
+    byKey.set(`${parameter.in}:${parameter.name}`, {
+      name: parameter.name,
+      in: parameter.in,
+      required: parameter.required === true,
+      schema: parameter.schema && typeof parameter.schema === "object" ? parameter.schema : null,
+    });
+  }
+  return [...byKey.values()];
+}
+
+/**
+ * Summarize a request body without resolving $ref. Deployments that describe
+ * bodies inline get field and enum validation; $ref bodies fall back to the
+ * command's own required-field contract.
+ */
+function summarizeRequestBody(operation) {
+  const body = operation?.requestBody;
+  if (!body || typeof body !== "object") return null;
+  const content = body.content && typeof body.content === "object" ? body.content : {};
+  const contentTypes = Object.keys(content);
+  const mediaType = contentTypes[0] ?? null;
+  const media = mediaType ? content[mediaType] : null;
+  const schema = media?.schema && typeof media.schema === "object" ? media.schema : null;
+  return {
+    required: body.required === true,
+    mediaType,
+    contentTypes,
+    schema: schema
+      ? {
+          type: schema.type ?? "object",
+          required: Array.isArray(schema.required) ? schema.required : [],
+          properties: schema.properties && typeof schema.properties === "object" ? schema.properties : {},
+          additionalProperties: schema.additionalProperties,
+        }
+      : null,
+  };
+}
+
 export function summarizeOperations(document) {
   const operations = [];
   for (const [path, methods] of Object.entries(document?.paths ?? {})) {
@@ -33,6 +80,8 @@ export function summarizeOperations(document) {
         path,
         operationId: typeof operation?.operationId === "string" ? operation.operationId : null,
         summary: typeof operation?.summary === "string" ? operation.summary : null,
+        parameters: mergeParameters(methods, operation),
+        requestBody: summarizeRequestBody(operation),
       });
     }
   }
