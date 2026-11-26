@@ -12,7 +12,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # A queued run can otherwise hold the group forever when an older matrix has
+  # a failed OS and a queued sibling. Key the group by SHA so the exact-head
+  # run is never blocked by a superseded queue entry.
+  group: ci-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: true
 
 jobs:
