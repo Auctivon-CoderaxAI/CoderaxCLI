@@ -69,13 +69,14 @@ async function envFor(baseUrl) {
   };
 }
 
-async function cli(args, env, { stdinIsTTY = false } = {}) {
+async function cli(args, env, { stdinIsTTY = false, readSecret } = {}) {
   const io = capture();
   const code = await runCli(args, {
-    env,
+    env: { CODERAX_CREDENTIAL_STORE: "file", ...env },
     stdout: io.stdout,
     stderr: io.stderr,
     stdinIsTTY,
+    readSecret,
     confirm: async () => null,
   });
   return { code, out: io.out(), err: io.err() };
@@ -895,9 +896,9 @@ test("login refuses a non-owner token and stores nothing", async () => {
     },
     async (baseUrl) => {
       const result = await cli(
-        ["login", "--base-url", baseUrl, "--token", TOKEN, "--json"],
+        ["login", "--base-url", baseUrl, "--json"],
         { CODERAX_CONFIG: config },
-        { stdinIsTTY: true },
+        { readSecret: async () => TOKEN },
       );
       assert.equal(result.code, 3);
       assert.match(result.err, /owner|ADMIN/i);
@@ -916,9 +917,9 @@ test("login fails closed when the deployment cannot report a role", async () => 
     },
     async (baseUrl) => {
       const result = await cli(
-        ["login", "--base-url", baseUrl, "--token", TOKEN],
+        ["login", "--base-url", baseUrl],
         { CODERAX_CONFIG: config },
-        { stdinIsTTY: true },
+        { readSecret: async () => TOKEN },
       );
       assert.equal(result.code, 6);
       assert.match(result.err, /OWNER_UNVERIFIABLE|did not report a role/);
@@ -938,9 +939,9 @@ test("login stores an owner token with 0600 permissions", async () => {
     },
     async (baseUrl) => {
       const result = await cli(
-        ["login", "--base-url", baseUrl, "--token", TOKEN, "--json"],
+        ["login", "--base-url", baseUrl, "--json"],
         { CODERAX_CONFIG: config },
-        { stdinIsTTY: true },
+        { readSecret: async () => TOKEN },
       );
       assert.equal(result.code, 0);
       assert.equal(result.out.includes(TOKEN), false);

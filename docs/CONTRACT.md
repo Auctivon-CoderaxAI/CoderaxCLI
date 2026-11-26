@@ -1,6 +1,6 @@
 # CLI ↔ deployment contract
 
-Version: CLI `0.1.0`, API major `1`. Shapes were read from
+Version: CLI `0.3.0`, API major `1`. Shapes were read from
 `Auctivon-CoderaxAI/Coderax` at `main` (`a5d237b0`). The client-side checks live
 in `test/contract.test.js`; backend gaps are tracked in
 [`BACKEND-DEFECTS.md`](../BACKEND-DEFECTS.md).
@@ -17,6 +17,10 @@ cookies and adds no headers except `accept`, `authorization`,
 otherwise. `whoami` repeats the check; owner-only mutations (`work submit`,
 `cancel`, `resume`, `retry`, `approve`) call `requireOwner()` again so a token
 that lost the role cannot mutate.
+
+A token is never accepted in argv. `login` reads it from a hidden terminal
+prompt, stdin, a `0600` `--token-file`, or `CODERAX_TOKEN`; `--token` exits `2`.
+The installer never handles credentials at all.
 
 | Condition | Code | Exit |
 | --- | --- | --- |
@@ -38,6 +42,13 @@ probes (`/api/work/tasks`, `/api/workflows`) fill the gaps. An undeclared
 capability is never replaced by a guessed route. The CLI reports
 `CAPABILITY_INFERRED`, `CAPABILITY_DEGRADED` (503), or
 `CAPABILITY_UNAVAILABLE` (exit `6`).
+
+Deployment compatibility has a second axis: the version published in the
+OpenAPI document (`info.version`). The CLI supports `>=0.8.8 <1.0.0`, the
+release the shapes above were read from. `coderax compat` reports the API axis
+and the deployment axis separately, and treats an unreported version as unknown,
+never as compatible. `/health` is plain text on the reference deployment, so it
+is not a version source.
 
 ## Routes
 

@@ -1,6 +1,7 @@
 import { chmod, lstat, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { deleteCredential, readCredential, writeCredential } from "./credentials.js";
 
 export class ConfigError extends Error {
   constructor(code, message) {
@@ -123,7 +124,13 @@ export async function loadConfig({ env = process.env, filePath, readFileImpl = r
   }
 
   const baseUrlRaw = overrides.baseUrl ?? envText(env.CODERAX_BASE_URL) ?? stored.baseUrl;
-  const token = env.CODERAX_TOKEN?.trim() || stored.token || null;
+  // A token kept outside the file (OS credential store) is read here so callers
+  // see one resolved setting regardless of where the operator stored it.
+  let storedToken = stored.token;
+  if (!storedToken && typeof stored.tokenStore === "string") {
+    storedToken = await readCredential({ backend: stored.tokenStore, account: stored.account, env });
+  }
+  const token = env.CODERAX_TOKEN?.trim() || storedToken || null;
   const timeoutRaw = overrides.timeoutMs ?? envText(env.CODERAX_TIMEOUT_MS) ?? stored.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const timeoutMs = Number(timeoutRaw);
 
@@ -143,6 +150,7 @@ export async function loadConfig({ env = process.env, filePath, readFileImpl = r
     output: stored.output || "text",
     account: typeof stored.account === "string" ? stored.account : null,
     role: typeof stored.role === "string" ? stored.role : null,
+    tokenStore: typeof stored.tokenStore === "string" ? stored.tokenStore : "file",
     sessions:
       stored.sessions !== null && typeof stored.sessions === "object" && !Array.isArray(stored.sessions)
         ? stored.sessions
@@ -160,6 +168,9 @@ export async function saveConfig(
     unlinkImpl = unlink,
     mkdirImpl = mkdir,
     chmodImpl = chmod,
+    credentialStore = "file",
+    credentialDeps = {},
+    env = process.env,
   } = {},
 ) {
   const path = filePath ?? configPath();
@@ -180,7 +191,23 @@ export async function saveConfig(
   }
 
   if (patch.baseUrl !== undefined) next.baseUrl = normalizeBaseUrl(patch.baseUrl).baseUrl;
-  if (patch.token !== undefined) next.token = patch.token === null ? null : String(patch.token);
+  if (patch.token !== undefined) {
+    const account = patch.account ?? stored.account ?? null;
+    if (patch.token === null) {
+      await deleteCredential({ backend: credentialStore, account, env, deps: credentialDeps });
+      next.token = null;
+      next.tokenStore = null;
+    } else if (credentialStore !== "file") {
+      // The token lives in the OS store; the config file keeps only the backend
+      // name, so a copied config file cannot leak the credential.
+      await writeCredential({ backend: credentialStore, account, token: String(patch.token), env, deps: credentialDeps });
+      next.token = null;
+      next.tokenStore = credentialStore;
+    } else {
+      next.token = String(patch.token);
+      next.tokenStore = null;
+    }
+  }
   if (patch.timeoutMs !== undefined) next.timeoutMs = Number(patch.timeoutMs);
   if (patch.chatPath !== undefined) next.chatPath = String(patch.chatPath);
   if (patch.endpoint !== undefined) next.endpoint = String(patch.endpoint);

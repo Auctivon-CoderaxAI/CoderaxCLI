@@ -1,7 +1,14 @@
 import { PRODUCTS, STATUS_LABELS, getOrderedProducts } from "./product-registry.js";
 import { CoderaxError, request } from "./client.js";
+import {
+  checkCompatibility,
+  detectDeploymentVersion,
+  isSupportedDeploymentVersion,
+} from "./compat.js";
+import { collectVersionInfo } from "./diagnostics.js";
 import { dirname } from "node:path";
 import { configDir, loadConfig, maskToken, saveConfig } from "./config.js";
+import { credentialBackend, readTokenFile } from "./credentials.js";
 import { VERSION } from "./version.js";
 import {
   CAPABILITY,
@@ -165,9 +172,25 @@ export async function status(ctx) {
 
 export async function login(ctx) {
   requireBase(ctx);
-  const token = ctx.flags.get("token") || ctx.env.CODERAX_TOKEN || (await ctx.readSecret());
+  // Order matters: a file keeps the secret out of argv and shell history, the
+  // environment is the CI path, and stdin or a hidden prompt covers interactive
+  // use. Passing the token as an argument is refused by the parser.
+  const tokenFile = ctx.flags.get("token-file");
+  let token;
+  if (tokenFile) {
+    try {
+      token = await readTokenFile(tokenFile);
+    } catch (error) {
+      throw new CoderaxError("TOKEN_FILE", error.message);
+    }
+  } else {
+    token = ctx.env.CODERAX_TOKEN?.trim() || (await ctx.readSecret());
+  }
   if (!token) {
-    throw new CoderaxError("USAGE", "no token provided; use `coderax login --token <token>` or pipe it on stdin");
+    throw new CoderaxError(
+      "USAGE",
+      "no token provided; run `coderax login` at a terminal, pipe it on stdin, use `--token-file <path>`, or set CODERAX_TOKEN",
+    );
   }
 
   // Owner-only gate. A token is not persisted until the deployment confirms
@@ -196,15 +219,28 @@ export async function login(ctx) {
     throw error;
   }
 
-  await saveConfig(
-    {
-      token,
-      account: identity.account,
-      role: identity.role,
-      baseUrl: ctx.settings.baseUrl,
-    },
-    { filePath: ctx.settings.configPath },
-  );
+  // Prefer an OS credential store that accepts the secret on stdin. When the
+  // chosen store is unavailable (for example `secret-tool` is not installed),
+  // fall back to the 0600 file and say so rather than pretending.
+  let store = credentialBackend(ctx.env);
+  const record = {
+    token,
+    account: identity.account,
+    role: identity.role,
+    baseUrl: ctx.settings.baseUrl,
+  };
+  try {
+    await saveConfig(record, {
+      filePath: ctx.settings.configPath,
+      credentialStore: store,
+      env: ctx.env,
+    });
+  } catch (error) {
+    if (store === "file") throw error;
+    ctx.err(`coderax: credential store unavailable (${error.message}); using the 0600 config file`);
+    store = "file";
+    await saveConfig(record, { filePath: ctx.settings.configPath, credentialStore: "file", env: ctx.env });
+  }
   ctx.out(
     ctx.json
       ? JSON.stringify(
@@ -218,7 +254,9 @@ export async function login(ctx) {
           null,
           2,
         )
-      : `Signed in as the deployment owner${identity.account ? ` (${identity.account})` : ""}. Token stored with 0600 permissions.`,
+      : `Signed in as the deployment owner${identity.account ? ` (${identity.account})` : ""}. Token stored in ${
+          store === "file" ? "the 0600 config file" : `the operating-system credential store (${store})`
+        }.`,
   );
   return EXIT.OK;
 }
@@ -229,7 +267,12 @@ export async function logout(ctx) {
   const environmentTokenActive = Boolean(ctx.env.CODERAX_TOKEN?.trim());
   await saveConfig(
     { token: null, account: null, role: null, sessions: {} },
-    { filePath: ctx.settings.configPath },
+    {
+      filePath: ctx.settings.configPath,
+      // Clear the backend the credential was actually stored in.
+      credentialStore: stored.tokenStore ?? "file",
+      env: ctx.env,
+    },
   );
   const message = environmentTokenActive
     ? "Stored credentials cleared. CODERAX_TOKEN is still set; unset it to sign out of this environment."
@@ -320,6 +363,9 @@ export async function doctor(ctx) {
   const major = Number(process.versions.node.split(".")[0]);
   add("node", major >= 24, process.versions.node, major >= 24 ? "" : "Node 24 or newer is required.");
 
+  const install = ctx.install ?? collectVersionInfo({ env: ctx.env ?? process.env });
+  add("install", true, `${install.installMethod} (${install.installPath})`, "");
+
   const directory = dirname(ctx.settings.configPath);
   let dirMode = null;
   try {
@@ -397,6 +443,27 @@ export async function doctor(ctx) {
       } else {
         add("api-version", true, state.apiVersion, "");
       }
+
+      const deployment = await detectDeploymentVersion({
+        baseUrl: ctx.settings.baseUrl,
+        token: ctx.settings.token,
+        timeoutMs: ctx.settings.timeoutMs,
+        fetchImpl: ctx.fetchImpl,
+      });
+      const deployed = deployment === null ? null : isSupportedDeploymentVersion(deployment.version);
+      add(
+        "deployment",
+        deployed === null || deployed.supported !== false,
+        deployment === null
+          ? "not published in the OpenAPI document"
+          : `${deployment.version} (${deployment.source}) ${
+              deployed.supported === true ? "supported" : deployed.supported === false ? "unsupported" : "unknown"
+            }`,
+        deployed?.supported === false
+          ? `The deployment is ${deployed.reason}. Upgrade it or install a CLI release that supports it.`
+          : "",
+        deployed === null ? "warning" : "error",
+      );
 
       const capabilities = [...state.capabilities].sort();
       add(
@@ -492,6 +559,37 @@ export async function doctor(ctx) {
     if (!check.ok && check.hint) ctx.out(`  \u2192 ${check.hint}`);
   }
   return ok ? EXIT.OK : EXIT.ERROR;
+}
+
+export async function compat(ctx) {
+  requireBase(ctx);
+  const verdict = await checkCompatibility({
+    baseUrl: ctx.settings.baseUrl,
+    token: ctx.settings.token,
+    timeoutMs: ctx.settings.timeoutMs,
+    fetchImpl: ctx.fetchImpl,
+    signal: ctx.signal,
+  });
+  const status =
+    verdict.supported === true ? "compatible" : verdict.supported === false ? "incompatible" : "unknown";
+  const payload = { cliVersion: VERSION, status, ...verdict };
+
+  if (ctx.json) {
+    ctx.out(JSON.stringify(payload, null, 2));
+    return verdict.supported === true ? EXIT.OK : EXIT.ERROR;
+  }
+
+  ctx.out(`CLI              ${VERSION} (API ${verdict.apiRange})`);
+  ctx.out(`API version      ${verdict.apiVersion ?? "(not reported)"}${verdict.apiSource ? ` (${verdict.apiSource})` : ""}`);
+  ctx.out(
+    `Deployment       ${verdict.deploymentVersion ?? "(not published)"}${
+      verdict.deploymentSource ? ` (${verdict.deploymentSource})` : ""
+    }`,
+  );
+  ctx.out(`Supported        ${verdict.range} deployments, API ${verdict.apiRange}`);
+  ctx.out(`Basis            ${verdict.basis}`);
+  ctx.out(`Compatibility    ${status} \u2014 ${verdict.reason}`);
+  return verdict.supported === true ? EXIT.OK : EXIT.ERROR;
 }
 
 export async function update(ctx) {

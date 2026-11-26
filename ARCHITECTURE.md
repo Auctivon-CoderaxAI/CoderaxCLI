@@ -25,8 +25,12 @@ argv ──► parseArgv ──► preflight ──► resolveSettings ──►
 | Module | Responsibility | Knows about |
 | --- | --- | --- |
 | `src/cli.js` | parsing, preflight, dispatch, exit-code mapping, top-level errors | every command module |
-| `src/config.js` | resolve, validate, atomically persist settings; 0600/0700; symlink refusal; sessions; role | filesystem, environment |
-| `src/product-commands.js` | owner login/logout/whoami/status, doctor, legacy discovery commands | SDK, config, discovery |
+| `src/config.js` | resolve, validate, atomically persist settings; 0600/0700; symlink refusal; sessions; role; delegates the token to the credential store | filesystem, environment, credentials |
+| `src/credentials.js` | OS credential storage (DPAPI, Secret Service), token files, non-argv secret input | fixed OS helpers |
+| `src/product-commands.js` | owner login/logout/whoami/status, doctor, `compat`, `update`, legacy discovery commands | SDK, config, credentials, discovery |
+| `src/compat.js` | two-axis compatibility: SDK API handshake plus deployment `info.version` | SDK, discovery |
+| `src/diagnostics.js` | install method, version and compatibility contract | filesystem, compat |
+| `src/maintenance.js` | uninstall/cleanup of user data and program-removal guidance | filesystem |
 | `src/workflow-commands.js` | chat, Work, autonomous submit, tasks, runs, approvals, cancel/resume/retry, notifications | SDK, session, render, approval |
 | `src/session.js` | per-deployment conversation continuity, bounded and normalized | none |
 | `src/render.js` | human tables and run rendering | none |
@@ -40,6 +44,23 @@ argv ──► parseArgv ──► preflight ──► resolveSettings ──►
 
 The SDK is imported by relative path. There is no workspace install step, no
 npm dependency and no duplicate backend implementation inside the CLI.
+
+## Credentials
+
+`credentials.js` is the only module allowed to handle a secret before it reaches
+the config layer. It never puts a token in `argv`: Windows DPAPI and Linux
+Secret Service are driven through stdin, and the macOS Keychain is deliberately
+not used because its CLI requires the password as an argument. When no OS store
+is available the token goes into the `0600` config file and the CLI says so.
+
+## Release engineering
+
+`scripts/build-release.mjs` produces deterministic npm, POSIX and Windows
+artifacts, embeds the safe extractor into both installers, and writes the
+manifest, checksums and SPDX SBOM. `verify-release.mjs` re-checks every hash and
+the embedded extractor. `install-test.mjs` installs the packed artifacts and
+exercises hostile archives, secure auth, every compatibility state, streaming,
+atomic upgrade and uninstall. `repro-check.mjs` proves two builds are identical.
 
 ## Streams
 

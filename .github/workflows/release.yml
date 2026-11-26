@@ -1,0 +1,145 @@
+name: release
+
+# Publishing happens only from a version tag or an explicit manual dispatch.
+# Pull requests never reach this workflow, so release credentials and the
+# contents: write permission are never exposed to untrusted code.
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to publish (vX.Y.Z)"
+        required: true
+        type: string
+      publish_npm:
+        description: "Also publish to npm (owner authorization required)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: build and publish the GitHub Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release and upload assets
+      id-token: write # Sigstore keyless signing for provenance
+      attestations: write # publish the provenance attestation
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b # v4.0.3
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Install from the lockfile
+        run: npm ci --ignore-scripts
+      - name: Resolve and validate the release tag
+        id: meta
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          tag="${INPUT_TAG:-${GITHUB_REF_NAME}}"
+          case "$tag" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::invalid release tag: $tag"; exit 1 ;;
+          esac
+          version="$(node -p 'require("./package.json").version')"
+          if [ "$tag" != "v$version" ]; then
+            echo "::error::tag $tag does not match package.json version $version"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Releasing $tag"
+      - name: Syntax check
+        run: npm run check
+      - name: Unit and CLI tests
+        run: npm test
+      - name: Build release artifacts
+        run: npm run build
+      - name: Verify artifacts, checksums, and install safety
+        run: npm run verify
+      - name: Reproducibility check
+        run: npm run repro
+      - name: Installation test
+        run: npm run install-test
+      - name: Attest build provenance for every release asset
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: "dist/*"
+      - name: Verify the provenance the installer checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          gh attestation verify "dist/coderax-cli-${VERSION}-standalone.tar.gz" \
+            --repo "$GITHUB_REPOSITORY"
+      - name: Publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::release $TAG already exists; cut a new version instead of reusing a tag"
+            exit 1
+          fi
+          gh release create "$TAG" dist/* \
+            --title "Coderax CLI $TAG" \
+            --notes-file dist/release-notes.md \
+            --verify-tag
+
+  npm:
+    name: publish to npm (requires authorization)
+    needs: release
+    # Triple gate: a manual dispatch that explicitly asks to publish, a
+    # repository variable the owner sets, and the protected "npm-publish"
+    # environment (configure required reviewers in repository settings).
+    # package.json is also "private": true until the owner authorizes
+    # publication, so even a misconfigured run is refused by npm.
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_npm == true && vars.NPM_PUBLISH_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    permissions:
+      contents: read
+      id-token: write # trusted publishing / provenance, no long-lived token
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Set up Node for publishing
+        uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b # v4.0.3
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+      - name: Download the published assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          mkdir -p dist
+          gh release download "$TAG" --dir dist \
+            --pattern "coderax-cli-*.tgz" \
+            --pattern "SHA256SUMS"
+      - name: Verify the downloaded tarball against the release checksums
+        run: |
+          cd dist
+          sha256sum -c SHA256SUMS --ignore-missing
+      - name: Publish with provenance
+        run: |
+          version="$(node -p 'require("./package.json").version')"
+          npm publish "./dist/coderax-cli-${version}.tgz" --access public --provenance

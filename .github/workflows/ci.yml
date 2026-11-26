@@ -3,28 +3,32 @@ name: ci
 on:
   push:
     branches: [main]
+  # Only code changes start the matrix. A plain `pull_request` also fires on
+  # edits, labels and bot comments; with cancel-in-progress that killed a
+  # running Windows job when a review bot updated the PR body.
   pull_request:
-  workflow_dispatch:
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  # The protected branch requires the check context named exactly "test".
-  # Keep that aggregator name while running the suite on free standard runners
-  # for every supported OS. No larger runners, paid actions or secrets are used.
+  # Hosted standard runners only. This repository is public, so these minutes
+  # are free; no larger runner, paid action, secret or deployment is used.
   verify:
     name: verify (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
     steps:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -34,13 +38,40 @@ jobs:
         uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b # v4.0.3
         with:
           node-version: "24"
+          cache: npm
+      - name: Install from the lockfile
+        run: npm ci --ignore-scripts
       - name: Syntax check
         run: npm run check
       - name: Unit, CLI and contract tests
         run: npm test
-      - name: Cross-platform install smoke
-        run: node scripts/smoke-install.mjs
+      - name: Build release artifacts
+        run: npm run build
+      - name: Verify checksums, contents, installers and safety
+        run: npm run verify
+      # Real packed artifacts: install into a path with spaces and Unicode,
+      # refuse argv tokens, authenticate over stdin, exercise every
+      # compatibility state, stream Work SSE, upgrade atomically with rollback,
+      # and uninstall.
+      - name: Hosted installation acceptance (install → auth → upgrade → uninstall)
+        run: npm run install-test
+      - name: Reproducibility check
+        if: runner.os == 'Linux'
+        run: npm run repro
+      - name: Upload installation evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: install-evidence-${{ matrix.os }}
+          path: |
+            dist/install-evidence.json
+            dist/SHA256SUMS
+            dist/sbom.spdx.json
+            dist/release-manifest.json
+          if-no-files-found: ignore
+          retention-days: 14
 
+  # The protected branch requires a check context named exactly "test".
   test:
     name: test
     needs: verify
@@ -57,3 +88,37 @@ jobs:
             echo "One or more platform jobs did not pass."
             exit 1
           fi
+
+  dependencies:
+    name: dependency audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b # v4.0.3
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Install from the lockfile
+        run: npm ci --ignore-scripts
+      - name: Runtime dependencies must remain empty
+        shell: bash
+        run: |
+          node -e '
+            const pkg = require("./package.json");
+            const deps = Object.keys(pkg.dependencies ?? {});
+            if (deps.length > 0) {
+              console.error("runtime dependencies are not allowed: " + deps.join(", "));
+              process.exit(1);
+            }
+            console.log("runtime dependencies: 0");
+          '
+      - name: Audit the dependency tree
+        run: npm audit --audit-level=high
+      - name: Show the full dependency tree
+        run: npm ls --all
