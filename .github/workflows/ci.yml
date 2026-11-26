@@ -73,10 +73,15 @@ jobs:
           retention-days: 7
 
   # The protected branch requires a check context named exactly "test".
+  # Never schedule this aggregator inside a cancelled run. `always()` creates
+  # the job after cancellation, where it waits for a runner that is never
+  # assigned and keeps the concurrency group for main occupied, so the next
+  # push's run never starts. Skipping a cancelled run lets it finish and
+  # release the group; a verify failure still reaches this job and fails.
   test:
     name: test
     needs: verify
-    if: always()
+    if: always() && !cancelled()
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
