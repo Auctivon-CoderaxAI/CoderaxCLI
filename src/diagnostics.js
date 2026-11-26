@@ -57,7 +57,13 @@ const GLOBAL_PREFIX_MARKERS = Object.freeze([
 export function detectInstallMethod(modulePath = MODULE_PATH) {
   const path = portable(realpathOrSelf(modulePath));
   if (path.includes("/node_modules/coderax-cli/")) {
-    return GLOBAL_PREFIX_MARKERS.some((marker) => path.includes(marker)) ? "npm-global" : "npm-local";
+    if (GLOBAL_PREFIX_MARKERS.some((marker) => path.includes(marker))) return "npm-global";
+    // Windows installs a global package at `<prefix>/node_modules/<name>`, with
+    // no `lib` segment, so a marker list alone reports every Windows global
+    // install as a project dependency. A project dependency sits beside its
+    // project's package.json; a global prefix is not a project.
+    const installerRoot = path.slice(0, path.indexOf("/node_modules/coderax-cli/"));
+    return existsSync(join(installerRoot, "package.json")) ? "npm-local" : "npm-global";
   }
   // The standalone build ships this marker at the package root, so a custom
   // --prefix is recognised without assuming the default ~/.coderax/cli path.
