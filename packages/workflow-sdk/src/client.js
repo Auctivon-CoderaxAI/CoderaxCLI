@@ -529,12 +529,16 @@ export class WorkflowClient {
     agentId,
     model,
     endpoint = "agents",
+    path = ROUTE.chat,
     promptPrefix,
     onEvent,
     signal = this.signal,
   } = {}) {
     if (typeof text !== "string" || text.trim() === "") {
       throw new SdkError("USAGE", "a non-empty message is required");
+    }
+    if (typeof path !== "string" || !path.startsWith("/") || path.includes("://")) {
+      throw new SdkError("USAGE", "the chat path must be an absolute path such as /api/work/chat");
     }
 
     // Strict compatibility is enforced before the POST starts a generation.
@@ -557,7 +561,7 @@ export class WorkflowClient {
     if (model) body.model = model;
     if (promptPrefix) body.promptPrefix = promptPrefix;
 
-    const stream = await this.transport.stream(ROUTE.chat, {
+    const stream = await this.transport.stream(path, {
       method: "POST",
       body,
       signal,
@@ -706,6 +710,19 @@ export class WorkflowClient {
           if (!terminal && frame.id === null && !sequencer.sawCursor) {
             sawSnapshotOnly = true;
           }
+          // A completion marker is not sequence-numbered, so drain buffered
+          // frames first. Otherwise a stream ending 1, 3, [DONE] would return a
+          // successful but truncated answer and silently drop frame 3.
+          if (frame.done) {
+            const flushed = sequencer.flush();
+            this.#track(flushed.diagnostics);
+            for (const buffered of flushed.frames) {
+              handleFrame(buffered);
+              if (terminal) break;
+            }
+            if (!terminal) handleFrame(frame);
+            break;
+          }
           const verdict = sequencer.accept(frame);
           this.#track(verdict.diagnostics);
           for (const accepted of verdict.frames ?? []) handleFrame(accepted);
@@ -787,24 +804,27 @@ export class WorkflowClient {
     let announcedCursorUnsupported = false;
 
     const record = async (run) => {
-      const serialized = JSON.stringify(run);
+      // Run snapshots are rendered and returned to callers just like API
+      // responses, so redact them before deduplication or callback delivery.
+      const safeRun = redactValue(run, this.token);
+      const serialized = JSON.stringify(safeRun);
       if (serialized === lastSerialized) return false;
       if (
         lastRun !== null &&
         Array.isArray(lastRun.events) &&
-        Array.isArray(run.events) &&
-        run.events.length < lastRun.events.length
+        Array.isArray(safeRun.events) &&
+        safeRun.events.length < lastRun.events.length
       ) {
         this.report(
           diagnostic(
             "OUT_OF_ORDER_EVENT",
-            `run ${runId} returned ${run.events.length} events after ${lastRun.events.length}; keeping the newest snapshot`,
+            `run ${runId} returned ${safeRun.events.length} events after ${lastRun.events.length}; keeping the newest snapshot`,
           ),
         );
       }
       lastSerialized = serialized;
-      lastRun = run;
-      await onRun?.(run);
+      lastRun = safeRun;
+      await onRun?.(safeRun);
       return true;
     };
 

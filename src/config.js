@@ -21,7 +21,7 @@ const SECRET_FIELDS = Object.freeze([
   "apiKey",
 ]);
 export const DEFAULT_TIMEOUT_MS = 15000;
-export const DEFAULT_CHAT_PATH = "/api/ask/agents";
+export const DEFAULT_CHAT_PATH = "/api/work/chat";
 export const DEFAULT_ENDPOINT = "agents";
 
 function envText(value) {

@@ -8,6 +8,7 @@ import {
 } from "../packages/workflow-sdk/src/index.js";
 import { saveConfig } from "./config.js";
 import { resolveSession } from "./auth.js";
+import { childEnvironment } from "./credentials.js";
 import { getSession, withSession, clearSession } from "./session.js";
 import {
   diagnosticsForJson,
@@ -151,28 +152,65 @@ function sessionFor(ctx, baseUrl) {
 
 async function streamTurn(ctx, client, mode, text, { session }) {
   const answer = [];
-  const result = await client.chatStream({
-    text,
-    mode,
-    conversationId: session.conversationId ?? undefined,
-    parentMessageId: session.parentMessageId ?? undefined,
-    agentId: ctx.flags.get("agent") ?? ctx.settings.agent ?? undefined,
-    model: ctx.flags.get("model") ?? ctx.settings.model ?? undefined,
-    endpoint: ctx.settings.endpoint,
-    signal: ctx.signal,
-    onEvent: (event) => {
-      if (event.type === "delta") {
-        answer.push(event.text);
-        if (!ctx.json) ctx.raw(event.text);
-      } else if (event.type === "replace") {
-        answer.length = 0;
-        answer.push(event.text);
-        if (!ctx.json) ctx.raw(`\n[Revised response]\n${event.text}`);
+  let result;
+  try {
+    result = await client.chatStream({
+      text,
+      mode,
+      conversationId: session.conversationId ?? undefined,
+      parentMessageId: session.parentMessageId ?? undefined,
+      agentId: ctx.flags.get("agent") ?? ctx.settings.agent ?? undefined,
+      model: ctx.flags.get("model") ?? ctx.settings.model ?? undefined,
+      endpoint: ctx.settings.endpoint,
+      path: ctx.flags.get("url") ?? ctx.settings.chatPath,
+      signal: ctx.signal,
+      onEvent: (event) => {
+        if (event.type === "delta") {
+          answer.push(event.text);
+          if (!ctx.json) ctx.raw(event.text);
+        } else if (event.type === "replace") {
+          answer.length = 0;
+          answer.push(event.text);
+          if (!ctx.json) ctx.raw(`\n[Revised response]\n${event.text}`);
+        }
+      },
+    });
+  } catch (error) {
+    // The POST is never retried. If a conversation was already identified,
+    // surface it so the operator can inspect the existing task instead of
+    // submitting the same generation a second time.
+    const conversationId = error?.details?.conversationId ?? session.conversationId ?? null;
+    if (conversationId) {
+      // Persist the accepted turn before reporting the failure so the next
+      // invocation continues it instead of silently starting a new one.
+      try {
+        const sessions = withSession(ctx.settings.sessions, ctx.settings.baseUrl, {
+          conversationId,
+          parentMessageId: session.parentMessageId ?? null,
+        });
+        ctx.settings.sessions = sessions;
+        await saveConfig({ sessions }, { filePath: ctx.settings.configPath });
+      } catch {
+        ctx.err(`coderax: warning: could not save conversation ${conversationId}`);
       }
-    },
-  });
+      if (error instanceof SdkError) {
+        error.details = { ...(error.details ?? {}), conversationId };
+        if (!error.message.includes(conversationId)) {
+          error.message +=
+            `; conversation ${conversationId}. Inspect it with \`coderax tasks\`; the message was not resent.`;
+        }
+      }
+    }
+    throw error;
+  }
 
-  await persistSession(ctx, ctx.settings.baseUrl, result);
+  try {
+    await persistSession(ctx, ctx.settings.baseUrl, result);
+  } catch (error) {
+    // The turn already finished server-side. Do not hide its output because a
+    // local conversation pointer could not be written.
+    ctx.err(`coderax: warning: could not save the conversation pointer: ${error.message}`);
+  }
 
   if (result.text === "") {
     const message = "The server accepted the request but streamed no text.";
@@ -377,6 +415,7 @@ export async function submitCommand(ctx, positionals) {
     throw new SdkError("USAGE", `--mode must be one of ${BUILD_MODES.join(", ")}`);
   }
   const workspace = ctx.flags.get("workspace") ?? defaultWorkspace(repository);
+  const follow = ctx.flags.has("follow") && !ctx.flags.has("detach");
 
   const result = await client.submitBuild({
     request,
@@ -387,18 +426,15 @@ export async function submitCommand(ctx, positionals) {
   });
 
   if (ctx.json) {
-    ctx.out(
-      JSON.stringify(
-        {
-          run: result.run,
-          workflow: result.workflow,
-          build: result.build,
-          ...diagnosticsForJson(client.diagnostics),
-        },
-        null,
-        2,
-      ),
-    );
+    const summary = {
+      run: result.run,
+      workflow: result.workflow,
+      build: result.build,
+      ...diagnosticsForJson(client.diagnostics),
+    };
+    // `--follow` makes this invocation an NDJSON stream; keep the submission
+    // record on one line instead of emitting pretty JSON followed by NDJSON.
+    ctx.out(JSON.stringify(summary, null, follow ? 0 : 2));
   } else {
     ctx.out(`Submitted run ${result.run.id}  ${statusLabel(result.run.status)}`);
     if (result.workflow?.id) {
@@ -413,7 +449,7 @@ export async function submitCommand(ctx, positionals) {
     ctx.out(`Next: coderax run ${result.run.id}`);
   }
 
-  if (ctx.flags.has("follow") && !ctx.flags.has("detach")) {
+  if (follow) {
     return runCommand(ctx, [result.run.id]);
   }
   return EXIT.OK;
@@ -519,14 +555,27 @@ function notifyTerminal(ctx, run) {
   if (!ctx.flags.has("notify") && command === undefined) return;
   if (!ctx.json) ctx.err("\u0007");
   if (command !== undefined) {
+    // run.id is server-supplied and this command is executed by a shell. Never
+    // interpolate arbitrary server text; reject anything outside the documented
+    // identifier shape before substitution. The status is a closed enum.
+    const safeId = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(String(run.id ?? ""));
+    const safeStatus = /^[a-z][a-z_]{0,31}$/.test(String(run.status ?? ""));
+    if (!safeId || !safeStatus) {
+      ctx.err("coderax: warning: NOTIFY_UNSAFE_ID: the notification command was not run");
+      return;
+    }
     const expanded = command
-      .replaceAll("{id}", run.id)
-      .replaceAll("{status}", run.status);
+      .replaceAll("{id}", String(run.id))
+      .replaceAll("{status}", String(run.status));
     try {
+      // Notification commands are user-supplied and detached; never hand them
+      // the deployment bearer token through the inherited environment.
+      const env = childEnvironment(process.env);
       const child = spawn(expanded, {
         shell: true,
         detached: true,
         stdio: "ignore",
+        env,
       });
       child.unref();
     } catch {
@@ -538,6 +587,7 @@ function notifyTerminal(ctx, run) {
 
 function exitForRun(run) {
   if (run?.status === "failed") return EXIT.ERROR;
+  if (run?.status === "cancelled") return EXIT.CANCELLED;
   if (run?.status === "waiting_approval") return EXIT.UNAVAILABLE;
   return EXIT.OK;
 }
@@ -679,12 +729,19 @@ export async function retryCommand(ctx, positionals) {
   const client = await clientFor(ctx);
   await client.requireOwner();
   const { previous, run } = await client.retryRun(id);
+  const follow = ctx.flags.has("follow");
   if (ctx.json) {
-    ctx.out(JSON.stringify({ previous, run, ...diagnosticsForJson(client.diagnostics) }, null, 2));
+    ctx.out(
+      JSON.stringify(
+        { previous, run, ...diagnosticsForJson(client.diagnostics) },
+        null,
+        follow ? 0 : 2,
+      ),
+    );
   } else {
     ctx.out(`Retried ${previous.id} (${statusLabel(previous.status)}) as run ${run.id}  ${statusLabel(run.status)}`);
   }
-  if (ctx.flags.has("follow")) return runCommand(ctx, [run.id]);
+  if (follow) return runCommand(ctx, [run.id]);
   return EXIT.OK;
 }
 
