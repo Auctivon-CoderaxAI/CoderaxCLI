@@ -170,7 +170,7 @@ function sbom() {
     dataLicense: "CC0-1.0",
     SPDXID: "SPDXRef-DOCUMENT",
     name: `${PACKAGE_NAME}@${VERSION}`,
-    documentNamespace: `https://github.com/Auctivon-CoderaxAI/Coderax-CLI/releases/tag/v${VERSION}/sbom`,
+    documentNamespace: `https://github.com/Auctivon-CoderaxAI/CoderaxCLI/releases/tag/v${VERSION}/sbom`,
     creationInfo: {
       created: new Date(MTIME).toISOString(),
       creators: ["Tool: coderax-cli-build-release"],
@@ -182,7 +182,7 @@ function sbom() {
         name: PACKAGE_NAME,
         versionInfo: VERSION,
         SPDXID: "SPDXRef-Package",
-        downloadLocation: `https://github.com/Auctivon-CoderaxAI/Coderax-CLI/releases/tag/v${VERSION}`,
+        downloadLocation: `https://github.com/Auctivon-CoderaxAI/CoderaxCLI/releases/tag/v${VERSION}`,
         filesAnalyzed: false,
         licenseConcluded: "NOASSERTION",
         licenseDeclared: "NOASSERTION",

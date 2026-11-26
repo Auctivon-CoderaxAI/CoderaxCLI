@@ -10,7 +10,7 @@
 # is missing the installer stops and tells you to install it yourself.
 set -eu
 
-REPO="Auctivon-CoderaxAI/Coderax-CLI"
+REPO="Auctivon-CoderaxAI/CoderaxCLI"
 DEFAULT_BASE_URL="https://github.com/${REPO}/releases"
 
 VERSION="${CODERAX_VERSION:-latest}"

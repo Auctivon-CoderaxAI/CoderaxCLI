@@ -10,7 +10,7 @@ and state live in the Coderax deployment; this program makes HTTP requests and
 exits. Installing it never pulls in Ollama, Docker, a local AI runtime, a
 database, or a background service.
 
-- Repository: `Auctivon-CoderaxAI/Coderax-CLI` (private)
+- Repository: `Auctivon-CoderaxAI/CoderaxCLI` (private)
 - Runtime: Node.js 24 or newer, standard library only, no runtime dependencies
 - Companion: [`Coderax`](https://github.com/Auctivon-CoderaxAI/Coderax) (deployment)
 - Distribution: GitHub Releases (canonical); npm-ready but not published

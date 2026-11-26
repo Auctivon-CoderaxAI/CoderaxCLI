@@ -61,7 +61,7 @@ Get-Content SHA256SUMS | ForEach-Object {
 ```
 
 Replace `0.2.0` below with the release you are installing. The latest release is
-listed at <https://github.com/Auctivon-CoderaxAI/Coderax-CLI/releases>.
+listed at <https://github.com/Auctivon-CoderaxAI/CoderaxCLI/releases>.
 
 > Release downloads require access to the repository. While the repository is
 > private, only users with repository access can fetch these URLs; the same
@@ -71,7 +71,7 @@ listed at <https://github.com/Auctivon-CoderaxAI/Coderax-CLI/releases>.
 
 ```sh
 version=0.2.0
-base="https://github.com/Auctivon-CoderaxAI/Coderax-CLI/releases/download/v$version"
+base="https://github.com/Auctivon-CoderaxAI/CoderaxCLI/releases/download/v$version"
 
 curl -fsSLO "$base/install.sh"
 curl -fsSLO "$base/SHA256SUMS"
@@ -104,7 +104,7 @@ The installer never edits your shell profile. If `~/.local/bin` is not on
 
 ```powershell
 $version = "0.2.0"
-$base = "https://github.com/Auctivon-CoderaxAI/Coderax-CLI/releases/download/v$version"
+$base = "https://github.com/Auctivon-CoderaxAI/CoderaxCLI/releases/download/v$version"
 
 Invoke-WebRequest "$base/install.ps1" -OutFile install.ps1
 Invoke-WebRequest "$base/SHA256SUMS" -OutFile SHA256SUMS
@@ -156,8 +156,8 @@ npm creates the `coderax` and `coderax.cmd` shims automatically.
 ## Option D — from source
 
 ```sh
-git clone https://github.com/Auctivon-CoderaxAI/Coderax-CLI.git
-cd Coderax-CLI
+git clone https://github.com/Auctivon-CoderaxAI/CoderaxCLI.git
+cd CoderaxCLI
 npm ci --ignore-scripts
 node src/cli.js --version
 # optional: put it on PATH

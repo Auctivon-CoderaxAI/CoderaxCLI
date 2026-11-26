@@ -35,12 +35,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Auctivon-CoderaxAI/Coderax-CLI.git"
+    "url": "git+https://github.com/Auctivon-CoderaxAI/CoderaxCLI.git"
   },
   "bugs": {
-    "url": "https://github.com/Auctivon-CoderaxAI/Coderax-CLI/issues"
+    "url": "https://github.com/Auctivon-CoderaxAI/CoderaxCLI/issues"
   },
-  "homepage": "https://github.com/Auctivon-CoderaxAI/Coderax-CLI#readme",
+  "homepage": "https://github.com/Auctivon-CoderaxAI/CoderaxCLI#readme",
   "keywords": [
     "coderax",
     "cli",

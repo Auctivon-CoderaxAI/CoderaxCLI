@@ -387,7 +387,7 @@ export async function doctor(ctx) {
   return ok ? EXIT.OK : EXIT.ERROR;
 }
 
-const RELEASE_FEED = "https://api.github.com/repos/Auctivon-CoderaxAI/Coderax-CLI/releases/latest";
+const RELEASE_FEED = "https://api.github.com/repos/Auctivon-CoderaxAI/CoderaxCLI/releases/latest";
 
 /**
  * Upgrade commands are printed, never executed. Installing a new build is the
@@ -402,7 +402,7 @@ export function upgradeCommands(installMethod, version) {
       return [`npm install --save-exact coderax-cli@${version}`];
     case "standalone":
       return [
-        `curl -fsSLO https://github.com/Auctivon-CoderaxAI/Coderax-CLI/releases/download/v${version}/install.sh`,
+        `curl -fsSLO https://github.com/Auctivon-CoderaxAI/CoderaxCLI/releases/download/v${version}/install.sh`,
         `sh install.sh --version ${version}`,
       ];
     default:
@@ -471,7 +471,7 @@ export async function update(ctx) {
   }
   ctx.out("update available. Upgrade with:");
   for (const command of result.upgrade) ctx.out(`  ${command}`);
-  ctx.out("Verify checksums first: https://github.com/Auctivon-CoderaxAI/Coderax-CLI/blob/main/docs/UPGRADE.md");
+  ctx.out("Verify checksums first: https://github.com/Auctivon-CoderaxAI/CoderaxCLI/blob/main/docs/UPGRADE.md");
   return EXIT.OK;
 }
 

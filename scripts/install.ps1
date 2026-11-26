@@ -11,14 +11,14 @@ param(
   [string]$BinDir = $(if ($env:CODERAX_BIN_DIR) { $env:CODERAX_BIN_DIR } else { Join-Path $env:LOCALAPPDATA "Coderax\bin" }),
   [string]$FromFile,
   [string]$Checksum,
-  [string]$BaseUrl = "https://github.com/Auctivon-CoderaxAI/Coderax-CLI/releases",
+  [string]$BaseUrl = "https://github.com/Auctivon-CoderaxAI/CoderaxCLI/releases",
   [switch]$DryRun,
   [switch]$SkipVerify,
   [switch]$Force
 )
 
 $ErrorActionPreference = "Stop"
-$repo = "Auctivon-CoderaxAI/Coderax-CLI"
+$repo = "Auctivon-CoderaxAI/CoderaxCLI"
 
 function Fail([string]$Message, [int]$Code = 1) {
   Write-Error "coderax install: $Message" -ErrorAction Continue
