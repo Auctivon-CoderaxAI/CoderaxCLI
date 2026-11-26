@@ -38,8 +38,12 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
+          # GitHub's bash shell starts with -e; keep the failing test status for
+          # the annotation pass instead of exiting at the pipeline.
+          set +e
           npm test 2>&1 | tee test-output.log
           test_exit=${PIPESTATUS[0]}
+          set -e
           if [ "$test_exit" -ne 0 ]; then
             grep -nE '✖|not ok|failing tests|AssertionError|Error:|ERR_' test-output.log | head -40 | while IFS= read -r line; do
               echo "::error title=test failure::$line"
