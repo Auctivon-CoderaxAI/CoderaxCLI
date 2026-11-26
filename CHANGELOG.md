@@ -43,7 +43,7 @@ contract `1.0.0`.
 ### Security
 
 - Owner-token storage in macOS Keychain, Windows DPAPI or Linux Secret Service,
-  with an explicit `0600` fallback.
+  with an explicit private-file fallback (`0600` where POSIX modes apply).
 - Token redaction across text, JSON, Markdown and streamed deltas.
 - HTTPS-only remote transport, redirect refusal, no anonymous owner access.
 - Allowlisted child-process environment, no shell, token on stdin, bounded
