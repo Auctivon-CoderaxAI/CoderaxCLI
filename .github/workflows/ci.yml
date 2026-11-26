@@ -12,16 +12,15 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   # Hosted standard runners only. This repository is being prepared for private
   # operation, so pull requests run Linux only; the full OS matrix runs on main.
   # That keeps the macOS (10x) and Windows (2x) multipliers off every PR.
   verify:
     name: verify (${{ matrix.os }})
+    concurrency:
+      group: ci-${{ github.workflow }}-${{ github.ref }}-verify-${{ matrix.os }}
+      cancel-in-progress: true
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     permissions:
@@ -73,15 +72,13 @@ jobs:
           retention-days: 7
 
   # The protected branch requires a check context named exactly "test".
-  # Never schedule this aggregator inside a cancelled run. `always()` creates
-  # the job after cancellation, where it waits for a runner that is never
-  # assigned and keeps the concurrency group for main occupied, so the next
-  # push's run never starts. Skipping a cancelled run lets it finish and
-  # release the group; a verify failure still reaches this job and fails.
+  # GitHub accepts a skipped job as passing. Evaluate the result even after
+  # verify fails or is cancelled, and keep this gate outside concurrency
+  # groups so it cannot block verification for a newer run.
   test:
     name: test
     needs: verify
-    if: always() && !cancelled()
+    if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -97,6 +94,9 @@ jobs:
 
   dependencies:
     name: dependency audit
+    concurrency:
+      group: ci-${{ github.workflow }}-${{ github.ref }}-dependencies
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     permissions:
       contents: read
