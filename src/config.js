@@ -2,6 +2,7 @@ import { chmod, lstat, mkdir, readFile, rename, stat, unlink, writeFile } from "
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { deleteCredential, readCredential, writeCredential } from "./credentials.js";
+import { hardenSecurePath, SecureStoreError, verifySecurePath } from "./secure-store.js";
 
 export class ConfigError extends Error {
   constructor(code, message) {
@@ -102,24 +103,26 @@ async function readStoredConfig(path, readFileImpl) {
  * Precedence: environment over stored file. A token is never required at load
  * time so that `coderax config show` works before the first login.
  */
-export async function loadConfig({ env = process.env, filePath, readFileImpl = readFile, overrides = {} } = {}) {
+export async function loadConfig({
+  env = process.env,
+  filePath,
+  readFileImpl = readFile,
+  overrides = {},
+  verifyImpl = verifySecurePath,
+} = {}) {
   const path = filePath ?? configPath(env);
   const stored = await readStoredConfig(path, readFileImpl);
 
   // A credential file readable by another account is refused rather than used.
-  // Windows has no POSIX mode bits; ACL inheritance is the platform control.
-  if (stored.token && process.platform !== "win32") {
-    try {
-      const info = await stat(path);
-      if ((info.mode & 0o077) !== 0) {
-        throw new ConfigError(
-          "CONFIG_INSECURE_PERMISSIONS",
-          `${path} is readable by group or others (mode ${(info.mode & 0o777).toString(8)}); run \`chmod 600 ${path}\``,
-        );
-      }
-    } catch (error) {
-      if (error instanceof ConfigError) throw error;
-      throw new ConfigError("CONFIG_UNREADABLE", `could not check permissions on ${path}`);
+  // POSIX mode bits are not enough on their own (macOS ACLs) and are absent on
+  // Windows, so the same platform verifier used before writing runs here too.
+  if (stored.token) {
+    const verification = await verifyImpl(path);
+    if (!verification?.ok) {
+      throw new ConfigError(
+        "CONFIG_INSECURE_PERMISSIONS",
+        `refusing to read the stored token from ${path}: ${verification?.detail ?? "permissions could not be verified"}`,
+      );
     }
   }
 
@@ -147,6 +150,9 @@ export async function loadConfig({ env = process.env, filePath, readFileImpl = r
     endpoint: env.CODERAX_ENDPOINT?.trim() || stored.endpoint || DEFAULT_ENDPOINT,
     model: env.CODERAX_MODEL?.trim() || stored.model || "",
     agent: env.CODERAX_AGENT?.trim() || stored.agent || "",
+    history: stored.history !== null && typeof stored.history === "object" && !Array.isArray(stored.history)
+      ? stored.history
+      : {},
     output: stored.output || "text",
     account: typeof stored.account === "string" ? stored.account : null,
     role: typeof stored.role === "string" ? stored.role : null,
@@ -171,6 +177,8 @@ export async function saveConfig(
     credentialStore = "file",
     credentialDeps = {},
     env = process.env,
+    verifyImpl = verifySecurePath,
+    platform = process.platform,
   } = {},
 ) {
   const path = filePath ?? configPath();
@@ -213,6 +221,11 @@ export async function saveConfig(
   if (patch.endpoint !== undefined) next.endpoint = String(patch.endpoint);
   if (patch.model !== undefined) next.model = String(patch.model);
   if (patch.agent !== undefined) next.agent = String(patch.agent);
+  if (patch.history !== undefined) {
+    next.history = patch.history === null || typeof patch.history !== "object" || Array.isArray(patch.history)
+      ? {}
+      : { ...patch.history };
+  }
   if (patch.output !== undefined) next.output = String(patch.output);
   if (patch.account !== undefined) next.account = patch.account === null ? null : String(patch.account);
   if (patch.role !== undefined) next.role = patch.role === null ? null : String(patch.role);
@@ -228,6 +241,13 @@ export async function saveConfig(
   }
 
   await mkdirImpl(dirname(path), { recursive: true, mode: 0o700 });
+  if (platform === "win32") {
+    try {
+      await hardenSecurePath(dirname(path), { platform, kind: "directory" });
+    } catch (error) {
+      throw new ConfigError("CONFIG_PERMISSIONS", `could not restrict the config directory: ${error.message}`);
+    }
+  }
 
   // Write a fresh 0600 file and atomically replace the config, so an existing
   // world-readable file never receives the token even for an instant.
@@ -237,11 +257,13 @@ export async function saveConfig(
     try {
       await chmodImpl(tempPath, 0o600);
     } catch (error) {
-      if (process.platform !== "win32") {
+      if (platform !== "win32") {
         throw new ConfigError("CONFIG_PERMISSIONS", `could not restrict permissions on ${tempPath}`);
       }
     }
+    if (platform === "win32") await hardenSecurePath(tempPath, { platform });
     await renameImpl(tempPath, path);
+    if (platform === "win32") await hardenSecurePath(path, { platform });
   } catch (error) {
     try {
       await unlinkImpl(tempPath);
@@ -249,7 +271,20 @@ export async function saveConfig(
       // Nothing to clean up.
     }
     if (error instanceof ConfigError) throw error;
+    if (error instanceof SecureStoreError) {
+      throw new ConfigError("CONFIG_PERMISSIONS", error.message);
+    }
     throw new ConfigError("CONFIG_WRITE_FAILED", `could not write ${path} atomically`);
+  }
+
+  // A written file is not proof of a private file. Verify POSIX mode and
+  // ownership, macOS ACLs, or the Windows ACL before reporting success.
+  const verification = await verifyImpl(path, { platform });
+  if (!verification?.ok) {
+    throw new ConfigError(
+      "CONFIG_PERMISSIONS",
+      `refusing to accept the config file: ${verification?.detail ?? "permission verification failed"}`,
+    );
   }
 
   return { path, config: next };
@@ -265,6 +300,7 @@ export function describeConfig(config) {
     endpoint: config.endpoint,
     model: config.model,
     agent: config.agent ?? "",
+    history: config.history ?? {},
     account: config.account ?? null,
     role: config.role ?? null,
     conversationCount: Object.keys(config.sessions ?? {}).length,

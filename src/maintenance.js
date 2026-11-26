@@ -10,6 +10,7 @@ import { rm, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { EXIT } from "./product-commands.js";
+import { credentialBackend, deleteCredential } from "./credentials.js";
 
 async function exists(path) {
   try {
@@ -85,6 +86,18 @@ export async function uninstall(ctx) {
   if (present) {
     await rm(target, { recursive: true, force: true });
     payload.removed = true;
+  }
+
+  // The Windows DPAPI credential lives under APPDATA, not beside the config
+  // file, so removing the config directory alone would leave it behind.
+  // --purge is the explicit request to delete the stored owner credential.
+  if (ctx.flags.has("purge")) {
+    await deleteCredential({
+      backend: credentialBackend(ctx.env),
+      account: ctx.settings.account ?? null,
+      env: ctx.env,
+    });
+    payload.credentialRemoved = true;
   }
 
   const message = present

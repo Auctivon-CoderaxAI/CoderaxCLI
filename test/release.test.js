@@ -246,6 +246,9 @@ test("only the credential helper and explicit notifications may spawn a process"
   const allowed = new Map([
     ["credentials.js", /"secret-tool"|"powershell\.exe"/],
     ["workflow-commands.js", /notify-command/],
+    // secure-store verifies platform ACLs with the OS tool; no shell is used
+    // and every argument is a fixed command plus a local path.
+    ["secure-store.js", /"icacls"|"ls"|"powershell\.exe"/],
   ]);
   for (const file of await readdir(directory)) {
     if (!file.endsWith(".js")) continue;

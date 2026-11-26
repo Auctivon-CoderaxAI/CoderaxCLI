@@ -33,6 +33,16 @@ together, rather than a packaging branch that shipped a stale CLI.
   through stdin. `--token-file` reads a `0600` file without echoing it.
 - Installer provenance verification with `--provenance` / `-Provenance`
   (`gh attestation verify`), alongside mandatory checksum verification.
+- Interactive terminal: multiline composer, streaming markdown with syntax
+  highlighting, bounded rendering, resize handling, command completion,
+  model/agent/conversation selection, progress, tool activity, cancellation,
+  retry/resume, accessible line mode and sanitised untrusted output.
+- One command catalogue (`src/commands.js`) shared by CLI dispatch and terminal
+  completion.
+- The shared `packages/workflow-sdk` is the default terminal transport, so the
+  interactive and non-interactive surfaces use one SSE parser.
+- Windows ACLs are rewritten and verified by SID (locale- and domain-safe), and
+  the DPAPI credential file is hardened and verified before use.
 
 ### Changed
 

@@ -39,7 +39,10 @@ jobs:
         run: npm ci --ignore-scripts
       - name: Syntax check
         run: npm run check
-      - name: Unit, CLI and contract tests
+      # On Windows this runs the Windows-only ACL, console and wide-character
+      # tests. On every platform it runs the terminal, session, SDK, permission
+      # and secure-store suites.
+      - name: Unit, CLI, security and contract tests
         run: npm test
       - name: Build release artifacts
         run: npm run build
@@ -67,21 +70,51 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  # A real pseudo-terminal, not a mocked stream: raw mode, resize, wide
+  # characters, multiline editing, markdown streaming, cancellation and clean
+  # exit. `script` is available on both hosted POSIX images.
+  pty:
+    name: real PTY (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b # v4.0.3
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Install from the lockfile
+        run: npm ci --ignore-scripts
+      - name: Real pseudo-terminal tests
+        run: npm run test:pty
+
   # The protected branch requires a check context named exactly "test".
   test:
     name: test
-    needs: verify
+    needs: [verify, pty]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Require every platform to pass
+      - name: Require every platform and PTY job to pass
         shell: bash
         run: |
-          result="${{ needs.verify.result }}"
-          echo "verify result: $result"
-          if [ "$result" != "success" ]; then
-            echo "One or more platform jobs did not pass."
+          verify="${{ needs.verify.result }}"
+          pty="${{ needs.pty.result }}"
+          echo "verify result: $verify"
+          echo "pty result: $pty"
+          if [ "$verify" != "success" ] || [ "$pty" != "success" ]; then
+            echo "One or more platform or PTY jobs did not pass."
             exit 1
           fi
 

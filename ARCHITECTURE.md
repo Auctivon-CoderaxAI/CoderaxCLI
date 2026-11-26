@@ -18,6 +18,17 @@ argv ──► parseArgv ──► preflight ──► resolveSettings ──►
                                           │
                                           ▼
                                   fetch (HTTPS, no redirects)
+
+The interactive terminal is a presentation layer over the same transport:
+
+interactive.js ─► terminal/session.js ─► sdk.js ─► workflow-transport.js
+                        │                 │        └─► packages/workflow-sdk (SSE)
+                        │                 ├─► sdk-legacy.js (explicit only)
+                        │                 └─► @coderax/sdk (verified only)
+                        ├─► terminal/renderer.js ─► terminal/editor.js
+                        ├─► terminal/markdown.js ─► terminal/highlight.js
+                        ├─► terminal/permissions.js
+                        └─► terminal/attachments.js
 ```
 
 ## Layers
@@ -41,6 +52,22 @@ argv ──► parseArgv ──► preflight ──► resolveSettings ──►
 | `packages/workflow-sdk/src/sse.js` | SSE decoder, event sequencing, deduplication, gap handling | none |
 | `packages/workflow-sdk/src/client.js` | owner check, negotiation, chat, runs, builds, approvals, cancellation | contract, http, sse |
 | `packages/workflow-sdk/src/redact.js` | streaming and recursive token redaction | none |
+| `src/client.js` | one HTTP request, error mapping, redaction | `fetch` only |
+| `src/product-registry.js` | canonical five-product status data | none |
+| `src/commands.js` | canonical command catalogue for CLI dispatch and terminal completion | none |
+| `src/sdk.js` | interactive transport facade and canonical contract gate | shared workflow SDK, legacy adapter |
+| `src/workflow-transport.js` | terminal adapter over the shared workflow SDK | `packages/workflow-sdk` |
+| `src/sdk-legacy.js` | explicit compatibility SSE adapter | client, discovery |
+| `src/interactive.js` | TTY raw mode, resize, accessible input | terminal modules, sdk |
+| `src/terminal/session.js` | interactive Chat/Work orchestration | renderer, editor, stores |
+| `src/terminal/renderer.js` | prompt region, bounded block, accessible output | text, theme |
+| `src/terminal/markdown.js` | streaming markdown, highlighting, preview | sanitize, text, highlight |
+| `src/terminal/editor.js` | grapheme-safe multiline editing | text |
+| `src/terminal/keys.js` | key/paste parsing | none |
+| `src/terminal/history.js` | prompt and conversation metadata storage | secure-store |
+| `src/terminal/permissions.js` | verified approval binding | sanitize |
+| `src/terminal/attachments.js` | explicit local-file review | sanitize |
+| `src/secure-store.js` | cross-platform private file verification | OS ACL tools |
 
 The SDK is imported by relative path. There is no workspace install step, no
 npm dependency and no duplicate backend implementation inside the CLI.
@@ -100,6 +127,14 @@ exits `130` without cancelling.
 | missing capability or bad API major | `CAPABILITY_UNAVAILABLE`, `API_VERSION_*` | 6 |
 | SSE/JSON mismatch, incomplete stream | `CONTRACT_VIOLATION`, `STREAM_INCOMPLETE` | 7 |
 | local cancellation/detach | `CANCELLED` | 130 |
+
+## Terminal memory bounds
+
+The renderer keeps only the last response block (200 rows / 64 KiB) for resize
+reflow; earlier output belongs to the terminal's scrollback. Markdown rendering
+is capped at 2 MiB with an explicit truncation notice, code blocks at 4000
+lines, tool activity at 200 events, conversations at 50 records, prompt history
+at its configured limit, and the editor at 100 000 characters / 200 lines.
 
 ## Deliberate constraints
 
