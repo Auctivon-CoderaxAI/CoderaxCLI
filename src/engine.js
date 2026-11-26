@@ -3,9 +3,9 @@
  *
  * Transport, payload validation, event framing and artifact decoding come from
  * the canonical `@coderax/sdk@1.1.0` package published by
- * `Auctivon-CoderaxAI/Coderax-WorkflowEngine` on `contract/authoritative-v1.1`
- * (see `vendor/PROVENANCE.md`). This module adds only client policy the SDK
- * deliberately leaves out:
+ * `Auctivon-CoderaxAI/Coderax-WorkflowEngine` at PR #7
+ * (`9b4cb5ce4f8688cf232d006028e5e255eda6cb1f`; see `vendor/PROVENANCE.md`).
+ * This module adds only client policy the SDK deliberately leaves out:
  *
  * - negotiation is performed once per invocation and never guessed;
  * - a capability is resolved from the handshake before a request is made;
@@ -21,13 +21,13 @@
 import {
   CoderaxApiError,
   CoderaxClient,
-  CoderaxCompatibilityError,
   CoderaxContractError,
+  SDK_CHAT_STREAM_VERSION,
   SDK_CONTRACT_VERSION,
-  SDK_COVERAGE,
   SDK_EVENT_SCHEMA_VERSION,
-  SDK_MANIFEST,
+  SDK_OPERATION_COVERAGE,
   SDK_VERSION,
+  checkCompatibility,
 } from "@coderax/sdk";
 import { CoderaxError } from "./client.js";
 
@@ -35,8 +35,9 @@ export const ENGINE = Object.freeze({
   sdkVersion: SDK_VERSION,
   contractVersion: SDK_CONTRACT_VERSION,
   eventSchemaVersion: SDK_EVENT_SCHEMA_VERSION,
-  operations: Object.freeze(Object.keys(SDK_COVERAGE)),
-  streams: Object.freeze(SDK_MANIFEST.streams),
+  chatStreamVersion: SDK_CHAT_STREAM_VERSION,
+  operations: Object.freeze(Object.keys(SDK_OPERATION_COVERAGE)),
+  streams: Object.freeze(["chat", "events"]),
 });
 
 export const TERMINAL_TASK_STATES = Object.freeze([
@@ -62,10 +63,10 @@ export function isTerminalTaskState(state) {
 
 /** A method name the canonical SDK exposes for a published operation. */
 export function sdkMethodFor(operationId) {
-  return SDK_COVERAGE[operationId] ?? null;
+  return SDK_OPERATION_COVERAGE[operationId] ?? null;
 }
 
-export function createEngineClient({ baseUrl, token, timeoutMs = 30000, fetchImpl = fetch, signal } = {}) {
+export function createEngineClient({ baseUrl, token, timeoutMs = 30000, fetchImpl = fetch } = {}) {
   if (typeof baseUrl !== "string" || baseUrl.trim() === "") {
     throw new CoderaxError(
       "BASE_URL_REQUIRED",
@@ -75,17 +76,26 @@ export function createEngineClient({ baseUrl, token, timeoutMs = 30000, fetchImp
   if (typeof token !== "string" || token.trim() === "") {
     throw new CoderaxError("UNAUTHENTICATED", "not signed in; run `coderax login` first");
   }
-  return new CoderaxClient({ baseUrl, token, timeoutMs, fetchImpl, signal });
+  return new CoderaxClient({ baseUrl, token, timeoutMs, fetchImpl });
 }
 
 /**
  * Fetch the handshake and prove compatibility. The SDK validates the document
- * against the published schema and then compares contract, event and SDK
- * versions; a mismatch is a compatibility error, never a warning.
+ * against the published schema; `checkCompatibility` then compares the three
+ * versioned surfaces (HTTP contract, execution events, chat frames). A mismatch
+ * is an error, never a warning.
  */
 export async function negotiate(client) {
   try {
-    const handshake = await client.negotiate();
+    const handshake = await client.handshake({ contract: SDK_CONTRACT_VERSION });
+    const report = checkCompatibility({ handshake });
+    if (!report.compatible) {
+      throw new CoderaxError(
+        "CONTRACT_INCOMPATIBLE",
+        `the deployment is not contract-compatible with SDK ${SDK_VERSION}: ${report.problems.join("; ")}`,
+        { details: { problems: report.problems, serverContract: report.serverContractVersion } },
+      );
+    }
     return handshake;
   } catch (error) {
     throw translateError(error);
@@ -96,7 +106,7 @@ export async function negotiate(client) {
 export function coverageGaps(handshake) {
   const gaps = [];
   for (const operation of handshake.operations ?? []) {
-    if (!Object.hasOwn(SDK_COVERAGE, operation.operationId)) {
+    if (!Object.hasOwn(SDK_OPERATION_COVERAGE, operation.operationId)) {
       gaps.push(operation.operationId);
     }
   }
@@ -131,8 +141,8 @@ export async function listAgentsOrNull(client) {
 export async function engineHealth(client) {
   try {
     const [health, handshake] = await Promise.all([client.health(), client.handshake()]);
-    // A not-ready deployment answers /v1/ready with a report and a non-2xx
-    // status; that is a readiness fact, not a transport failure.
+    // A not-ready deployment answers /v1/ready with a report and may answer
+    // non-2xx; that is a readiness fact, not a transport failure.
     let readiness = null;
     let readinessError = null;
     try {
@@ -178,6 +188,22 @@ export async function listTasks(client, options = {}) {
   }
 }
 
+export async function resumeTask(client, taskId, generation) {
+  try {
+    return await client.resume(taskId, generation);
+  } catch (error) {
+    throw translateError(error);
+  }
+}
+
+export async function retryTask(client, taskId, generation) {
+  try {
+    return await client.retry(taskId, generation);
+  } catch (error) {
+    throw translateError(error);
+  }
+}
+
 export async function listArtifacts(client, taskId) {
   try {
     return await client.artifacts(taskId);
@@ -186,17 +212,14 @@ export async function listArtifacts(client, taskId) {
   }
 }
 
-export async function getArtifact(client, artifactId) {
+/**
+ * Artifact content is task-scoped in contract 1.1.0: the record and its bytes
+ * come from one read, so a client cannot mix metadata from one artifact with
+ * bytes from another.
+ */
+export async function getArtifact(client, taskId, artifactId) {
   try {
-    return await client.artifact(artifactId);
-  } catch (error) {
-    throw translateError(error);
-  }
-}
-
-export async function artifactContent(client, artifactId) {
-  try {
-    return await client.artifactContent(artifactId);
+    return await client.artifact(taskId, artifactId);
   } catch (error) {
     throw translateError(error);
   }
@@ -205,7 +228,7 @@ export async function artifactContent(client, artifactId) {
 /** Upload validated bytes to the task that owns them; the engine computes the digest. */
 export async function uploadArtifact(client, taskId, request) {
   try {
-    return await client.uploadArtifact(taskId, request);
+    return await client.createArtifact(taskId, request);
   } catch (error) {
     throw translateError(error);
   }
@@ -227,25 +250,25 @@ export async function createSchedule(client, request) {
   }
 }
 
-export async function getSchedule(client, scheduleId) {
+export async function controlSchedule(client, scheduleId, action) {
   try {
-    return await client.schedule(scheduleId);
+    return await client.controlSchedule(scheduleId, action);
   } catch (error) {
     throw translateError(error);
   }
 }
 
-export async function cancelSchedule(client, scheduleId) {
+export async function deleteSchedule(client, scheduleId) {
   try {
-    return await client.cancelSchedule(scheduleId);
+    return await client.deleteSchedule(scheduleId);
   } catch (error) {
     throw translateError(error);
   }
 }
 
-export async function listPendingPermissions(client) {
+export async function listPermissions(client, taskId) {
   try {
-    return await client.pendingPermissions();
+    return await client.permissions(taskId);
   } catch (error) {
     throw translateError(error);
   }
@@ -359,17 +382,11 @@ async function followInner(
 
     if (streaming) {
       try {
-        const opened = await client.openEvents(taskId, {
+        const frames = client.events(taskId, {
           ...(cursor > 0 ? { after: cursor } : {}),
           signal,
         });
-        if (opened.truncated) {
-          await onEvent?.(
-            { type: "stream.truncated", seq: cursor, at: new Date().toISOString() },
-            lastTask,
-          );
-        }
-        for await (const event of opened.events) {
+        for await (const event of frames) {
           await apply(event);
         }
         attempt = 0;
@@ -381,8 +398,6 @@ async function followInner(
         } else if (retryable(translated) && attempt < maxRetries) {
           attempt += 1;
           await sleep(Math.min(5000, 250 * 2 ** attempt));
-        } else if (!retryable(translated)) {
-          throw translated;
         } else {
           throw translated;
         }
@@ -437,11 +452,6 @@ export function translateError(error) {
       details: { serverCode: error.code, requestId: error.requestId ?? null },
       retryable: error.retryable === true,
       requestId: error.requestId ?? undefined,
-    });
-  }
-  if (error instanceof CoderaxCompatibilityError) {
-    return new CoderaxError("CONTRACT_INCOMPATIBLE", error.message, {
-      details: { problems: error.problems },
     });
   }
   if (error instanceof CoderaxContractError) {

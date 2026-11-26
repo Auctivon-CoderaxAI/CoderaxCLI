@@ -73,7 +73,7 @@ test("writeArtifactBytes refuses a digest mismatch and leaves no file", async ()
         destination,
         expectedSha256: `sha256:${"0".repeat(64)}`,
         expectedBytes: PDF.length,
-        contentBase64: encodeBase64(PDF),
+        content: encodeBase64(PDF),
       }),
     { code: "ARTIFACT_INTEGRITY_FAILED" },
   );
@@ -90,7 +90,7 @@ test("writeArtifactBytes writes verified bytes and honors force", async () => {
     force: true,
     expectedSha256: `sha256:${sha256Hex(PDF)}`,
     expectedBytes: PDF.length,
-    contentBase64: encodeBase64(PDF),
+    content: encodeBase64(PDF),
   });
   assert.equal(written.sha256, sha256Hex(PDF));
   assert.equal(written.bytes, PDF.length);
@@ -101,7 +101,7 @@ test("writeArtifactBytes writes verified bytes and honors force", async () => {
         destination,
         expectedSha256: `sha256:${sha256Hex(PDF)}`,
         expectedBytes: PDF.length,
-        contentBase64: encodeBase64(PDF),
+        content: encodeBase64(PDF),
       }),
     { code: "ARTIFACT_DESTINATION_EXISTS" },
   );

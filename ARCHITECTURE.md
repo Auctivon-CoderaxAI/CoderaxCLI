@@ -53,10 +53,11 @@ canonical `@coderax/sdk` is the only WorkflowEngine client in the repository.
 
 ## Why a vendored SDK
 
-`Coderax-WorkflowEngine` publishes versioned tarballs with `SHA256SUMS` on
-`contract/authoritative-v1.1`. The CLI vendors `@coderax/sdk` 1.1.0 and
-`@coderax/contracts` 1.1.0 as `file:` dependencies under `vendor/`, verified
-against the published sums in `vendor/PROVENANCE.md`. Benefits:
+`Coderax-WorkflowEngine` publishes `@coderax/sdk` 1.1.0 as a reproducible
+tarball with a `sdk-artifact.json` manifest at pull request #7 (`9b4cb5c`). The
+tarball bundles the matching `@coderax/contracts` schemas, so the CLI vendors
+one `file:` dependency under `vendor/`, verified against the published SHA-256
+in `vendor/PROVENANCE.md`. Benefits:
 
 - one client implementation shared with Coderax Web and the engine's own tests;
 - response and frame validation against the same zod schemas the server uses;

@@ -73,10 +73,10 @@ capability executes, and nothing is simulated locally):
   coderax gaming-agent <objective> [--session <id>] [--json]
   coderax orchestrate <prompt> [--agent <id>] [--json]
   coderax artifacts list --task <id> [--json]
-  coderax artifacts inspect <artifactId> [--json]
-  coderax artifacts download <artifactId> [--out <path>] [--force] [--json]
-  coderax schedules list|create|get|cancel ... [--json]
-  coderax permissions list|approve|deny ... [--json]
+  coderax artifacts inspect <artifactId> --task <id> [--json]
+  coderax artifacts download <artifactId> --task <id> [--out <path>] [--force] [--json]
+  coderax schedules list|create|pause|resume|delete ... [--json]
+  coderax permissions list --task <id> | approve|deny <taskId> <requestId> [--json]
   coderax task <taskId> [--json]
   coderax completion bash|zsh|fish
 
@@ -301,8 +301,11 @@ function preflight(positionals, flags, dynamic) {
     if (action === "list" && !positionals[2] && !dynamic.has("task")) {
       throw new UsageError("artifacts list requires --task <taskId>");
     }
-    if ((action === "inspect" || action === "download") && !positionals[2]) {
-      throw new UsageError(`artifacts ${action} requires an artifact id`);
+    if (action === "inspect" || action === "download") {
+      if (!positionals[2]) throw new UsageError(`artifacts ${action} requires an artifact id`);
+      if (!dynamic.has("task")) {
+        throw new UsageError(`artifacts ${action} requires --task <taskId> (contract 1.1.0 is task-scoped)`);
+      }
     }
   }
 
@@ -314,7 +317,7 @@ function preflight(positionals, flags, dynamic) {
     if (action === "create" && !positionals[2]) {
       throw new UsageError("schedules create requires an objective");
     }
-    if ((action === "get" || action === "cancel") && !positionals[2]) {
+    if ((action === "pause" || action === "resume" || action === "delete") && !positionals[2]) {
       throw new UsageError(`schedules ${action} requires a schedule id`);
     }
   }
@@ -323,6 +326,9 @@ function preflight(positionals, flags, dynamic) {
     const action = positionals[1] ?? "list";
     if (!["list", "approve", "deny"].includes(action)) {
       throw new UsageError("permissions requires list, approve or deny");
+    }
+    if (action === "list" && !positionals[2] && !dynamic.has("task")) {
+      throw new UsageError("permissions list requires --task <taskId> (contract 1.1.0 is task-scoped)");
     }
     if (action !== "list" && (!positionals[2] || !positionals[3])) {
       throw new UsageError(`permissions ${action} requires <taskId> <requestId>`);
@@ -402,13 +408,13 @@ function preflight(positionals, flags, dynamic) {
 
 function commandHelp(command) {
   if (command === "artifacts") {
-    return `coderax artifacts <action>\n\nUsage:\n  coderax artifacts list --task <taskId> [--json]\n  coderax artifacts inspect <artifactId> [--json]\n  coderax artifacts download <artifactId> [--out <path>] [--force] [--json]\n\nArtifacts are owner-scoped records of the authoritative engine artifact\nservice (GET /v1/work/{taskId}/artifacts, GET /v1/artifacts/{id}[/content]).\nA download is verified against the published sha256 digest and is never\nwritten over an existing file without --force.`;
+    return `coderax artifacts <action>\n\nUsage:\n  coderax artifacts list --task <taskId> [--json]\n  coderax artifacts inspect <artifactId> --task <taskId> [--json]\n  coderax artifacts download <artifactId> --task <taskId> [--out <path>] [--force] [--json]\n\nArtifacts are owner-scoped records of the authoritative engine artifact\nservice (GET/POST /v1/work/{taskId}/artifacts,\nGET /v1/work/{taskId}/artifacts/{artifactId}). Contract 1.1.0 is task-scoped,\nso every read names the task that owns the bytes. A download is verified\nagainst the engine-computed sha256 digest and is never written over an\nexisting file without --force.`;
   }
   if (command === "schedules") {
-    return `coderax schedules <action>\n\nUsage:\n  coderax schedules list [--json]\n  coderax schedules create <objective> --at <ISO-8601> [--every <ms>] [--agent <id>] [--json]\n  coderax schedules get <scheduleId> [--json]\n  coderax schedules cancel <scheduleId> [--json]\n\nSchedules are durable on the engine (POST /v1/schedules); closing the terminal\ndoes not cancel them. The engine reports whether scheduling is available.`;
+    return `coderax schedules <action>\n\nUsage:\n  coderax schedules list [--json]\n  coderax schedules create <objective> --interval-ms <ms> [--start-at <ISO-8601>] [--agent <id>] [--json]\n  coderax schedules pause <scheduleId> [--json]\n  coderax schedules resume <scheduleId> [--json]\n  coderax schedules delete <scheduleId> [--json]\n\nSchedules are durable on the engine (POST /v1/schedules); closing the terminal\ndoes not cancel them. The minimum interval is 60000 ms. Each schedule reports\nits run and skipped counts, last task and next run; contract 1.1.0 publishes no\nseparate execution-history route, so the CLI does not invent one.`;
   }
   if (command === "permissions") {
-    return `coderax permissions <action>\n\nUsage:\n  coderax permissions list [--json]\n  coderax permissions approve <taskId> <requestId> [--reason <text>] [--json]\n  coderax permissions deny <taskId> <requestId> [--reason <text>] [--json]\n\nOnly the engine can approve a scoped request; the CLI forwards the owner's\ndecision and never widens a grant.`;
+    return `coderax permissions <action>\n\nUsage:\n  coderax permissions list --task <taskId> [--json]\n  coderax permissions approve <taskId> <requestId> [--reason <text>] [--json]\n  coderax permissions deny <taskId> <requestId> [--reason <text>] [--json]\n\nOnly the engine can approve a scoped request; the CLI forwards the owner's\ndecision and never widens a grant. Contract 1.1.0 addresses permission requests\nby task, so a listing names the task it belongs to.`;
   }
   if (command === "task") {
     return `coderax task <taskId> [--json]\n\nReattaches to a durable task through GET /v1/work/{taskId} and lists the\nartifacts it produced. It does not resubmit anything.`;

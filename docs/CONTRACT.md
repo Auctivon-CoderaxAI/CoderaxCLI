@@ -1,34 +1,43 @@
 # CLI ↔ WorkflowEngine contract
 
 The CLI consumes contract **1.1.0** through the canonical `@coderax/sdk` 1.1.0
-package. It does not invent a route, a payload or a capability registry. Every
-path below is a published operation in the engine's route catalogue
-(`packages/contracts/src/routes.ts` on `contract/authoritative-v1.1`).
+package published by WorkflowEngine pull request #7
+(`9b4cb5ce4f8688cf232d006028e5e255eda6cb1f`). It does not invent a route, a
+payload or a capability registry. Every path below is a published operation in
+that engine's route catalogue (`packages/contracts/src/routes.ts`).
+
+> `contract/authoritative-v1.1` (`ea66028`) publishes a different 1.1.0 SDK and
+> a different artifact surface. It is a competing implementation, not the
+> artifact this client consumes. See `vendor/PROVENANCE.md`.
 
 ## Negotiation
 
-`GET /v1/handshake` is fetched once per invocation, before any capability runs.
-The SDK validates the document against `EngineHandshake` and then checks:
+`GET /v1/handshake?contract=1.1.0` is fetched once per invocation, before any
+capability runs. It is an **owner** operation. The SDK validates the document
+against `CapabilityHandshake`; `checkCompatibility` then checks:
 
-- the engine's contract major equals this SDK's major;
-- the engine's contract is not older than 1.1.0;
+- `contractMajor` equals this SDK's major;
+- `supportedContractVersions` contains `1.1.0`;
 - `eventSchemaVersion` matches the SDK's event schema;
-- `chatStreamSchemaVersion` matches when present;
-- this SDK satisfies `minSdkVersion`.
+- `chatStreamVersion` matches the SDK's chat stream version;
+- every operation this client requires is published.
 
 Any mismatch is `CONTRACT_INCOMPATIBLE` (exit `7`) and no capability request is
-sent. `handshake.operations` is used as the authoritative operation set: a
-family whose required operation is absent is `unverified`, never executed.
+sent. `handshake.operations` is the authoritative operation set: a family whose
+required operation is absent is `unverified`, never executed. A published
+operation with no method on the canonical SDK is also `unverified`, because the
+client cannot call it.
+
+`handshake.capabilities` is a flat object of booleans derived by the engine from
+its own route table. The CLI never upgrades a `false` or absent flag.
 
 ## Owner authentication
 
-Every non-public operation requires `Authorization: Bearer <token>`. Public
-operations are `getHealth`, `getReadiness` and `getHandshake`.
-
-Owner authorization is enforced by the engine: a 401/403 becomes
-`UNAUTHENTICATED` (exit `3`). The CLI additionally performs one owner-only read
-(`GET /v1/agents`) during `readiness` so an operator can prove the token is
-accepted for owner operations before submitting work.
+Every operation except `getHealth` and `getReadiness` requires
+`Authorization: Bearer <token>`. Owner authorization is enforced by the engine:
+a 401/403 becomes `UNAUTHENTICATED` (exit `3`). `readiness` performs one
+owner-only read (`GET /v1/agents`) so an operator can prove the token is
+accepted before submitting work.
 
 ## Operations used
 
@@ -37,26 +46,32 @@ accepted for owner operations before submitting work.
 | `getHealth` | `GET /v1/health` | readiness output |
 | `getReadiness` | `GET /v1/ready` | readiness output |
 | `getHandshake` | `GET /v1/handshake` | capability resolution, compatibility |
-| `listAgents` | `GET /v1/agents` | owner proof, multi-agent discovery |
+| `listAgents` | `GET /v1/agents` | owner proof, agent discovery |
 | `listModels` | `GET /v1/models` | model discovery |
 | `submitWork` | `POST /v1/work` | every capability request |
+| `listTasks` | `GET /v1/work` | owner task read model |
 | `getTask` | `GET /v1/work/{taskId}` | authoritative state, result, failure |
 | `streamTaskEvents` | `GET /v1/work/{taskId}/events?after=N` | progress and replay |
 | `cancelTask` | `POST /v1/work/{taskId}/cancel` | explicit cancellation and upload cleanup |
-| `listTaskArtifacts` | `GET /v1/work/{taskId}/artifacts` | result listing |
-| `uploadTaskArtifact` | `POST /v1/work/{taskId}/artifacts` | validated attachment storage |
-| `getArtifact` | `GET /v1/artifacts/{artifactId}` | artifact metadata |
-| `getArtifactContent` | `GET /v1/artifacts/{artifactId}/content` | digest-verified download |
+| `listArtifacts` | `GET /v1/work/{taskId}/artifacts` | result listing |
+| `createArtifact` | `POST /v1/work/{taskId}/artifacts` | validated attachment storage |
+| `getArtifact` | `GET /v1/work/{taskId}/artifacts/{artifactId}` | metadata and bytes in one read |
 | `listSchedules` | `GET /v1/schedules` | `schedules list` |
 | `createSchedule` | `POST /v1/schedules` | `schedules create` |
-| `getSchedule` | `GET /v1/schedules/{scheduleId}` | `schedules get` |
-| `cancelSchedule` | `POST /v1/schedules/{scheduleId}/cancel` | `schedules cancel` |
-| `listPendingPermissions` | `GET /v1/permissions` | `permissions list` |
+| `controlSchedule` | `POST /v1/schedules/{scheduleId}` | `schedules pause/resume` |
+| `deleteSchedule` | `DELETE /v1/schedules/{scheduleId}` | `schedules delete` |
+| `listPermissions` | `GET /v1/work/{taskId}/permissions` | `permissions list` |
 | `decidePermission` | `POST /v1/work/{taskId}/permissions` | `permissions approve/deny` |
 
-Routes that do **not** exist in contract 1.1.0 and are therefore not used:
+Routes that do **not** exist in this contract and are therefore not used:
 `GET /v1/capabilities`, `POST /v1/capabilities/{id}/execute`, `POST /v1/files`,
-`GET /v1/artifacts`, `POST /v1/artifacts/{id}/project`.
+`GET /v1/artifacts/{id}`, `GET /v1/artifacts/{id}/content`,
+`POST /v1/artifacts/{id}/project`, `GET /v1/permissions`,
+`GET /v1/schedules/{id}`, `POST /v1/schedules/{id}/cancel`,
+`GET /v1/schedules/{id}/runs`, and every `/v1/media/*`, `/v1/creative/*` and
+`/v1/games/*` route. Contract 1.1.0 publishes no execution-history route;
+`schedules list` reports the per-schedule `runs`, `skipped`, `lastRunAt` and
+`lastTaskId` the engine records.
 
 ## Work submission
 
@@ -89,44 +104,50 @@ Routes that do **not** exist in contract 1.1.0 and are therefore not used:
 The contract transfers artifact bytes as base64 inside JSON, scoped to a task:
 
 ```json
-{ "path": "report.pdf", "mediaType": "application/pdf", "contentBase64": "..." }
+{ "path": "report.pdf", "mediaType": "application/pdf", "encoding": "base64", "content": "..." }
 ```
 
 - `path` must be relative, at most 1024 characters, with no `..` segment and no
   drive letter. The CLI reduces a local name to a safe basename.
-- `contentBase64` is at most 12,000,000 characters; the CLI refuses local files
-  above 8 MiB before reading them, staying under the decoded bound.
-- The engine returns an `ArtifactRecord` with `bytes` and `digest`
-  (`sha256:<64 hex>`). The CLI requires both to equal the local byte count and
-  SHA-256; otherwise it cancels the task and reports
-  `ARTIFACT_INTEGRITY_FAILED`.
+- `content` is at most 700,000 characters. The CLI refuses local files above
+  512 KiB before reading them, which encodes to 699,052 characters and fits both
+  the field bound and the engine's 1 MiB request body.
+- The engine computes and returns the record's `bytes` and `digest`
+  (`sha256:<64 hex>`); a caller may not state them. The CLI requires both to
+  equal the local byte count and SHA-256; otherwise it cancels the task and
+  reports `ARTIFACT_INTEGRITY_FAILED`.
 
 Because `WorkSubmitRequest` has no attachment field, the order is: submit, then
 upload to the accepted task. If the upload fails the task is cancelled, so no
 run observes a missing input.
 
+`GET /v1/work/{taskId}/artifacts/{artifactId}` returns
+`{ artifact, encoding, content }`. The record is verified against the list
+entry and the task id before any bytes are used.
+
 ## Downloads
 
-`GET /v1/artifacts/{artifactId}/content` returns
-`{artifactId, mediaType, bytes, digest, contentBase64}`.
-
-- The descriptor must match the metadata record; otherwise the download is
-  refused before writing.
-- The decoded bytes are hashed and compared with the published digest and byte
-  count. A mismatch deletes the temporary file and leaves the destination
-  untouched.
+- The descriptor must match the metadata record and the requested task;
+  otherwise the download is refused before writing.
+- `encoding` is `base64` or `utf8`. The decoded bytes are hashed and compared
+  with the published digest and byte count. A mismatch deletes the temporary
+  file and leaves the destination untouched.
 - The destination is resolved locally: `--out`, or the artifact basename in the
   current directory. `--force` is the only authorization to replace an existing
   file. Directories, missing parents and symlinks are refused.
 
 ## Progress
 
-`streamTaskEvents` is an SSE stream with `id: <seq>` and an `ExecutionEvent`
-body. The CLI applies events in sequence order, ignores an already-applied
-sequence or event id, resumes with `after=<lastSeq>`, and reports
-`x-coderax-truncated` when the engine says the retained window no longer
-contains the cursor. When the deployment does not publish the stream, the CLI
-polls `getTask` instead; that is a degradation, not a failure.
+`streamTaskEvents` yields versioned `ExecutionEvent` frames through
+`CoderaxClient.events()`. The SDK owns framing and schema validation. The CLI:
+
+- applies events in sequence order and ignores an already-applied sequence or
+  event id;
+- resumes with `after=<lastSeq>` after a drop;
+- surfaces `stream.truncated` (`payload.after`, `payload.oldestSeq`) as a
+  warning that earlier events are no longer retained;
+- polls `getTask` when the deployment does not publish the stream; that is a
+  degradation, not a failure.
 
 Terminal task states are `completed`, `failed`, `cancelled`, `interrupted`.
 `awaiting_approval` is not terminal: the CLI reports the request id and keeps

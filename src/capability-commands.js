@@ -19,21 +19,20 @@ import { CoderaxError } from "./client.js";
 import { EXIT } from "./exit.js";
 import { formatBytes, singleLine, table } from "./format.js";
 import {
-  artifactContent,
-  cancelSchedule,
   cancelTask,
+  controlSchedule,
   coverageGaps,
   createEngineClient,
   createSchedule,
   decidePermission,
+  deleteSchedule,
   engineHealth,
   followTask,
   getArtifact,
-  getSchedule,
   getTask,
   listAgentsOrNull,
   listArtifacts,
-  listPendingPermissions,
+  listPermissions,
   listSchedules,
   negotiate,
   submitWork,
@@ -75,7 +74,6 @@ function clientFor(ctx) {
     token: ctx.settings.token,
     timeoutMs: ctx.settings.timeoutMs,
     fetchImpl: ctx.fetchImpl,
-    signal: ctx.signal,
   });
 }
 
@@ -108,12 +106,13 @@ async function registryFor(client) {
 }
 
 function assertFeature(registry, key, operations = []) {
-  const state = registry.capabilities[key];
-  if (!state || state.state !== "available") {
+  const enabled = registry.capabilities[key];
+  if (enabled !== true) {
     throw new CoderaxError(
       "CAPABILITY_NOT_AVAILABLE",
-      `the engine reports ${key} as ${state?.state ?? "unknown"}` +
-        `${state?.detail ? ` (${singleLine(state.detail, 200)})` : ""}`,
+      enabled === undefined
+        ? `the handshake does not report the ${key} capability; the deployment makes no claim about it`
+        : `the engine reports ${key} as disabled or unavailable`,
       { details: { capability: key } },
     );
   }
@@ -223,7 +222,7 @@ export async function capabilities(ctx) {
   }
 
   ctx.out(
-    `${handshake.engineName} ${registry.contract.engineVersion} · contract ${registry.contract.contractVersion} · SDK ${registry.contract.clientSdk}`,
+    `${registry.contract.engineName} ${registry.contract.engineVersion} · contract ${registry.contract.contractVersion} · SDK ${registry.contract.clientSdk}`,
   );
   ctx.out(`compatible: ${registry.contract.compatible ? "yes" : "no"}`);
   if (gaps.length > 0) ctx.out(`operations without an SDK method: ${gaps.join(", ")}`);
@@ -275,11 +274,11 @@ export async function readiness(ctx) {
       ready,
       owner: true,
       engine: {
-        name: handshake.engineName,
-        version: handshake.engineVersion,
+        name: registry.contract.engineName,
+        version: registry.contract.engineVersion,
         contractVersion: handshake.contractVersion,
         eventSchemaVersion: handshake.eventSchemaVersion,
-        minSdkVersion: handshake.minSdkVersion,
+        chatStreamVersion: handshake.chatStreamVersion,
         operations: handshake.operations.length,
       },
       health,
@@ -293,7 +292,7 @@ export async function readiness(ctx) {
     return EXIT.OK;
   }
 
-  ctx.out(`engine:     ${handshake.engineName} ${handshake.engineVersion}`);
+  ctx.out(`engine:     ${registry.contract.engineName} ${registry.contract.engineVersion}`);
   ctx.out(`contract:   ${handshake.contractVersion} (SDK ${registry.contract.clientSdk})`);
   ctx.out(`compatible: ${registry.contract.compatible ? "yes" : "no"}`);
   ctx.out(`ready:      ${ready ? "yes" : `no${readinessError ? ` (${singleLine(readinessError, 120)})` : ""}`}`);
@@ -402,7 +401,7 @@ function artifactRows(artifacts) {
   ]);
 }
 
-async function downloadOne(ctx, client, artifact) {
+async function downloadOne(ctx, client, taskId, artifact) {
   const force = truthy(flag(ctx, "force"));
   const out = optionText(ctx, "out");
   const prepared = await prepareDestination({
@@ -411,11 +410,15 @@ async function downloadOne(ctx, client, artifact) {
     cwd: ctx.cwd,
     force,
   });
-  const content = await artifactContent(client, artifact.artifactId);
-  if (content.artifactId !== artifact.artifactId) {
-    throw new CoderaxError("ARTIFACT_INTEGRITY_FAILED", "the engine returned content for a different artifact");
+  const content = await getArtifact(client, taskId, artifact.artifactId);
+  const meta = content.artifact;
+  if (meta.artifactId !== artifact.artifactId || meta.taskId !== taskId) {
+    throw new CoderaxError(
+      "ARTIFACT_INTEGRITY_FAILED",
+      "the engine returned content for a different task or artifact",
+    );
   }
-  if (content.digest !== artifact.digest || content.bytes !== artifact.bytes) {
+  if (meta.digest !== artifact.digest || meta.bytes !== artifact.bytes) {
     throw new CoderaxError(
       "ARTIFACT_INTEGRITY_FAILED",
       "the content descriptor does not match the artifact metadata; refusing to write it",
@@ -424,11 +427,12 @@ async function downloadOne(ctx, client, artifact) {
   const written = await writeArtifactBytes({
     destination: prepared.destination,
     force: prepared.force,
-    expectedSha256: artifact.digest,
-    expectedBytes: artifact.bytes,
-    contentBase64: content.contentBase64,
+    expectedSha256: meta.digest,
+    expectedBytes: meta.bytes,
+    content: content.content,
+    encoding: content.encoding,
   });
-  return { ...written, artifactId: artifact.artifactId, mediaType: artifact.mediaType };
+  return { ...written, artifactId: meta.artifactId, mediaType: meta.mediaType };
 }
 
 export async function runCapability(command, ctx) {
@@ -484,7 +488,8 @@ export async function runCapability(command, ctx) {
       storedArtifact = await uploadArtifact(client, accepted.taskId, {
         path: artifactPath(attachment.name),
         mediaType: attachment.mimeType,
-        contentBase64: encodeBase64(attachment.buffer),
+        encoding: "base64",
+        content: encodeBase64(attachment.buffer),
       });
     } catch (error) {
       // The task was accepted before its input existed. Do not leave it running.
@@ -566,7 +571,7 @@ export async function runCapability(command, ctx) {
     if (artifacts.length > 1 && !ctx.json) {
       ctx.err(`coderax: task produced ${artifacts.length} artifacts; downloading the first`);
     }
-    downloaded = await downloadOne(ctx, client, artifacts[0]);
+    downloaded = await downloadOne(ctx, client, task.taskId, artifacts[0]);
   }
 
   if (ctx.json) {
@@ -637,7 +642,8 @@ async function runUpload(ctx, entry) {
   const record = await uploadArtifact(client, taskId, {
     path: artifactPath(file.name),
     mediaType: file.mimeType,
-    contentBase64: encodeBase64(file.buffer),
+    encoding: "base64",
+    content: encodeBase64(file.buffer),
   });
 
   if (record.digest !== `sha256:${file.sha256}` || record.bytes !== file.bytes) {
@@ -692,11 +698,23 @@ export async function artifacts(ctx) {
 
   const artifactId = ctx.args[1];
   if (!artifactId) usage(`artifacts ${action} requires an artifact id`);
+  const taskId = optionText(ctx, "task");
+  if (taskId === "") {
+    usage(
+      `artifacts ${action} requires --task <taskId>: contract 1.1.0 addresses artifact content by task ` +
+        "(GET /v1/work/{taskId}/artifacts/{artifactId})",
+    );
+  }
+
+  const content = await getArtifact(client, taskId, artifactId);
+  const record = content.artifact;
+  if (record.taskId !== taskId) {
+    throw new CoderaxError("ARTIFACT_INTEGRITY_FAILED", "the engine returned an artifact from a different task");
+  }
 
   if (action === "inspect") {
-    const record = await getArtifact(client, artifactId);
     if (ctx.json) {
-      emitJson(ctx, { artifact: record });
+      emitJson(ctx, { artifact: record, encoding: content.encoding, contentBytes: content.content.length });
       return EXIT.OK;
     }
     ctx.out(`artifact: ${record.artifactId}`);
@@ -705,13 +723,13 @@ export async function artifacts(ctx) {
     ctx.out(`type:     ${record.mediaType}`);
     ctx.out(`bytes:    ${record.bytes}`);
     ctx.out(`digest:   ${record.digest}`);
+    ctx.out(`origin:   ${record.origin}`);
     ctx.out(`created:  ${record.createdAt}`);
     return EXIT.OK;
   }
 
-  const record = await getArtifact(client, artifactId);
-  const written = await downloadOne(ctx, client, record);
-  if (ctx.json) emitJson(ctx, { artifact: record, download: written });
+  const written = await downloadOne(ctx, client, taskId, record);
+  if (ctx.json) emitJson(ctx, { artifact: record, encoding: content.encoding, download: written });
   else ctx.out(`wrote ${written.path} (${formatBytes(written.bytes)}, sha256:${written.sha256})`);
   return EXIT.OK;
 }
@@ -720,12 +738,16 @@ export async function artifacts(ctx) {
 /* schedules                                                           */
 /* ------------------------------------------------------------------ */
 
+const MIN_SCHEDULE_INTERVAL_MS = 60_000;
+const MAX_SCHEDULE_INTERVAL_MS = 604_800_000;
+
 function scheduleRows(schedules) {
   return schedules.map((schedule) => [
     schedule.scheduleId,
-    schedule.state,
-    schedule.runAt,
-    schedule.intervalMs ? `${schedule.intervalMs} ms` : "once",
+    schedule.enabled ? "enabled" : "paused",
+    schedule.nextRunAt ?? "—",
+    `${schedule.intervalMs} ms`,
+    `${schedule.runs} run${schedule.runs === 1 ? "" : "s"}, ${schedule.skipped} skipped`,
     singleLine(schedule.objective, 60),
   ]);
 }
@@ -737,7 +759,7 @@ export async function schedules(ctx) {
   const { registry } = await registryFor(client);
 
   if (action === "list") {
-    assertFeature(registry, "scheduling", ["listSchedules"]);
+    assertFeature(registry, "schedules", ["listSchedules"]);
     const list = await listSchedules(client);
     if (ctx.json) {
       emitJson(ctx, list);
@@ -747,54 +769,73 @@ export async function schedules(ctx) {
       ctx.out("no schedules");
       return EXIT.OK;
     }
-    ctx.out(table(scheduleRows(list.schedules), ["schedule", "state", "run at", "repeat", "objective"]).join("\n"));
+    ctx.out(
+      table(scheduleRows(list.schedules), [
+        "schedule",
+        "state",
+        "next run",
+        "interval",
+        "history",
+        "objective",
+      ]).join("\n"),
+    );
     return EXIT.OK;
   }
 
   if (action === "create") {
-    assertFeature(registry, "scheduling", ["createSchedule"]);
+    assertFeature(registry, "schedules", ["createSchedule"]);
     const objective = ctx.args.slice(1).join(" ").trim();
     if (objective === "") usage("schedules create requires an objective");
-    const runAt = optionText(ctx, "at");
-    if (runAt === "" || !Number.isFinite(Date.parse(runAt))) {
-      usage("schedules create requires --at <ISO-8601 time>");
+    const rawInterval = optionText(ctx, "interval-ms") || optionText(ctx, "every");
+    if (rawInterval === "") {
+      usage("schedules create requires --interval-ms <milliseconds> (minimum 60000)");
     }
-    const request = { objective, runAt: new Date(runAt).toISOString() };
-    const every = optionText(ctx, "every");
-    if (every !== "") {
-      const intervalMs = Number(every);
-      if (!Number.isInteger(intervalMs) || intervalMs <= 0) usage("--every must be a positive integer of milliseconds");
-      request.intervalMs = intervalMs;
+    const intervalMs = Number(rawInterval);
+    if (
+      !Number.isInteger(intervalMs) ||
+      intervalMs < MIN_SCHEDULE_INTERVAL_MS ||
+      intervalMs > MAX_SCHEDULE_INTERVAL_MS
+    ) {
+      usage(
+        `--interval-ms must be an integer between ${MIN_SCHEDULE_INTERVAL_MS} and ${MAX_SCHEDULE_INTERVAL_MS}`,
+      );
+    }
+    const request = { objective, intervalMs };
+    const startAt = optionText(ctx, "start-at") || optionText(ctx, "at");
+    if (startAt !== "") {
+      if (!Number.isFinite(Date.parse(startAt))) usage("--start-at must be an ISO-8601 time");
+      request.startAt = new Date(startAt).toISOString();
     }
     const agent = parseAgent(optionText(ctx, "agent"));
     if (agent !== undefined) request.agent = agent;
     const schedule = await createSchedule(client, request);
     if (ctx.json) emitJson(ctx, { schedule });
-    else ctx.out(`scheduled ${schedule.scheduleId} for ${schedule.runAt} (${schedule.state})`);
+    else {
+      ctx.out(`scheduled ${schedule.scheduleId} every ${schedule.intervalMs} ms`);
+      ctx.out(`next run: ${schedule.nextRunAt ?? "paused"}`);
+    }
     return EXIT.OK;
   }
 
   const scheduleId = ctx.args[1];
   if (!scheduleId) usage(`schedules ${action} requires a schedule id`);
 
-  if (action === "get") {
-    assertFeature(registry, "scheduling", ["getSchedule"]);
-    const schedule = await getSchedule(client, scheduleId);
-    if (ctx.json) emitJson(ctx, { schedule });
-    else {
-      ctx.out(`schedule: ${schedule.scheduleId}`);
-      ctx.out(`state:    ${schedule.state}`);
-      ctx.out(`run at:   ${schedule.runAt}`);
-      ctx.out(`repeat:   ${schedule.intervalMs ? `${schedule.intervalMs} ms` : "once"}`);
-      ctx.out(`objective:${schedule.objective ? ` ${singleLine(schedule.objective, 200)}` : ""}`);
-    }
+  if (action === "delete") {
+    assertFeature(registry, "schedules", ["deleteSchedule"]);
+    const result = await deleteSchedule(client, scheduleId);
+    if (ctx.json) emitJson(ctx, { result });
+    else ctx.out(`schedule ${result.scheduleId}: ${result.outcome}`);
     return EXIT.OK;
   }
 
-  assertFeature(registry, "scheduling", ["cancelSchedule"]);
-  const result = await cancelSchedule(client, scheduleId);
+  assertFeature(registry, "schedules", ["controlSchedule"]);
+  const result = await controlSchedule(client, scheduleId, action);
   if (ctx.json) emitJson(ctx, { result });
-  else ctx.out(`schedule ${result.scheduleId}: ${result.state}`);
+  else {
+    ctx.out(
+      `schedule ${result.scheduleId}: ${result.enabled ? "enabled" : "paused"} (${result.outcome})`,
+    );
+  }
   return EXIT.OK;
 }
 
@@ -808,10 +849,14 @@ export async function permissions(ctx) {
   const { registry } = await registryFor(client);
 
   if (action === "list") {
-    assertFeature(registry, "permissions", ["listPendingPermissions"]);
-    const list = await listPendingPermissions(client);
+    assertFeature(registry, "permissions", ["listPermissions"]);
+    const taskId = optionText(ctx, "task") || ctx.args[1] || "";
+    if (taskId === "") {
+      usage("permissions list requires --task <taskId>: contract 1.1.0 addresses permissions by task");
+    }
+    const list = await listPermissions(client, taskId);
     if (ctx.json) {
-      emitJson(ctx, list);
+      emitJson(ctx, { taskId, ...list });
       return EXIT.OK;
     }
     const pending = list.requests.filter((request) => request.decision === "pending");

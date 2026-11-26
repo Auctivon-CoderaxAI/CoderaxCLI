@@ -28,17 +28,22 @@ test("capabilities resolves every family from the authoritative handshake", asyn
   assert.equal(document.contract.contractVersion, "1.1.0");
   assert.equal(document.contract.compatible, true);
   assert.equal(document.contract.engineName, "coderax-workflow-engine");
-  assert.ok(document.operations.length >= 19);
+  assert.equal(document.contract.chatStreamVersion, 1);
+  assert.equal(document.operations.length, 30);
+  assert.deepEqual(document.coverageGaps, []);
 
   assert.equal(family(document, "create-document").status, "available");
   assert.equal(family(document, "create-presentation").status, "available");
-  assert.equal(family(document, "orchestrate").status, "available");
-  assert.equal(family(document, "analyze-document").status, "blocked");
+  // Contract 1.1.0 publishes no multimodal or multi-agent capability flag, so
+  // the deployment makes no claim the CLI may upgrade.
+  assert.equal(family(document, "analyze-document").status, "unverified");
   assert.equal(family(document, "analyze-document").blockedBy, "multimodal");
+  assert.equal(family(document, "orchestrate").status, "unverified");
+  assert.equal(family(document, "orchestrate").blockedBy, "multiAgent");
   assert.equal(family(document, "create-game").status, "not_implemented");
 });
 
-test("a blocked family is never executed and exits 6", async (t) => {
+test("an unverified family is never executed and exits 6", async (t) => {
   const server = await harness(t);
   const cwd = await cliWorkspace();
   await writeFile(join(cwd, "report.pdf"), PDF);
@@ -47,11 +52,11 @@ test("a blocked family is never executed and exits 6", async (t) => {
   assert.equal(result.code, 6);
   assert.match(result.stderr, /CAPABILITY_NOT_AVAILABLE/);
   assert.match(result.stderr, /multimodal/);
-  assert.equal(workSubmissions(server).length, 0, "no task may be submitted for a blocked capability");
+  assert.equal(workSubmissions(server).length, 0, "no task may be submitted for an unverified capability");
 });
 
 test("unsupported artifact storage blocks creation", async (t) => {
-  const server = await harness(t, { capabilities: { artifacts: "unsupported" } });
+  const server = await harness(t, { capabilities: { artifacts: false } });
   const cwd = await cliWorkspace();
 
   const listed = await runCapabilityCli(["capabilities", "--json"], { harness: server, cwd });
@@ -64,11 +69,11 @@ test("unsupported artifact storage blocks creation", async (t) => {
   assert.equal(workSubmissions(server).length, 0);
 });
 
-test("an unconfigured capability is reported, not executed", async (t) => {
-  const server = await harness(t, { capabilities: { work: "unconfigured" } });
+test("a disabled capability is reported as unavailable, not executed", async (t) => {
+  const server = await harness(t, { capabilities: { work: false } });
   const cwd = await cliWorkspace();
   const listed = await runCapabilityCli(["capabilities", "--json"], { harness: server, cwd });
-  assert.equal(family(json(listed.stdout), "create-document").status, "unconfigured");
+  assert.equal(family(json(listed.stdout), "create-document").status, "unavailable");
 
   const result = await runCapabilityCli(["create-document", "a short note"], { harness: server, cwd });
   assert.equal(result.code, 6);
@@ -85,7 +90,7 @@ test("a missing required operation is unverified", async (t) => {
 });
 
 test("an incompatible contract is refused before any request", async (t) => {
-  const server = await harness(t, { contractVersion: "1.0.0" });
+  const server = await harness(t, { incompatible: true });
   const cwd = await cliWorkspace();
   const result = await runCapabilityCli(["create-document", "a short note"], { harness: server, cwd });
   assert.equal(result.code, 7);
@@ -102,15 +107,17 @@ test("game families are not_implemented until the engine publishes the operation
   assert.match(entry.detail, /\/v1\/games/);
 });
 
-test("game families become available when the engine publishes the operations", async (t) => {
+test("a published game operation the SDK cannot call is unverified", async (t) => {
   const server = await harness(t, { games: true });
   const cwd = await cliWorkspace();
   const listed = await runCapabilityCli(["capabilities", "--json"], { harness: server, cwd });
-  assert.equal(family(json(listed.stdout), "create-game").status, "available");
+  const entry = family(json(listed.stdout), "create-game");
+  assert.equal(entry.status, "unverified");
+  assert.match(entry.detail, /no method/);
 
   const result = await runCapabilityCli(["create-game", "a small puzzle game", "--json"], { harness: server, cwd });
-  assert.equal(result.code, 0, result.stderr);
-  assert.equal(json(result.stdout).capability.status, "available");
+  assert.equal(result.code, 6);
+  assert.equal(workSubmissions(server).length, 0);
 });
 
 test("unknown options and a bare --force are usage errors", async (t) => {
@@ -149,18 +156,15 @@ test("create-document runs one Work task and downloads a verified artifact", asy
 });
 
 test("a file-bearing request uploads to the accepted task and verifies the digest", async (t) => {
-  const server = await harness(t, {
-    capabilities: { multimodal: "available" },
-    beginDelayMs: 150,
-  });
+  const server = await harness(t, { beginDelayMs: 150 });
   const cwd = await cliWorkspace();
   const file = join(cwd, "report.pdf");
   await writeFile(file, PDF);
 
-  const result = await runCapabilityCli(["analyze-pdf", "report.pdf", "--question", "what is it?", "--json"], {
-    harness: server,
-    cwd,
-  });
+  const result = await runCapabilityCli(
+    ["create-presentation", "a deck about the report", "--file", "report.pdf", "--json"],
+    { harness: server, cwd },
+  );
   assert.equal(result.code, 0, result.stderr);
   const document = json(result.stdout);
   assert.equal(document.attachment.path, "report.pdf");
@@ -176,19 +180,18 @@ test("a file-bearing request uploads to the accepted task and verifies the diges
 });
 
 test("a tampered upload cancels the task instead of leaving it running", async (t) => {
-  const server = await harness(t, {
-    capabilities: { multimodal: "available" },
-    beginDelayMs: 300,
-    tamperUpload: true,
-  });
+  const server = await harness(t, { beginDelayMs: 300, tamperUpload: true });
   const cwd = await cliWorkspace();
   await writeFile(join(cwd, "report.pdf"), PDF);
 
-  const result = await runCapabilityCli(["analyze-pdf", "report.pdf"], { harness: server, cwd });
+  const result = await runCapabilityCli(
+    ["create-presentation", "a deck", "--file", "report.pdf"],
+    { harness: server, cwd },
+  );
   assert.equal(result.code, 1);
   assert.match(result.stderr, /cancelled/);
   const task = [...server.state.tasks.values()][0];
-  assert.equal(task.state, "cancelled");
+  assert.equal(task.status.state, "cancelled");
 });
 
 test("--no-wait returns the accepted task", async (t) => {
@@ -202,7 +205,7 @@ test("--no-wait returns the accepted task", async (t) => {
   const document = json(result.stdout);
   assert.equal(document.waited, false);
   assert.match(document.accepted.taskId, /^task-/);
-  assert.notEqual(server.state.tasks.get(document.accepted.taskId)?.state, "completed");
+  assert.notEqual(server.state.tasks.get(document.accepted.taskId)?.status.state, "completed");
 });
 
 test("a failed task exits 1 with the engine failure", async (t) => {
@@ -225,8 +228,8 @@ test("the local wait deadline is reported as a timeout, not a cancellation", asy
   assert.equal(result.code, 4);
   const document = json(result.stdout);
   assert.equal(document.timeout, true);
-  assert.equal([...server.state.tasks.values()][0].state, "running");
-  assert.equal([...server.state.tasks.values()][0].cancelRequested, false);
+  assert.equal([...server.state.tasks.values()][0].status.state, "running");
+  assert.equal([...server.state.tasks.values()][0].status.cancelRequested, false);
 });
 
 test("an unauthorized token is refused by the engine", async (t) => {

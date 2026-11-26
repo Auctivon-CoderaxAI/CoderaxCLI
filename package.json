@@ -17,7 +17,6 @@
     "verify:vendor": "node scripts/verify-vendor.mjs"
   },
   "dependencies": {
-    "@coderax/contracts": "file:vendor/coderax-contracts-1.1.0.tgz",
     "@coderax/sdk": "file:vendor/coderax-sdk-1.1.0.tgz",
     "zod": "^3.25.67"
   }

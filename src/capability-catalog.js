@@ -34,8 +34,15 @@ export const STATE_LABELS = Object.freeze({
 /** Only a family the engine currently reports as available may execute. */
 export const EXECUTABLE_STATE = CAPABILITY_STATES.available;
 
-/** The engine caps an artifact at 12M base64 characters; stay under the decode bound. */
-export const MAX_ARTIFACT_BYTES = 8 * 1024 * 1024;
+/**
+ * Contract 1.1.0 caps one artifact request at 700,000 base64 characters and the
+ * HTTP body at 1 MiB. 512 KiB of file encodes to 699,052 characters, so it fits
+ * both bounds with the JSON envelope left over.
+ */
+export const MAX_ARTIFACT_BYTES = 512 * 1024;
+
+/** A stored artifact may be read back up to the engine's 1 MiB artifact limit. */
+export const MAX_ARTIFACT_DOWNLOAD_BYTES = 1024 * 1024;
 
 /** Contract 1.1.0 `ArtifactPath`: relative, no traversal, no drive letter. */
 export const MAX_ARTIFACT_PATH = 1024;
@@ -114,8 +121,8 @@ export const CAPABILITY_FAMILIES = Object.freeze([
     "Store a validated file as an artifact on an existing owner task.",
     {
       mode: "upload",
-      requires: ["work", "artifacts"],
-      operations: ["uploadTaskArtifact"],
+      requires: ["artifacts"],
+      operations: ["createArtifact"],
       attachment: attachment(ANY_TRANSFER, { description: "Regular file to store on the task." }),
     },
   ),
@@ -402,7 +409,7 @@ export const CAPABILITY_COMMAND_SET = new Set(CAPABILITY_COMMANDS);
 export const ARTIFACT_ACTIONS = Object.freeze(["list", "inspect", "download"]);
 export const ARTIFACT_ACTION_SET = new Set(ARTIFACT_ACTIONS);
 
-export const SCHEDULE_ACTIONS = Object.freeze(["list", "create", "get", "cancel"]);
+export const SCHEDULE_ACTIONS = Object.freeze(["list", "create", "pause", "resume", "delete"]);
 export const SCHEDULE_ACTION_SET = new Set(SCHEDULE_ACTIONS);
 
 /**

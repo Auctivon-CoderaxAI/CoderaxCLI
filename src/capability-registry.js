@@ -1,4 +1,9 @@
-import { checkCompatibility, SDK_CONTRACT_VERSION, SDK_COVERAGE, SDK_VERSION } from "@coderax/sdk";
+import {
+  SDK_CONTRACT_VERSION,
+  SDK_OPERATION_COVERAGE,
+  SDK_VERSION,
+  checkCompatibility,
+} from "@coderax/sdk";
 import {
   CAPABILITY_FAMILIES,
   CAPABILITY_STATES,
@@ -10,32 +15,25 @@ import { CoderaxError } from "./client.js";
  * Resolve capability families against the authoritative engine handshake.
  *
  * There is no capability registry route and no client-side registry of backend
- * features: `/v1/handshake` publishes the contract version, the state of every
- * capability the engine knows about and the exact operations it implements. A
- * family is executable only when its own capability is available, every
- * prerequisite is available and every operation it needs is published.
+ * features: `/v1/handshake` publishes the contract version, the capability
+ * flags the engine derives from its own route table, and the exact operations
+ * it implements. A family is executable only when its own flag is true, every
+ * prerequisite flag is true and every operation it needs is both published and
+ * covered by a method on the canonical SDK.
  *
  * The mapping from a family to handshake keys is deliberate client metadata.
  * What the keys say is the engine's claim, and it is never upgraded here: an
- * `unsupported` capability is never presented as available because the client
+ * unsupported capability is never presented as available because the client
  * has a command for it.
  */
 
 export const EXPECTED_CONTRACT_VERSION = SDK_CONTRACT_VERSION;
 export const CLIENT_SDK_VERSION = SDK_VERSION;
 
-function states(handshake) {
-  const map = new Map();
-  const capabilities = handshake?.capabilities;
-  if (capabilities === null || typeof capabilities !== "object") return map;
-  for (const [key, value] of Object.entries(capabilities)) {
-    if (value === null || typeof value !== "object") continue;
-    map.set(key, {
-      state: typeof value.state === "string" ? value.state : "unverified",
-      detail: typeof value.detail === "string" ? value.detail : "",
-    });
-  }
-  return map;
+function flags(handshake) {
+  const value = handshake?.capabilities;
+  if (value === null || typeof value !== "object") return new Map();
+  return new Map(Object.entries(value).filter(([, state]) => typeof state === "boolean"));
 }
 
 function operationIndex(handshake) {
@@ -67,13 +65,10 @@ function matchesDiscovery(discover, operations) {
   return null;
 }
 
-function capabilityOf(handshakeState, key) {
-  return handshakeState.get(key) ?? null;
-}
-
-function describeRequirement(key, status) {
-  const detail = status.detail.trim();
-  return detail === "" ? key : `${key}: ${detail}`;
+function describeFlag(key, value) {
+  return value
+    ? `${key}: available`
+    : `${key}: the engine reports this capability as disabled or unavailable`;
 }
 
 /**
@@ -81,15 +76,16 @@ function describeRequirement(key, status) {
  * can explain exactly why something cannot run:
  *   incompatible contract -> unverified
  *   no published operation for a dedicated backend -> not_implemented
+ *   published operation with no canonical SDK method -> unverified
  *   missing required operation -> unverified (the deployment drifted)
- *   own capability unsupported -> unavailable
- *   own capability unconfigured -> unconfigured
- *   prerequisite unsupported/unconfigured -> blocked (with the key named)
- *   anything not explicitly available -> unverified
+ *   own flag false -> unavailable
+ *   own flag absent -> unverified (the deployment makes no claim)
+ *   prerequisite flag false -> blocked (with the key named)
+ *   prerequisite flag absent -> unverified
  *   otherwise -> available
  */
 export function resolveFamily(entry, context) {
-  const { handshake, operations, compatible, problems } = context;
+  const { operations, compatible, problems } = context;
 
   if (!compatible) {
     return {
@@ -117,10 +113,21 @@ export function resolveFamily(entry, context) {
         published: [],
       };
     }
+    if (!Object.hasOwn(SDK_OPERATION_COVERAGE, found.operationId)) {
+      return {
+        ...entry,
+        status: CAPABILITY_STATES.unverified,
+        detail:
+          `the engine publishes ${found.operationId}, but SDK ${CLIENT_SDK_VERSION} ` +
+          "has no method for it; upgrade the vendored SDK before executing this capability",
+        blockedBy: found.operationId,
+        published: [found.operationId],
+      };
+    }
   }
 
   const missing = entry.operations.filter(
-    (id) => !operations.has(id) || !Object.hasOwn(SDK_COVERAGE, id),
+    (id) => !operations.has(id) || !Object.hasOwn(SDK_OPERATION_COVERAGE, id),
   );
   if (missing.length > 0) {
     return {
@@ -134,69 +141,42 @@ export function resolveFamily(entry, context) {
   }
 
   const own = entry.requires[0];
-  const ownStatus = capabilityOf(context.capabilities, own);
-  if (ownStatus === null) {
+  const ownValue = context.capabilities.get(own);
+  if (ownValue === undefined) {
     return {
       ...entry,
       status: CAPABILITY_STATES.unverified,
-      detail: `the handshake does not report the ${own} capability`,
+      detail: `the handshake does not report the ${own} capability; the deployment makes no claim about it`,
       blockedBy: own,
       published: [],
     };
   }
-  if (ownStatus.state === "unsupported") {
+  if (ownValue !== true) {
     return {
       ...entry,
       status: CAPABILITY_STATES.unavailable,
-      detail: describeRequirement(own, ownStatus),
-      blockedBy: own,
-      published: [],
-    };
-  }
-  if (ownStatus.state === "unconfigured") {
-    return {
-      ...entry,
-      status: CAPABILITY_STATES.unconfigured,
-      detail: describeRequirement(own, ownStatus),
-      blockedBy: own,
-      published: [],
-    };
-  }
-  if (ownStatus.state !== "available") {
-    return {
-      ...entry,
-      status: CAPABILITY_STATES.unverified,
-      detail: `the engine reports ${own} as ${ownStatus.state}`,
+      detail: describeFlag(own, ownValue),
       blockedBy: own,
       published: [],
     };
   }
 
   for (const key of entry.requires.slice(1)) {
-    const status = capabilityOf(context.capabilities, key);
-    if (status === null) {
+    const value = context.capabilities.get(key);
+    if (value === undefined) {
       return {
         ...entry,
         status: CAPABILITY_STATES.unverified,
-        detail: `the handshake does not report the required ${key} capability`,
+        detail: `the handshake does not report the required ${key} capability; the deployment makes no claim about it`,
         blockedBy: key,
         published: [],
       };
     }
-    if (status.state === "unsupported" || status.state === "unconfigured") {
+    if (value !== true) {
       return {
         ...entry,
         status: CAPABILITY_STATES.blocked,
-        detail: `requires ${describeRequirement(key, status)}`,
-        blockedBy: key,
-        published: [],
-      };
-    }
-    if (status.state !== "available") {
-      return {
-        ...entry,
-        status: CAPABILITY_STATES.unverified,
-        detail: `the engine reports ${key} as ${status.state}`,
+        detail: `requires ${describeFlag(key, value)}`,
         blockedBy: key,
         published: [],
       };
@@ -217,14 +197,14 @@ export function resolveFamily(entry, context) {
 
 /**
  * Build the resolved registry once per invocation. Agents are optional: a
- * deployment may report `agents` unconfigured, which is not a failure.
+ * deployment may report them unconfigured, which is not a failure.
  */
 export function resolveRegistry(handshake, { agents = null } = {}) {
-  const report = checkCompatibility(handshake);
+  const report = checkCompatibility({ handshake });
   const context = {
     handshake,
     operations: operationIndex(handshake),
-    capabilities: states(handshake),
+    capabilities: flags(handshake),
     compatible: report.compatible,
     problems: report.problems,
     agents,
@@ -238,15 +218,18 @@ export function resolveRegistry(handshake, { agents = null } = {}) {
   );
   return {
     contract: {
-      engineName: handshake.engineName,
-      engineVersion: handshake.engineVersion,
+      engineName: handshake.server?.name ?? "Coderax WorkflowEngine",
+      engineVersion: handshake.server?.version ?? "unknown",
       contractVersion: handshake.contractVersion,
       eventSchemaVersion: handshake.eventSchemaVersion,
-      minSdkVersion: handshake.minSdkVersion,
-      sdkVersion: handshake.sdkVersion,
+      chatStreamVersion: handshake.chatStreamVersion,
       apiPrefix: handshake.apiPrefix,
+      supportedContractVersions: handshake.supportedContractVersions,
+      negotiatedContractVersion: handshake.negotiatedContractVersion,
+      negotiation: handshake.negotiation,
       compatible: report.compatible,
       problems: report.problems,
+      missingOperations: report.missingOperations,
       expectedContract: EXPECTED_CONTRACT_VERSION,
       clientSdk: CLIENT_SDK_VERSION,
     },

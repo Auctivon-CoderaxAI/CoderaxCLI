@@ -30,10 +30,10 @@ test("artifacts list and inspect read the authoritative task-scoped records", as
   assert.equal(list.code, 0, list.stderr);
   assert.equal(json(list.stdout).artifacts.length, 1);
 
-  const inspect = await runCapabilityCli(["artifacts", "inspect", artifact.artifactId, "--json"], {
-    harness: server,
-    cwd,
-  });
+  const inspect = await runCapabilityCli(
+    ["artifacts", "inspect", artifact.artifactId, "--task", taskId, "--json"],
+    { harness: server, cwd },
+  );
   assert.equal(inspect.code, 0, inspect.stderr);
   const record = json(inspect.stdout).artifact;
   assert.equal(record.artifactId, artifact.artifactId);
@@ -48,8 +48,9 @@ test("artifacts download verifies the published digest", async (t) => {
   const artifact = await createsArtifact(server, cwd);
   const out = join(cwd, "downloaded.md");
 
+  const taskId = [...server.state.tasks.keys()][0];
   const result = await runCapabilityCli(
-    ["artifacts", "download", artifact.artifactId, "--out", out, "--json"],
+    ["artifacts", "download", artifact.artifactId, "--task", taskId, "--out", out, "--json"],
     { harness: server, cwd },
   );
   assert.equal(result.code, 0, result.stderr);
@@ -64,10 +65,11 @@ test("a tampered content digest is refused and no file is written", async (t) =>
   const artifact = await createsArtifact(server, cwd);
   const out = join(cwd, "tampered.md");
 
-  const result = await runCapabilityCli(["artifacts", "download", artifact.artifactId, "--out", out], {
-    harness: server,
-    cwd,
-  });
+  const taskId = [...server.state.tasks.keys()][0];
+  const result = await runCapabilityCli(
+    ["artifacts", "download", artifact.artifactId, "--task", taskId, "--out", out],
+    { harness: server, cwd },
+  );
   assert.equal(result.code, 1);
   assert.match(result.stderr, /ARTIFACT_INTEGRITY_FAILED/);
   await assert.rejects(() => access(out));
@@ -80,16 +82,17 @@ test("an existing destination is not replaced without --force", async (t) => {
   const out = join(cwd, "existing.md");
   await writeFile(out, "do not lose this\n");
 
-  const refused = await runCapabilityCli(["artifacts", "download", artifact.artifactId, "--out", out], {
-    harness: server,
-    cwd,
-  });
+  const taskId = [...server.state.tasks.keys()][0];
+  const refused = await runCapabilityCli(
+    ["artifacts", "download", artifact.artifactId, "--task", taskId, "--out", out],
+    { harness: server, cwd },
+  );
   assert.equal(refused.code, 2);
   assert.match(refused.stderr, /ARTIFACT_DESTINATION_EXISTS/);
   assert.equal(await readFile(out, "utf8"), "do not lose this\n");
 
   const replaced = await runCapabilityCli(
-    ["artifacts", "download", artifact.artifactId, "--out", out, "--force"],
+    ["artifacts", "download", artifact.artifactId, "--task", taskId, "--out", out, "--force"],
     { harness: server, cwd },
   );
   assert.equal(replaced.code, 0, replaced.stderr);
@@ -99,10 +102,12 @@ test("an existing destination is not replaced without --force", async (t) => {
 test("an unknown artifact is a not-found failure", async (t) => {
   const server = await harness(t);
   const cwd = await cliWorkspace();
-  const result = await runCapabilityCli(["artifacts", "inspect", "artifact-does-not-exist"], {
-    harness: server,
-    cwd,
-  });
+  await createsArtifact(server, cwd);
+  const taskId = [...server.state.tasks.keys()][0];
+  const result = await runCapabilityCli(
+    ["artifacts", "inspect", "artifact-does-not-exist", "--task", taskId],
+    { harness: server, cwd },
+  );
   assert.equal(result.code, 5);
   assert.match(result.stderr, /NOT_FOUND/);
 });
@@ -112,8 +117,9 @@ test("an artifact name cannot choose a directory outside the destination", async
   const cwd = await cliWorkspace();
   const artifact = await createsArtifact(server, cwd);
 
+  const taskId = [...server.state.tasks.keys()][0];
   const result = await runCapabilityCli(
-    ["artifacts", "download", artifact.artifactId, "--json"],
+    ["artifacts", "download", artifact.artifactId, "--task", taskId, "--json"],
     { harness: server, cwd },
   );
   assert.equal(result.code, 0, result.stderr);

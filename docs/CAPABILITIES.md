@@ -7,15 +7,19 @@ a capability the engine is not currently serving.
 
 ## Where availability comes from
 
-`GET /v1/handshake` publishes, for each capability the engine knows:
+`GET /v1/handshake` publishes the contract version, the operations the engine
+actually registered, and a flat set of capability booleans derived from those
+operations:
 
 ```json
 {
+  "contractVersion": "1.1.0",
   "capabilities": {
-    "work":        { "state": "available",     "detail": "durable Work tasks" },
-    "artifacts":   { "state": "available",     "detail": "task-scoped artifact storage" },
-    "multimodal":  { "state": "unsupported",   "detail": "contract 1.1.0 publishes no media operation" },
-    "scheduling":  { "state": "available",     "detail": "durable schedules" }
+    "work": true,
+    "artifacts": true,
+    "schedules": true,
+    "memory": true,
+    "permissions": true
   },
   "operations": [
     { "operationId": "submitWork", "method": "POST", "path": "/v1/work", "tags": ["work"], "auth": "owner", "stream": false }
@@ -23,25 +27,29 @@ a capability the engine is not currently serving.
 }
 ```
 
+There is no field that claims multimodal, creative or game execution exists. A
+deployment that does not publish those operations cannot be talked into them.
+
 Every family in [`src/capability-catalog.js`](../src/capability-catalog.js)
-declares the capability keys and operations it needs. The resolver applies a
-fixed precedence:
+declares the flags and operations it needs. The resolver applies a fixed
+precedence:
 
 1. an incompatible contract → `unverified`;
 2. no published operation for a dedicated backend → `not_implemented`;
-3. a required operation missing from the handshake or unknown to the SDK →
+3. a published operation unknown to the vendored SDK → `unverified`;
+4. a required operation missing from the handshake or unknown to the SDK →
    `unverified`;
-4. the family's own capability `unsupported` → `unavailable`;
-5. the family's own capability `unconfigured` → `unconfigured`;
-6. a prerequisite `unsupported` or `unconfigured` → `blocked`, naming the key;
-7. any other non-`available` state → `unverified`;
-8. otherwise → `available`.
+5. the family's own flag `false` → `unavailable`;
+6. the family's own flag absent → `unverified` (the deployment makes no claim);
+7. a prerequisite flag `false` → `blocked`, naming the key;
+8. a prerequisite flag absent → `unverified`;
+9. otherwise → `available`.
 
 Only `available` executes. The refusal is `CAPABILITY_NOT_AVAILABLE` (exit `6`)
 and includes the exact prerequisite, for example:
 
 ```
-create-document is blocked: requires multimodal: contract 1.1.0 publishes no media operation.
+analyze-document is unverified: the handshake does not report the required multimodal capability; the deployment makes no claim about it.
 The CLI does not fall back to local execution or simulate the result.
 ```
 
@@ -52,7 +60,7 @@ engine operations discovered from the handshake.
 
 | Command | Kind | Requires | Notes |
 | --- | --- | --- | --- |
-| `upload <file> --task <id>` | artifact | work, artifacts | stores bytes on an existing owner task |
+| `upload <file> --task <id>` | artifact | artifacts | stores bytes on an existing owner task |
 | `create-document <prompt>` | W | work, artifacts | `--format md\|txt\|docx\|pdf`, `--name` |
 | `analyze-document <file>` | W + attachment | work, artifacts, multimodal | `--question` |
 | `create-pdf <prompt>` | W | work, artifacts | `--name` |
@@ -92,7 +100,8 @@ authorizing to replace.
 Before a byte leaves the machine:
 
 - the path must be a regular file, not a symlink or directory;
-- it must be non-empty and within the family's limit (8 MiB hard bound);
+- it must be non-empty and within the family's limit (512 KiB hard bound,
+  imposed by contract 1.1.0's 700,000-character base64 `content` field);
 - the contents must be a supported type identified from magic bytes;
 - the extension and the magic bytes must agree;
 - the MIME type must be in the family's accepted set;

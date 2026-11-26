@@ -45,8 +45,9 @@ owner task. The CLI's rules are:
 - Uploads are limited to regular files, are non-empty, and are checked against
   both the extension and the file's magic bytes before any byte leaves the
   machine. Symbolic links and directories are refused. Accepted MIME types and
-  per-family limits come from the capability catalogue; the hard bound is 8 MiB,
-  below the contract's 12M-character base64 limit.
+  per-family limits come from the capability catalogue; the hard bound is
+  512 KiB, which encodes to 699,052 base64 characters and stays below the
+  contract's 700,000-character `content` field and 1 MiB request body.
 - The exact bytes are hashed with SHA-256 locally. The engine returns
   `sha256:<64 hex>` and a byte count for the stored artifact; both must equal the
   local values. Otherwise the task is cancelled and the command fails with

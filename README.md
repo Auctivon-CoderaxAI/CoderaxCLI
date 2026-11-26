@@ -14,7 +14,7 @@ inference, generate artifacts or execute development work on your computer.
 - Runtime: Node.js 24
 - Canonical SDK: `@coderax/sdk` `1.1.0`, published by
   [`Coderax-WorkflowEngine`](https://github.com/Auctivon-CoderaxAI/Coderax-WorkflowEngine)
-  on `contract/authoritative-v1.1` and vendored with its SHA-256 in
+  at pull request #7 (`9b4cb5c`) and vendored with its published SHA-256 in
   [`vendor/`](vendor/PROVENANCE.md)
 - Companion: [`Coderax`](https://github.com/Auctivon-CoderaxAI/Coderax) (deployment)
 
@@ -25,8 +25,8 @@ Transport, response parsing and event framing come from the canonical
 
 | Concern | Owner |
 | --- | --- |
-| HTTP transport, schema validation, SSE framing | `@coderax/sdk` 1.1.0 + `@coderax/contracts` 1.1.0 |
-| Contract/event/SDK negotiation | `CoderaxClient.negotiate()` and `checkCompatibility()` |
+| HTTP transport, schema validation, SSE framing | `@coderax/sdk` 1.1.0 (contracts bundled) |
+| Contract/event/chat negotiation | `CoderaxClient.handshake({ contract })` and `checkCompatibility()` |
 | Client policy (deadline, upload ordering, retry of reads) | `src/engine.js` |
 | Capability families and objective templates (UX only) | `src/capability-catalog.js` |
 | Handshake-derived status | `src/capability-registry.js` |
@@ -131,13 +131,14 @@ cancelled or interrupted task exits `1`.
 
 ## Artifacts and cross-client continuity
 
-Artifacts are records of the engine's durable artifact service, scoped to the
-owner and to the task that produced or received them. The CLI reads and writes
-that same store, so an artifact created through CoderaxCLI is visible to Coderax
-Web under the same owner, and the reverse. The CLI keeps no local artifact
-catalog.
+Artifacts are records of the engine's task-scoped artifact service, owned by the
+owner and addressed by the task that produced or received them. The CLI reads
+and writes that same store, so an artifact created through CoderaxCLI is visible
+to Coderax Web under the same owner when both clients use the same task, and the
+reverse. The CLI keeps no local artifact catalog. PR #7 keeps these records in
+process memory; durable storage is a separate engine branch awaiting merge.
 
-- Uploads are base64 inside the published `ArtifactUploadRequest`; paths are
+- Uploads are base64 inside the published `ArtifactCreateRequest`; paths are
   relative, traversal-free and drive-letter-free.
 - Downloads require a published digest. A mismatch is an integrity failure
   (`ARTIFACT_INTEGRITY_FAILED`) and no file is written.
@@ -146,12 +147,16 @@ catalog.
 
 ## Engine baseline
 
-The CLI targets contract **1.1.0** and negotiates at runtime. At the time of
-writing, `Coderax-WorkflowEngine` `main` (`808dfd3`) still publishes contract
-`1.0.0` with no capability, media or artifact operations; the authoritative
-`1.1.0` surface is on `contract/authoritative-v1.1` (PR #7). Against `main` the
-CLI correctly reports the families as `unavailable` / `unverified` and exits `6`.
-Nothing is simulated, and no local fallback exists.
+The CLI targets contract **1.1.0** and negotiates at runtime. `Coderax-WorkflowEngine`
+`main` still publishes contract `1.0.0`; the designated 1.1.0 consolidation
+target is pull request #7 (`9b4cb5c`), which serves 30 operations and passed its
+hosted `verify` job at that commit. Against `main` the CLI reports an
+incompatible contract; against PR #7 it discovers the families the engine
+actually publishes. Nothing is simulated, and no local fallback exists.
+
+`contract/authoritative-v1.1` publishes a **different** 1.1.0 SDK and artifact
+surface. It is a competing implementation awaiting owner reconciliation; this
+CLI does not merge the two or claim they are interchangeable.
 
 ## Status
 
@@ -164,9 +169,9 @@ Nothing is simulated, and no local fallback exists.
 | `products`, `cloud`, `projects`, `doctor`, `health`, `openapi`, `call` | ✅ implemented, tested |
 | Canonical `@coderax/sdk` 1.1.0 integration with provenance | ✅ vendored, pinned by SHA-256 |
 | Handshake-driven capability resolution and fail-closed execution | ✅ implemented, tested over real HTTP |
-| Task-scoped uploads with digest echo and cancel-on-failure | ✅ implemented, tested |
+| Task-scoped uploads with digest echo and cancel-on-failure | ✅ implemented, tested over real HTTP and a real PR #7 engine |
 | Digest-verified downloads and overwrite protection | ✅ implemented, tested |
-| Durable schedules and permission decisions | ✅ implemented, tested |
+| Durable schedules (create/list/pause/resume/delete) and task-scoped permissions | ✅ implemented, tested over real HTTP and a real PR #7 engine |
 | Shell completion generated from the dispatch set | ✅ implemented, tested |
 | Local document, inference, generation or execution work | ⛔ never — the CLI is a cloud client |
 | Direct pushes, force pushes, production changes | ⛔ not performed |

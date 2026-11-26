@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { lstat, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, isAbsolute, resolve, sep } from "node:path";
 import { CoderaxError } from "./client.js";
-import { MAX_ARTIFACT_BYTES } from "./capability-catalog.js";
+import { MAX_ARTIFACT_BYTES, MAX_ARTIFACT_DOWNLOAD_BYTES } from "./capability-catalog.js";
 
 /**
  * Local file validation and transfer primitives for the authoritative artifact
@@ -16,7 +16,7 @@ import { MAX_ARTIFACT_BYTES } from "./capability-catalog.js";
  * document, inference or artifact work happens here.
  */
 
-export const MAX_DOWNLOAD_BYTES = MAX_ARTIFACT_BYTES;
+export const MAX_DOWNLOAD_BYTES = MAX_ARTIFACT_DOWNLOAD_BYTES;
 
 const MIME_BY_EXTENSION = Object.freeze({
   ".pdf": "application/pdf",
@@ -356,6 +356,18 @@ export function encodeBase64(buffer) {
   return Buffer.from(buffer).toString("base64");
 }
 
+/** Encode UTF-8 artifact content and enforce the same byte bound. */
+export function decodeUtf8(text, { maxBytes = MAX_DOWNLOAD_BYTES } = {}) {
+  if (typeof text !== "string" || text.length === 0) {
+    throw new CoderaxError("ARTIFACT_CONTENT_INVALID", "the engine returned no artifact content");
+  }
+  const buffer = Buffer.from(text, "utf8");
+  if (buffer.length > maxBytes) {
+    throw new CoderaxError("ARTIFACT_TOO_LARGE", `the artifact is ${buffer.length} bytes; the limit is ${maxBytes}`);
+  }
+  return buffer;
+}
+
 /** Decode a published base64 body under an explicit byte bound. */
 export function decodeBase64(text, { maxBytes = MAX_DOWNLOAD_BYTES } = {}) {
   if (typeof text !== "string" || text.length === 0) {
@@ -376,15 +388,17 @@ export function decodeBase64(text, { maxBytes = MAX_DOWNLOAD_BYTES } = {}) {
 
 /**
  * Write published artifact bytes after proving the digest and byte count the
- * engine reported. A mismatch is never written: the temporary file is removed
- * and the destination is left untouched.
+ * engine reported. Contract 1.1.0 says whether the content is `utf8` or
+ * `base64`; both are validated before anything is written. A mismatch is never
+ * written: the temporary file is removed and the destination is left untouched.
  */
 export async function writeArtifactBytes({
   destination,
   force = false,
   expectedSha256,
   expectedBytes,
-  contentBase64,
+  content,
+  encoding = "base64",
   maxBytes = MAX_DOWNLOAD_BYTES,
 }) {
   const expected = normalizeDigest(expectedSha256);
@@ -394,7 +408,10 @@ export async function writeArtifactBytes({
       "the artifact metadata does not carry a published sha256 digest",
     );
   }
-  const buffer = decodeBase64(contentBase64, { maxBytes });
+  if (encoding !== "base64" && encoding !== "utf8") {
+    throw new CoderaxError("ARTIFACT_CONTENT_INVALID", `unsupported artifact encoding: ${encoding}`);
+  }
+  const buffer = encoding === "base64" ? decodeBase64(content, { maxBytes }) : decodeUtf8(content, { maxBytes });
   const actual = sha256Hex(buffer);
   if (actual !== expected) {
     throw new CoderaxError(
