@@ -4,8 +4,33 @@ import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runCli } from "../src/cli.js";
+import { startWorkflowHarness } from "./support/workflow-harness.js";
 
 const TOKEN = "secret-token-value-1234";
+
+/** An in-memory stand-in for the OS credential store; no plaintext fallback. */
+function memoryStore() {
+  const items = new Map();
+  return {
+    name: "memory",
+    available: true,
+    secure: true,
+    detail: "in-memory test store",
+    async get(key) {
+      return items.has(key) ? items.get(key) : null;
+    },
+    async set(key, value) {
+      items.set(key, value);
+    },
+    async delete(key) {
+      return items.delete(key);
+    },
+    async describe() {
+      return { name: "memory", available: true, secure: true, detail: "in-memory test store" };
+    },
+    entries: () => [...items.entries()],
+  };
+}
 
 async function tempConfig() {
   const directory = await mkdtemp(join(tmpdir(), "coderax-product-"));
@@ -52,45 +77,61 @@ test("products exposes the five-product registry", async () => {
   );
 });
 
-test("login verifies and stores a token, then status masks it and logout removes it", async () => {
+test("login verifies the owner and stores the credential outside the config file", async (t) => {
+  const server = await startWorkflowHarness();
+  t.after(() => server.close());
   const file = await tempConfig();
   const env = { CODERAX_CONFIG: file };
-  const fetchImpl = async (url) => {
-    assert.match(String(url), /\/api\/user$/);
-    return new Response(JSON.stringify({ email: "dev@coderax.test" }), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    });
-  };
+  const store = memoryStore();
 
   const loginIo = capture();
   const loginCode = await runCli(
-    ["login", "--base-url", "https://coderax.test", "--token", TOKEN, "--json"],
-    { env, fetchImpl, stdout: loginIo.stdout, stderr: loginIo.stderr, stdinIsTTY: true },
+    ["login", "--base-url", server.url, "--token", server.token, "--json"],
+    {
+      env,
+      credentialStore: store,
+      stdout: loginIo.stdout,
+      stderr: loginIo.stderr,
+      stdinIsTTY: true,
+    },
   );
-  assert.equal(loginCode, 0);
-  assert.equal(loginIo.out().includes(TOKEN), false);
-  assert.equal(JSON.parse(loginIo.out()).account, "dev@coderax.test");
+  assert.equal(loginCode, 0, loginIo.err());
+  assert.equal(loginIo.out().includes(server.token), false);
+  assert.equal(JSON.parse(loginIo.out()).store, "memory");
 
   const stored = JSON.parse(await readFile(file, "utf8"));
-  assert.equal(stored.token, TOKEN);
-  assert.equal(stored.baseUrl, "https://coderax.test");
+  assert.equal(stored.token, null);
+  assert.equal(stored.baseUrl, server.url);
+  assert.equal(store.entries().length, 1);
+  assert.equal(store.entries()[0][1].includes(server.token), true);
 
   const statusIo = capture();
   assert.equal(
-    await runCli(["status", "--json"], { env, stdout: statusIo.stdout, stderr: statusIo.stderr }),
+    await runCli(["status", "--json"], {
+      env,
+      credentialStore: store,
+      stdout: statusIo.stdout,
+      stderr: statusIo.stderr,
+    }),
     0,
   );
   const status = JSON.parse(statusIo.out());
   assert.equal(status.authenticated, true);
-  assert.equal(status.token.includes(TOKEN), false);
+  assert.equal(status.tokenSource, "credential store");
+  assert.equal(status.token.includes(server.token), false);
 
   const logoutIo = capture();
   assert.equal(
-    await runCli(["logout", "--json"], { env, stdout: logoutIo.stdout, stderr: logoutIo.stderr }),
+    await runCli(["logout", "--json"], {
+      env,
+      credentialStore: store,
+      stdout: logoutIo.stdout,
+      stderr: logoutIo.stderr,
+    }),
     0,
   );
   assert.equal(JSON.parse(logoutIo.out()).removed, true);
+  assert.equal(store.entries().length, 0);
   assert.equal(JSON.parse(await readFile(file, "utf8")).token, null);
 });
 

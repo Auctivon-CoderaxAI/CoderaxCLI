@@ -1,7 +1,8 @@
 import { PRODUCTS, STATUS_LABELS, getOrderedProducts } from "./product-registry.js";
 import { CoderaxError, request, streamRequest } from "./client.js";
 import { dirname } from "node:path";
-import { configDir, loadConfig, maskToken, saveConfig } from "./config.js";
+import { configDir, maskToken } from "./config.js";
+import { describeAuth, loginWithToken, logoutSession, readTokenFile } from "./auth.js";
 import { EXIT } from "./exit.js";
 import { table } from "./format.js";
 import { VERSION } from "./version.js";
@@ -100,17 +101,22 @@ export async function projects(ctx) {
 
 export async function status(ctx) {
   const settings = ctx.settings;
+  const auth = await describeAuth({
+    baseUrl: settings.baseUrl,
+    credentialStore: settings.credentialStore,
+    env: ctx.env,
+  });
   const payload = {
     version: VERSION,
     baseUrl: settings.baseUrl || null,
     authenticated: Boolean(settings.token),
     token: maskToken(settings.token),
-    tokenSource: ctx.env.CODERAX_TOKEN
-      ? "environment"
-      : settings.token
-        ? "config file"
-        : "none",
-    account: settings.account ?? null,
+    tokenSource: settings.tokenSource ?? "none",
+    legacyPlaintextToken: settings.tokenSource === "config file",
+    credentialStore: auth.store,
+    storedCredential: auth.stored,
+    credentialError: auth.credentialError ?? settings.authError ?? null,
+    account: settings.account ?? auth.account ?? null,
     configPath: settings.configPath,
     configDir: configDir(ctx.env),
     model: settings.model || null,
@@ -127,6 +133,10 @@ export async function status(ctx) {
   ctx.out(
     `Authentication   ${payload.authenticated ? `yes (${payload.token}, via ${payload.tokenSource})` : "no \u2014 run `coderax login`"}`,
   );
+  ctx.out(
+    `Credential store ${payload.credentialStore.available ? `${payload.credentialStore.name} (${payload.credentialStore.detail})` : `unavailable \u2014 ${payload.credentialStore.detail}`}`,
+  );
+  if (payload.credentialError) ctx.out(`Credential error ${payload.credentialError}`);
   if (payload.account) ctx.out(`Account          ${payload.account}`);
   ctx.out(`Config           ${payload.configPath}`);
   return EXIT.OK;
@@ -134,51 +144,61 @@ export async function status(ctx) {
 
 export async function login(ctx) {
   requireBase(ctx);
-  const token = ctx.flags.get("token") || ctx.env.CODERAX_TOKEN || (await ctx.readSecret());
-  if (!token) {
-    throw new CoderaxError("USAGE", "no token provided; use `coderax login --token <token>` or pipe it on stdin");
+  const settings = ctx.settings;
+  let token;
+  let source;
+
+  if (ctx.flags.has("token-file")) {
+    token = await readTokenFile(ctx.flags.get("token-file"));
+    source = "token file";
+  } else if (ctx.flags.has("token")) {
+    // Kept for one-shot automation and existing scripts. It is not persisted and
+    // the help points at the two forms that do not expose the value to `ps`.
+    token = ctx.flags.get("token");
+    source = "command flag";
+  } else {
+    token = ctx.env.CODERAX_TOKEN || (await ctx.readSecret());
+    source = ctx.env.CODERAX_TOKEN ? "environment" : "stdin";
   }
 
-  let account = null;
-  try {
-    const user = await request({
-      baseUrl: ctx.settings.baseUrl,
-      token,
-      path: "/api/user",
-      timeoutMs: ctx.settings.timeoutMs,
+  const result = await loginWithToken(
+    {
+      ...settings,
+      credentialStore: ctx.credentialStore,
+      configPath: settings.configPath,
+      env: ctx.env,
       fetchImpl: ctx.fetchImpl,
-    });
-    account = user.json?.email ?? user.json?.username ?? user.json?.name ?? null;
-  } catch (error) {
-    // A 404 means the deployment does not expose /api/user; anything else is a
-    // real rejection and must not be stored.
-    if (error?.status !== 404) throw error;
-  }
+    },
+    token,
+    { source },
+  );
 
-  await saveConfig({ token, account, baseUrl: ctx.settings.baseUrl }, { filePath: ctx.settings.configPath });
   ctx.out(
     ctx.json
-      ? JSON.stringify({ authenticated: true, token: maskToken(token), account }, null, 2)
-      : `Signed in${account ? ` as ${account}` : ""}. Token stored with 0600 permissions.`,
+      ? JSON.stringify(
+        {
+          authenticated: true,
+          token: maskToken(result.token),
+          account: result.account,
+          store: result.store,
+          source: result.source,
+        },
+        null,
+        2,
+      )
+      : `Signed in${result.account ? ` as ${result.account}` : ""}. Credential stored in ${result.store}.`,
   );
   return EXIT.OK;
 }
 
 export async function logout(ctx) {
-  const stored = await loadConfig({ env: {}, filePath: ctx.settings.configPath });
-  const removed = Boolean(stored.token);
-  const environmentTokenActive = Boolean(ctx.env.CODERAX_TOKEN?.trim());
-  await saveConfig({ token: null, account: null }, { filePath: ctx.settings.configPath });
-  const message = environmentTokenActive
-    ? "Stored credentials cleared. CODERAX_TOKEN is still set; unset it to sign out of this environment."
-    : removed
-      ? "Signed out."
-      : "No stored credentials.";
-  ctx.out(
-    ctx.json
-      ? JSON.stringify({ removed, environmentTokenActive, message }, null, 2)
-      : message,
-  );
+  const result = await logoutSession({
+    baseUrl: ctx.settings.baseUrl,
+    credentialStore: ctx.credentialStore,
+    configPath: ctx.settings.configPath,
+    env: ctx.env,
+  });
+  ctx.out(ctx.json ? JSON.stringify(result, null, 2) : result.message);
   return EXIT.OK;
 }
 
@@ -285,9 +305,19 @@ export async function doctor(ctx) {
     name: "auth",
     ok: Boolean(ctx.settings.token),
     detail: ctx.settings.token
-      ? `${maskToken(ctx.settings.token)} via ${ctx.env.CODERAX_TOKEN ? "environment" : "config file"}`
+      ? `${maskToken(ctx.settings.token)} via ${ctx.settings.tokenSource ?? "unknown"}`
       : "no token",
     hint: ctx.settings.token ? "" : "Run `coderax login`.",
+  });
+  checks.push({
+    name: "credential-store",
+    ok: Boolean(ctx.credentialStore?.available),
+    detail: ctx.credentialStore?.available
+      ? `${ctx.credentialStore.name} (${ctx.credentialStore.detail})`
+      : (ctx.credentialStore?.detail ?? "not available"),
+    hint: ctx.credentialStore?.available
+      ? ""
+      : "Install an OS credential store, or set CODERAX_TOKEN for automation; no plaintext fallback exists.",
   });
 
   if (ctx.settings.baseUrl) {

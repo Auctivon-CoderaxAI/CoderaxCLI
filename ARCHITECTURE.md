@@ -31,8 +31,14 @@ completion
 
 | Module | Responsibility | Knows about |
 | --- | --- | --- |
-| `src/config.js` | resolve, validate, persist deployment settings | filesystem, environment |
+| `src/config.js` | resolve, validate, persist deployment settings (never a token) | filesystem, environment |
 | `src/client.js` | legacy `/api/*` request, error mapping, redaction, `CoderaxError` | `fetch` only |
+| `src/secure-store.js` | verified private files and platform ACL checks | filesystem, platform tools |
+| `src/credentials.js` | OS credential store selection, argv-free helper calls, token files | secure-store, platform tools |
+| `src/auth.js` | owner login verification, credential resolution, logout, status | credentials, engine |
+| `src/interactive.js` | interactive REPL over the canonical engine | engine, `src/ui/*` |
+| `src/ui/*` | ANSI, incremental Markdown, prompt/spinner, tables, Work presenter | terminal only |
+| `scripts/*` | installer, uninstaller, release build, verification, reproducibility | filesystem, release artifacts |
 | `src/discover.js` | find and summarize the deployment OpenAPI document | client |
 | `src/product-registry.js` | canonical five-product status data | none |
 | `src/product-commands.js` | chat, Work chat, products, Cloud, login, doctor | config, client, registry |
@@ -41,15 +47,17 @@ completion
 | `src/capability-registry.js` | resolve each family against the live handshake | catalog, `@coderax/sdk` |
 | `src/capability-commands.js` | discovery, readiness, execution, progress, artifacts, schedules, permissions | registry, engine, transfer |
 | `src/file-transfer.js` | local validation, base64 encode/decode, destination safety, digest verification | client, filesystem |
-| `src/completion.js` | bash/zsh/fish scripts from the dispatch set | catalog, version |
+| `src/completion.js` | bash/zsh/fish/PowerShell scripts from the dispatch set | catalog, version |
 | `src/format.js` | shared table and byte formatting | none |
 | `src/exit.js` | shared exit codes | none |
 | `src/cli.js` | parsing, preflight, help, dispatch, output | all of the above |
 
 `src/client.js` is the **legacy adapter** for deployments that still expose the
-`/api/*` surface used by `chat`, `work`, `login`, `doctor` and `products`. It is
-not a WorkflowEngine SDK and is never used for `/v1` capability work. The
-canonical `@coderax/sdk` is the only WorkflowEngine client in the repository.
+`/api/*` surface used by `chat`, `work`, `products` and `call`. It is not a
+WorkflowEngine SDK and is never used for `/v1` capability work. Login verifies
+the owner through `src/engine.js`; it reads `/api/user` only for a display-name
+label and treats a 404 as "no label". The canonical `@coderax/sdk` is the only
+WorkflowEngine client in the repository.
 
 ## Why a vendored SDK
 

@@ -19,6 +19,9 @@ import {
   isExtendedCommand,
 } from "./capability-catalog.js";
 import { SHELLS, completionScript } from "./completion.js";
+import { createCredentialStore } from "./credentials.js";
+import { resolveSessionToken } from "./auth.js";
+import { interactiveHelp, runInteractive } from "./interactive.js";
 import * as product from "./product-commands.js";
 import { VERSION } from "./version.js";
 
@@ -34,7 +37,7 @@ Usage:
   coderax agents [--json]
   coderax cloud [--json]
   coderax projects [--json]
-  coderax login [--token <token>] [--json]
+  coderax login [--token-file <path> | --with-token] [--json]
   coderax logout [--json]
   coderax status [--json]
   coderax config show|list [--json]
@@ -44,6 +47,7 @@ Usage:
   coderax doctor [--json]
   coderax update [--json]
   coderax health [--json]
+  coderax interactive [--mode chat|work]
   coderax openapi [--json]
   coderax call <METHOD> <PATH> [--data <json>] [--json]
 
@@ -162,6 +166,7 @@ const KNOWN_COMMANDS = new Set([
   "permissions",
   "task",
   "completion",
+  "interactive",
   ...CAPABILITY_COMMANDS,
 ]);
 
@@ -169,6 +174,7 @@ const COMMAND_ALIASES = Object.freeze({
   caps: "capabilities",
   stt: "transcribe",
   tts: "speak",
+  tui: "interactive",
 });
 const KNOWN_FLAGS = new Set([
   "help",
@@ -183,6 +189,9 @@ const KNOWN_FLAGS = new Set([
   "chat-path",
   "url",
   "no-color",
+  "token-file",
+  "with-token",
+  "mode",
 ]);
 const ALLOWED_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
 
@@ -339,6 +348,26 @@ function preflight(positionals, flags, dynamic) {
     throw new UsageError("task requires a task id");
   }
 
+  if (command === "login") {
+    if (flags.has("token-file") && flags.has("with-token")) {
+      throw new UsageError("login accepts either --token-file or --with-token, not both");
+    }
+    if (positionals.length > 1) {
+      throw new UsageError("login accepts no positional arguments; pipe the token to `coderax login --with-token`");
+    }
+  }
+  if ((flags.has("token-file") || flags.has("with-token")) && command !== "login") {
+    throw new UsageError("--token-file and --with-token are only valid with `coderax login`");
+  }
+
+  if (command === "interactive") {
+    if (positionals.length > 1) throw new UsageError("interactive takes no positional arguments");
+    if (flags.has("json")) throw new UsageError("interactive does not support --json");
+    if (flags.has("mode") && !["chat", "work"].includes(flags.get("mode"))) {
+      throw new UsageError("--mode must be chat or work");
+    }
+  }
+
   if (command === "completion") {
     const shell = positionals[1];
     if (shell === undefined) {
@@ -416,6 +445,9 @@ function commandHelp(command) {
   if (command === "permissions") {
     return `coderax permissions <action>\n\nUsage:\n  coderax permissions list --task <taskId> [--json]\n  coderax permissions approve <taskId> <requestId> [--reason <text>] [--json]\n  coderax permissions deny <taskId> <requestId> [--reason <text>] [--json]\n\nOnly the engine can approve a scoped request; the CLI forwards the owner's\ndecision and never widens a grant. Contract 1.1.0 addresses permission requests\nby task, so a listing names the task it belongs to.`;
   }
+  if (command === "interactive") {
+    return `coderax interactive [--mode chat|work]\n\n${interactiveHelp()}`;
+  }
   if (command === "task") {
     return `coderax task <taskId> [--json]\n\nReattaches to a durable task through GET /v1/work/{taskId} and lists the\nartifacts it produced. It does not resubmit anything.`;
   }
@@ -447,15 +479,43 @@ async function resolveSettings(flags, deps) {
   });
 
   const baseUrl = config.baseUrl;
-  const token = flags.has("token") ? flags.get("token") : config.token;
   const timeoutMs = config.timeoutMs;
+  const credentialStore = deps.credentialStore ?? createCredentialStore({
+    env: deps.env,
+    ...(deps.platform ? { platform: deps.platform } : {}),
+  });
+
+  let session;
+  let authError = null;
+  try {
+    session = await resolveSessionToken({
+      config,
+      env: deps.env,
+      flagToken: flags.get("token"),
+      store: credentialStore,
+    });
+  } catch (error) {
+    // A locked or unreadable credential store must not prevent local-only
+    // commands such as `config show`; the error is reported by `status`.
+    authError = error?.message ?? String(error);
+    session = { token: null, source: "unavailable", legacy: false, account: null };
+  }
+  if (session.legacy) {
+    deps.stderr(
+      "coderax: warning: a legacy plaintext token is present in the config file; "
+        + "run `coderax login --with-token` to move it into the operating-system credential store\n",
+    );
+  }
 
   // `config` commands must work on a fresh install, so the base URL is only
   // required by the commands that actually send requests.
   return {
     ...config,
     baseUrl,
-    token: token || null,
+    token: session.token || null,
+    tokenSource: session.source,
+    authError,
+    credentialStore,
     timeoutMs,
     model: flags.has("model") ? flags.get("model") : config.model,
     endpoint: flags.has("endpoint") ? flags.get("endpoint") : config.endpoint,
@@ -586,7 +646,11 @@ async function commandConfig(positionals, context, deps, write, flags) {
     patch[CONFIG_KEYS[key]] = value;
   } else {
     if (flags.has("base-url")) patch.baseUrl = flags.get("base-url");
-    if (flags.has("token")) patch.token = flags.get("token");
+    if (flags.has("token")) {
+      throw new UsageError(
+        "config set no longer writes a token in plaintext; run `coderax login` (or set CODERAX_TOKEN for automation)",
+      );
+    }
     if (flags.has("chat-path")) patch.chatPath = flags.get("chat-path");
     if (flags.has("endpoint")) patch.endpoint = flags.get("endpoint");
     if (flags.has("model")) patch.model = flags.get("model");
@@ -645,6 +709,12 @@ function exitFor(error) {
   }
   if (LOCAL_INPUT_CODES.has(error.code)) return EXIT.usage;
   if (error.code === "UNAUTHENTICATED") return EXIT.unauthenticated;
+  if (error.code === "CREDENTIAL_STORE_UNAVAILABLE" || error.code === "CREDENTIAL_STORE_LOCKED") {
+    return EXIT.unauthenticated;
+  }
+  if (error.code === "CREDENTIAL_CORRUPT" || error.code === "CREDENTIAL_WRITE_FAILED") {
+    return EXIT.unauthenticated;
+  }
   if (error.code === "UNAVAILABLE" || error.code === "CAPABILITY_NOT_AVAILABLE") {
     return EXIT.unavailable;
   }
@@ -680,6 +750,8 @@ export async function runCli(argv, options = {}) {
     signal: options.signal,
     stdinIsTTY: options.stdinIsTTY ?? Boolean(process.stdin.isTTY),
     readSecret: options.readSecret ?? readStdin,
+    credentialStore: options.credentialStore,
+    platform: options.platform,
   };
 
   const write = (text) => deps.stdout(text.endsWith("\n") ? text : `${text}\n`);
@@ -769,6 +841,8 @@ export async function runCli(argv, options = {}) {
       case "completion":
         deps.stdout(completionScript(positionals[1], KNOWN_COMMANDS));
         return EXIT.ok;
+      case "interactive":
+        return await runInteractive(ctx, { mode: flags.get("mode") });
       case "capability":
         return await capabilities.runCapabilityGeneric({ ...ctx, args: positionals.slice(2) });
       case "help":
@@ -808,6 +882,9 @@ export async function runCli(argv, options = {}) {
     const detail =
       error instanceof UsageError ? error.message : `${error.code ?? "ERROR"}: ${error.message}`;
     deps.stderr(`coderax: ${redact(known ? detail : "unexpected failure", outputToken)}\n`);
+    if (!known && deps.env.CODERAX_DEBUG) {
+      deps.stderr(`${redact(error?.stack ?? String(error), outputToken)}\n`);
+    }
     return exitFor(error);
   }
 }

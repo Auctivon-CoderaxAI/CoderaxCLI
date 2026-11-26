@@ -2,18 +2,28 @@
 
 ## Credentials
 
-- The token is stored at `~/.coderax/config.json` with mode `0600` when the
-  operator runs `config set --token` or the `login` flow saves it; it is never
-  written to logs or stdout.
-- Writes go to a fresh `0600` temporary file and are atomically renamed over the
-  config, so an existing world-readable file never receives the token even
-  briefly. A failed rename or an unprotected temp file is an error, not a
-  silent success.
-- `config show` reports only `tokenConfigured: true|false`.
-- `describeConfig` deliberately omits the token, and tests assert the string never
-  appears in its output.
+- The owner token is stored in the operating-system credential store: macOS
+  Keychain (`/usr/bin/security`), Linux libsecret (`secret-tool`), or Windows
+  DPAPI under the current account. The plaintext configuration file never holds
+  it, and `config set --token` is refused.
+- `coderax login` verifies the token against the engine handshake and the
+  owner-only agent read before storing it. `--token-file` requires a regular,
+  non-symlink file that is not group/other readable on POSIX; `--with-token`
+  reads stdin. A token argument is never needed.
+- Every store write is read back and compared. POSIX modes are checked for
+  `0600`/`0700` and current-owner, macOS ACLs are inspected with `ls -le`, and
+  Windows ACLs are reset to the current account and re-verified with `icacls`.
+  A verification failure is an error, not a warning.
+- A token is passed to platform helpers over stdin, never through argv. Helper
+  environments have `CODERAX_TOKEN` removed.
+- `config show` reports only `tokenConfigured: true|false`; `status` reports the
+  source (`environment`, `credential store`, `command flag`) and never the token.
 - Environment variables (`CODERAX_TOKEN`) take precedence, so CI can inject a
-  short-lived token without writing a file.
+  short-lived token without writing a file. `--token` is a one-shot override for
+  automation and is never persisted.
+- A legacy plaintext token in an older config file is still honoured for one
+  migration window, with a warning; `coderax login` removes it only after the
+  secure write has been verified.
 
 ## Transport
 
@@ -92,9 +102,11 @@ deployment cannot block a pipeline indefinitely.
 
 ## Non-goals
 
-Storing refresh tokens, OIDC device flows, or acting as a credential broker.
-Deployment-bound OIDC machine identities are issued and validated by the Coderax
-deployment; the CLI only carries the resulting bearer token.
+Acting as a credential broker. Deployment-bound OIDC machine identities are
+issued and validated by the Coderax deployment; the CLI only stores and carries
+the resulting bearer token in the platform credential store. Device-code login
+is not implemented because contract 1.1.0 publishes no device authorization
+operation; the CLI never invents one.
 
 ## Reporting
 

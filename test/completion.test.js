@@ -50,8 +50,13 @@ test("completion is pure output and needs no deployment", async () => {
   assert.doesNotMatch(result.stdout, /CODERAX_TOKEN|Bearer/);
 });
 
-test("an unsupported shell is a usage error", async () => {
-  const result = await run(["completion", "powershell"]);
+test("PowerShell completion is generated and an unknown shell is a usage error", async () => {
+  const powershell = await run(["completion", "powershell"]);
+  assert.equal(powershell.code, 0, powershell.stderr);
+  assert.match(powershell.stdout, /Register-ArgumentCompleter/);
+  assert.match(powershell.stdout, /coderax-cli shell completion/);
+
+  const result = await run(["completion", "cmd"]);
   assert.equal(result.code, 2);
   assert.match(result.stderr, /unsupported shell/);
 });

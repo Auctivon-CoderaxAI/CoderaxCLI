@@ -164,7 +164,10 @@ CLI does not merge the two or claim they are interchangeable.
 | --- | --- |
 | `config show/set`, environment precedence, `0600` persistence | ✅ implemented, tested |
 | HTTPS enforcement (HTTP only on loopback) | ✅ implemented, tested |
-| `login` / `logout` / `status` with token masking | ✅ implemented, tested |
+| Owner login verified against the engine handshake, OS credential store (Keychain/libsecret/DPAPI), no plaintext token | ✅ implemented, tested |
+| `login --token-file` / `--with-token`, `logout`, `status` with token masking | ✅ implemented, tested |
+| Interactive terminal: streaming Markdown chat, durable Work, task/permission/artifact commands | ✅ implemented; PTY session and real Work and chat turns verified over HTTP |
+| One installer, uninstaller, completion and release pipeline | ✅ build, verify and reproducibility checks pass locally |
 | `chat` / `work` streaming through the legacy `/api/*` adapter | ✅ implemented, tested |
 | `products`, `cloud`, `projects`, `doctor`, `health`, `openapi`, `call` | ✅ implemented, tested |
 | Canonical `@coderax/sdk` 1.1.0 integration with provenance | ✅ vendored, pinned by SHA-256 |
@@ -172,26 +175,64 @@ CLI does not merge the two or claim they are interchangeable.
 | Task-scoped uploads with digest echo and cancel-on-failure | ✅ implemented, tested over real HTTP and a real PR #7 engine |
 | Digest-verified downloads and overwrite protection | ✅ implemented, tested |
 | Durable schedules (create/list/pause/resume/delete) and task-scoped permissions | ✅ implemented, tested over real HTTP and a real PR #7 engine |
-| Shell completion generated from the dispatch set | ✅ implemented, tested |
+| Shell completion generated from the dispatch set (bash, zsh, fish, PowerShell) | ✅ implemented, tested |
 | Local document, inference, generation or execution work | ⛔ never — the CLI is a cloud client |
 | Direct pushes, force pushes, production changes | ⛔ not performed |
 
-## Install
+## Interactive terminal
 
 ```sh
-npm install          # installs the vendored canonical SDK and zod
-npm link             # exposes `coderax`
+coderax interactive                 # chat mode
+coderax interactive --mode work     # every prompt becomes a durable Work task
+```
+
+Inside the session, `/help`, `/mode`, `/task`, `/tasks`, `/cancel`, `/artifacts`,
+`/permissions`, `/doctor`, `/models`, `/agents` and `/caps` are available. It
+uses the same canonical SDK and `src/engine.js` as every non-interactive
+command; chat frames and execution events are parsed once, and nothing is
+simulated locally.
+
+## Install
+
+From a release archive (Linux and macOS):
+
+```sh
+sh install.sh --version 0.3.0
+```
+
+Windows PowerShell:
+
+```powershell
+.\install.ps1 -Version 0.3.0
+```
+
+From a checkout, for development:
+
+```sh
+npm ci              # installs the vendored canonical SDK and zod
+npm link            # exposes `coderax`
 node src/cli.js --help
 ```
 
-## Configure
+The installers verify the release SHA-256, install under a versioned prefix,
+refuse to overwrite without `--force`, and install shell completion. See
+[`docs/INSTALL.md`](docs/INSTALL.md) for offline, rollback and prefix options.
+
+## Configure and sign in
 
 ```sh
-coderax config set --base-url https://coderax.example.com --token "<token>"
+coderax config set --base-url https://coderax.example.com
+coderax login --token-file ~/.coderax/owner-token   # or: ... | coderax login --with-token
 ```
 
-Config is written to `~/.coderax/config.json` with mode `0600` (override with
-`CODERAX_CONFIG`). Environment variables win over the file:
+Login verifies the token against the engine handshake and the owner-only agent
+read before storing it. The credential is stored in the operating-system
+credential store (macOS Keychain, Linux libsecret, or Windows DPAPI); the
+config file holds only the deployment URL and account label, with mode `0600`
+(override with `CODERAX_CONFIG`). There is no plaintext-token fallback.
+
+Environment variables win over the file and the credential store, so CI can
+inject a short-lived token without writing anything:
 
 ```sh
 export CODERAX_BASE_URL=https://coderax.example.com
@@ -221,8 +262,11 @@ server ever echoes it.
 ## Verify
 
 ```sh
-npm run check     # syntax of every module
-npm test          # unit + real-HTTP contract tests
+npm run check     # syntax of every module + vendored SDK checksum
+npm test          # 122 unit + real-HTTP contract tests
+npm run build     # release tarballs, installers, manifest, SBOM, checksums
+npm run verify    # artifact, checksum, inventory and install-safety checks
+npm run repro     # byte-identical rebuild, including dist/
 ```
 
 The capability suite runs against `test/support/workflow-harness.js`, a real
