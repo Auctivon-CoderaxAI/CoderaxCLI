@@ -23,16 +23,16 @@ const INFERRED = Object.freeze({
   [CAPABILITY.cancel]: CAPABILITY.workflows,
   [CAPABILITY.workCancel]: CAPABILITY.workTasks,
   [CAPABILITY.workModels]: CAPABILITY.workTasks,
+  [CAPABILITY.chat]: CAPABILITY.workTasks,
   [CAPABILITY.workAgents]: CAPABILITY.workTasks,
 });
 
 const RETRYABLE_CODES = new Set(["NETWORK", "TIMEOUT", "STREAM_INCOMPLETE", "UNAVAILABLE", "RATE_LIMITED"]);
 
 function sleep(ms) {
-  return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    timer.unref?.();
-  });
+  // Keep this timer referenced: watchRun awaits it while reconnecting, and an
+  // unref'd timer lets Node exit before the retry when no other handle is open.
+  return new Promise((resolve) => void setTimeout(resolve, ms));
 }
 
 function normalizeCapabilities(declared) {
@@ -535,6 +535,14 @@ export class WorkflowClient {
   } = {}) {
     if (typeof text !== "string" || text.trim() === "") {
       throw new SdkError("USAGE", "a non-empty message is required");
+    }
+
+    // Strict compatibility is enforced before the POST starts a generation.
+    // A response-header check after the write would be too late.
+    if (this.strict) {
+      await this.requireCapability(CAPABILITY.chat, {
+        hint: "the deployment does not advertise the Work chat capability",
+      });
     }
 
     // Preserve the legacy body shape exactly when no optional field is set:

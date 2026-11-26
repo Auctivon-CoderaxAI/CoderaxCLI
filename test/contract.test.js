@@ -2,10 +2,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
+import { spawn } from "node:child_process";
 import { access, mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { runCli } from "../src/cli.js";
+
+const CLI_PATH = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 
 const TOKEN = "contract-token-that-must-never-leak";
 
@@ -292,6 +296,82 @@ test("an interrupted run stream fails closed after bounded reconnect attempts", 
       assert.equal(result.code, 7);
       assert.equal(streams, 2);
       assert.match(result.err, /STREAM_INCOMPLETE|could not be monitored/);
+    },
+  );
+});
+
+test("a disconnected run keeps the reconnect delay alive across attempts", async () => {
+  let streams = 0;
+  await withStub(
+    negotiation((req, res) => {
+      const url = new URL(req.url, "http://localhost");
+      if (url.pathname === "/api/workflows/runs/run-delay/stream") {
+        streams += 1;
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        if (streams === 1) {
+          res.write(`id: 1\ndata: ${JSON.stringify({ run: RUN("run-delay", "running") })}\n\n`);
+          setTimeout(() => res.destroy(), 10);
+          return;
+        }
+        res.write(`id: 2\ndata: ${JSON.stringify({ run: RUN("run-delay", "completed") })}\n\n`);
+        res.end();
+        return;
+      }
+      return json(res, 404, { message: "not found" });
+    }),
+    async (baseUrl) => {
+      // Run in a real child process: an unref'd reconnect timer would let Node
+      // exit while watchRun is awaiting the retry, which an in-process test
+      // cannot observe.
+      const child = spawn(
+        process.execPath,
+        [CLI_PATH, "run", "run-delay", "--max-retries", "1"],
+        {
+          env: {
+            ...process.env,
+            CODERAX_CONFIG: await tempConfig(),
+            CODERAX_BASE_URL: baseUrl,
+            CODERAX_TOKEN: TOKEN,
+          },
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      let stderr = "";
+      child.stderr.on("data", (chunk) => {
+        stderr += chunk;
+      });
+      const code = await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          child.kill();
+          reject(new Error(`child did not finish reconnecting; stderr: ${stderr}`));
+        }, 15000);
+        child.once("error", reject);
+        child.once("close", (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        });
+      });
+      assert.equal(code, 0, stderr);
+      assert.equal(streams, 2);
+    },
+  );
+});
+
+test("strict chat negotiates before starting a generation", async () => {
+  let chats = 0;
+  await withStub(
+    (req, res) => {
+      if (req.url === "/api/work/chat") {
+        chats += 1;
+        return sse(res, ['data: {"delta":"started"}\n\n', "data: [DONE]\n\n"]);
+      }
+      return json(res, 404, { message: "not found" });
+    },
+    async (baseUrl) => {
+      const result = await cli(["chat", "hi", "--strict", "--json"], await envFor(baseUrl));
+      assert.equal(result.code, 6);
+      assert.equal(chats, 0, "strict chat must not POST a generation");
+      assert.match(result.err, /API_VERSION_UNVERIFIED|strict mode/);
     },
   );
 });
