@@ -156,8 +156,10 @@ Against the real-HTTP contract harness:
 - `npm run check`: syntax and vendor checksum pass.
 - `npm run build`, `npm run verify`, `npm run repro`: pass; 3 artifacts,
   649 inventoried files, byte-identical rebuild including `dist/`.
-- Hosted matrix result for this HEAD is recorded in the pull request once CI
-  runs; the previous capability-only HEAD passed Ubuntu, macOS and Windows.
+- Hosted matrix: exact-HEAD run
+  [`45903747815`](https://github.com/Auctivon-CoderaxAI/CoderaxCLI/actions/runs/45903747815)
+  passed `ubuntu-latest`, `macos-latest` and `windows-latest` at implementation
+  commit `d65a0a2`. The follow-up that records this result is documentation only.
 
 ## Remaining blockers
 
