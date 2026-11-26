@@ -33,6 +33,40 @@ function modeString(mode) {
   return (mode & 0o777).toString(8).padStart(3, "0");
 }
 
+function windowsAccount(env) {
+  return String(env.USERNAME ?? env.USER ?? "").trim();
+}
+
+/**
+ * Remove inherited Windows ACEs and grant the current account alone. Windows
+ * files created in a shared temporary directory inherit `BUILTIN\Users:(RX)`,
+ * so writing a private file is not enough; the ACL must be replaced before it
+ * can pass verification.
+ */
+export async function hardenSecurePath(path, options = {}) {
+  const {
+    kind = "file",
+    platform = process.platform,
+    runCommand = defaultRun,
+    env = process.env,
+  } = options;
+  if (platform !== "win32") return { ok: true, skipped: true };
+  const account = windowsAccount(env);
+  if (account === "") {
+    throw new SecureStoreError("ACL_UNVERIFIABLE", "cannot determine the current Windows account");
+  }
+  const grant = kind === "directory" ? `${account}:(OI)(CI)F` : `${account}:F`;
+  try {
+    await runCommand("icacls", [path, "/inheritance:r", "/grant:r", grant]);
+  } catch (error) {
+    throw new SecureStoreError(
+      "STORE_PERMISSIONS",
+      `could not restrict the Windows ACL on ${path}: ${error?.code ?? "icacls failed"}`,
+    );
+  }
+  return { ok: true };
+}
+
 /**
  * Verify that a path is a regular file (or directory) that only this account
  * can access.
@@ -94,7 +128,7 @@ export async function verifySecurePath(path, options = {}) {
         detail: `${path} grants access to Everyone, Users or Authenticated Users`,
       };
     }
-    const account = (env.USERNAME ?? env.USER ?? "").toLowerCase();
+    const account = windowsAccount(env).toLowerCase();
     const hasOwner = account !== "" && aces.some((line) => line.toLowerCase().includes(account));
     if (!hasOwner) {
       return {
@@ -148,11 +182,23 @@ export async function verifySecurePath(path, options = {}) {
 }
 
 export async function ensureSecureFile(path, deps = {}) {
-  const { chmodImpl = chmod } = deps;
+  const { chmodImpl = chmod, platform = process.platform } = deps;
   let verification = await verifySecurePath(path, deps);
-  if (!verification.ok && verification.reason === "PERMISSIONS_TOO_BROAD" && deps.platform !== "win32") {
+  if (!verification.ok && verification.reason === "PERMISSIONS_TOO_BROAD" && platform !== "win32") {
     try {
       await chmodImpl(path, 0o600);
+      verification = await verifySecurePath(path, deps);
+    } catch {
+      // Fall through with the original failure.
+    }
+  }
+  if (
+    !verification.ok
+    && platform === "win32"
+    && (verification.reason === "ACL_TOO_BROAD" || verification.reason === "ACL_OWNER_UNVERIFIED")
+  ) {
+    try {
+      await hardenSecurePath(path, deps);
       verification = await verifySecurePath(path, deps);
     } catch {
       // Fall through with the original failure.
@@ -176,6 +222,8 @@ export async function ensureSecureDirectory(path, deps = {}) {
     } catch (error) {
       throw new SecureStoreError("STORE_PERMISSIONS", `could not restrict permissions on ${path}`);
     }
+  } else {
+    await hardenSecurePath(path, { ...deps, kind: "directory" });
   }
   const verification = await verifySecurePath(path, { ...deps, kind: "directory" });
   if (!verification.ok) {
@@ -203,12 +251,17 @@ export async function writeSecureFile(path, contents, deps = {}) {
   const tempPath = `${path}.${process.pid}.${Date.now().toString(36)}.${Math.random().toString(36).slice(2, 8)}.tmp`;
   try {
     await writeFileImpl(tempPath, contents, { mode: 0o600, flag: "wx" });
-    if (platform !== "win32") await chmodImpl(tempPath, 0o600);
+    if (platform !== "win32") {
+      await chmodImpl(tempPath, 0o600);
+    } else {
+      await hardenSecurePath(tempPath, deps);
+    }
     const tempVerification = await verifySecurePath(tempPath, deps);
     if (!tempVerification.ok) {
       throw new SecureStoreError("STORE_PERMISSIONS", `temporary file is not private: ${tempVerification.detail}`);
     }
     await renameImpl(tempPath, path);
+    if (platform === "win32") await hardenSecurePath(path, deps);
   } catch (error) {
     try {
       await unlinkImpl(tempPath, { force: true });

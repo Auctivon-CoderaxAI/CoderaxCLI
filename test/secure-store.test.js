@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   ensureSecureFile,
+  hardenSecurePath,
   readSecureFile,
   removeSecureFile,
   verifySecurePath,
@@ -89,6 +90,21 @@ test("macOS ACLs are checked even when the mode is 0600", async () => {
   });
   assert.equal(acl.ok, false);
   assert.equal(acl.reason, "ACL_PRESENT");
+});
+
+test("Windows hardening removes inheritance and grants only the current account", async () => {
+  const calls = [];
+  await hardenSecurePath("C:\\tmp\\file", {
+    platform: "win32",
+    env: { USERNAME: "tester" },
+    runCommand: async (command, args) => {
+      calls.push({ command, args });
+      return { stdout: "" };
+    },
+  });
+  assert.deepEqual(calls, [
+    { command: "icacls", args: ["C:\\tmp\\file", "/inheritance:r", "/grant:r", "tester:F"] },
+  ]);
 });
 
 test("Windows verifies real ACL principals and fails closed", async () => {

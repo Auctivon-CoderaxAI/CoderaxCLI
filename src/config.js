@@ -1,7 +1,7 @@
 import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { verifySecurePath } from "./secure-store.js";
+import { hardenSecurePath, SecureStoreError, verifySecurePath } from "./secure-store.js";
 
 export class ConfigError extends Error {
   constructor(code, message) {
@@ -147,6 +147,13 @@ export async function saveConfig(
   if (patch.account !== undefined) next.account = patch.account === null ? null : String(patch.account);
 
   await mkdirImpl(dirname(path), { recursive: true, mode: 0o700 });
+  if (platform === "win32") {
+    try {
+      await hardenSecurePath(dirname(path), { platform, kind: "directory" });
+    } catch (error) {
+      throw new ConfigError("CONFIG_PERMISSIONS", `could not restrict the config directory: ${error.message}`);
+    }
+  }
 
   // Write a fresh 0600 file and atomically replace the config, so an existing
   // world-readable file never receives the token even for an instant.
@@ -156,11 +163,13 @@ export async function saveConfig(
     try {
       await chmodImpl(tempPath, 0o600);
     } catch (error) {
-      if (process.platform !== "win32") {
+      if (platform !== "win32") {
         throw new ConfigError("CONFIG_PERMISSIONS", `could not restrict permissions on ${tempPath}`);
       }
     }
+    if (platform === "win32") await hardenSecurePath(tempPath, { platform });
     await renameImpl(tempPath, path);
+    if (platform === "win32") await hardenSecurePath(path, { platform });
   } catch (error) {
     try {
       await unlinkImpl(tempPath);
@@ -168,6 +177,9 @@ export async function saveConfig(
       // Nothing to clean up.
     }
     if (error instanceof ConfigError) throw error;
+    if (error instanceof SecureStoreError) {
+      throw new ConfigError("CONFIG_PERMISSIONS", error.message);
+    }
     throw new ConfigError("CONFIG_WRITE_FAILED", `could not write ${path} atomically`);
   }
 

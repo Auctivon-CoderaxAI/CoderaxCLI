@@ -3,9 +3,9 @@ import assert from "node:assert/strict";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { verifySecurePath, writeSecureFile } from "../src/secure-store.js";
+import { hardenSecurePath, verifySecurePath, writeSecureFile } from "../src/secure-store.js";
 import { displayWidth } from "../src/terminal/text.js";
 
 const CLI = fileURLToPath(new URL("../src/cli.js", import.meta.url));
@@ -16,13 +16,23 @@ test("Windows ACL verification accepts a private file and rejects broad access",
     return;
   }
   const dir = await mkdtemp(join(tmpdir(), "coderax-win-"));
+  await hardenSecurePath(dir, { kind: "directory" });
   const path = join(dir, "config.json");
   await writeFile(path, "{}", "utf8");
+  await hardenSecurePath(path);
   const verification = await verifySecurePath(path);
   assert.equal(verification.ok, true, verification.detail);
   const written = join(dir, "history.json");
   await writeSecureFile(written, "{}");
   assert.equal((await verifySecurePath(written)).ok, true);
+
+  const broad = join(dir, "broad.json");
+  await writeFile(broad, "{}", "utf8");
+  // The well-known BUILTIN\Users SID is locale-independent.
+  execFileSync("icacls", [broad, "/grant", "*S-1-5-32-545:(R)"]);
+  const broadVerification = await verifySecurePath(broad);
+  assert.equal(broadVerification.ok, false);
+  assert.equal(broadVerification.reason, "ACL_TOO_BROAD");
 });
 
 test("the CLI runs under the Windows console without a TTY", async (t) => {

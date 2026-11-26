@@ -84,7 +84,8 @@ one run.
 
 `src/secure-store.js` verifies rather than assumes. POSIX files must be mode
 `0600` and owned by the current uid, directories `0700`; macOS ACLs are checked
-with `ls -le`; Windows ACLs are checked with `icacls` and any entry for
+with `ls -le`; Windows ACLs are hardened with `icacls` (inheritence removed and
+only the current account granted) and then checked, and any remaining entry for
 Everyone, Users or Authenticated Users is rejected. Verification failure is an
 error, and the config writer performs the same check after its atomic rename. A
 missing or unverifiable ACL tool fails closed.
