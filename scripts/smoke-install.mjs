@@ -15,8 +15,15 @@ function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
     encoding: "utf8",
     cwd: root,
+    // Windows resolves npm and .cmd shims through cmd.exe. Without a shell,
+    // spawnSync reports ENOENT/EINVAL for `npm` even though it is on PATH.
+    shell: process.platform === "win32",
     ...options,
   });
+  if (result.error) {
+    console.error(`command could not start: ${command} ${args.join(" ")}`);
+    console.error(result.error.message);
+  }
   if (result.status !== 0) {
     console.error(`command failed: ${command} ${args.join(" ")}`);
     console.error(result.stdout ?? "");
@@ -53,13 +60,13 @@ try {
       ? join(prefix, "node_modules", ".bin", "coderax.cmd")
       : join(prefix, "node_modules", ".bin", "coderax");
 
-  const version = run(bin, ["--version"], { shell: process.platform === "win32" });
+  const version = run(bin, ["--version"]);
   if (!/coderax-cli \d+\.\d+\.\d+/.test(version.stdout)) {
     console.error(`unexpected --version output: ${version.stdout}`);
     process.exit(1);
   }
 
-  const help = run(bin, ["--help"], { shell: process.platform === "win32" });
+  const help = run(bin, ["--help"]);
   if (!help.stdout.includes("coderax work submit")) {
     console.error("installed binary did not print the expected help");
     process.exit(1);
