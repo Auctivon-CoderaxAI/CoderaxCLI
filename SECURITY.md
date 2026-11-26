@@ -1,53 +1,100 @@
 # Security
 
-## Credentials
+## Threat model
 
-- The token is stored at `~/.coderax/config.json` with mode `0600` when the
-  operator runs `config set --token` or the `login` flow saves it; it is never
-  written to logs or stdout.
-- Writes go to a fresh `0600` temporary file and are atomically renamed over the
-  config, so an existing world-readable file never receives the token even
-  briefly. A failed rename or an unprotected temp file is an error, not a
-  silent success.
-- `config show` reports only `tokenConfigured: true|false`.
-- `describeConfig` deliberately omits the token, and tests assert the string never
-  appears in its output.
-- Environment variables (`CODERAX_TOKEN`) take precedence, so CI can inject a
-  short-lived token without writing a file.
+The assets are the Coderax owner token, provider credentials held by the cloud
+engine, and the integrity of cloud Work tasks. The CLI runs on an owner's
+machine; the WorkflowEngine is remote. The CLI is not a sandbox and does not
+execute untrusted repository code.
+
+## Owner authentication
+
+Every engine operation except the contract-public `/v1/health` and `/v1/ready`
+requires `Authorization: Bearer <owner token>`. The CLI has no anonymous mode,
+no implicit shared token, and no unauthenticated fallback. The repository being
+public does not grant API access.
+
+`login` validates the token against `/v1/health` and `/v1/agents` before storing
+it. A token must be 16–16,384 characters without control characters. A rejected
+token is never saved.
+
+## Credential storage
+
+| Platform | Backend |
+| --- | --- |
+| macOS | Keychain generic password, service `coderax-cli`, account `owner` |
+| Windows | DPAPI-encrypted `credential.dpapi`, current-user scope |
+| Linux | Secret Service item via `secret-tool` |
+| Fallback | `credentials.json` with mode `0600` in a `0700` directory |
+
+The fallback is used only when the requested OS backend is unavailable or when
+`--credential-store file` is explicitly selected. `coderax status` and `doctor`
+report the actual backend and any fallback warning. `config.json` never contains
+the token; `login` removes a legacy token from it.
+
+Environment variables (`CODERAX_ENGINE_TOKEN`, `CODERAX_TOKEN`) are supported
+for short-lived automation and intentionally take precedence. They are visible
+to the process environment by design; unset them after use. `logout` leaves
+them untouched and warns.
+
+## Child processes
+
+Credential and refresh helpers are spawned with:
+
+- an explicit allowlisted environment (no owner token, no provider keys, no
+  arbitrary inherited credentials);
+- `shell: false` and an argv array;
+- bounded stdout/stderr and a timeout;
+- the token on stdin, never in argv.
+
+The only child processes are the platform credential helper and an explicitly
+configured refresh command. The CLI does not spawn builds, tests, model runtimes,
+servers, Git or a shell.
 
 ## Transport
 
-Remote base URLs must be HTTPS. Plain HTTP is accepted only for `localhost`,
-`127.0.0.1`, and `::1`, matching the Coderax desktop client's policy. Credentials
-embedded in a URL are rejected so a token cannot end up in shell history as part
-of the URL.
-
-## Redirects
-
-`fetch` is called with `redirect: "error"`. A deployment that redirects to another
-origin therefore produces an error rather than leaking the bearer token to a third
-party.
+Remote URLs must be HTTPS. Plain HTTP is accepted only for `localhost`,
+`127.0.0.1` and `::1`. URLs with embedded credentials, query strings or
+fragments are rejected. `fetch` uses `redirect: "error"` so a bearer token is
+never forwarded to another origin. Responses are size-bounded and validated
+against the contract before use.
 
 ## Output hygiene
 
-Every output path is passed through `redact()` or `redactValue()`, which replace
-the configured token with a marker. The marker is usually `[REDACTED]`, but it
-uses `***` or another collision-safe value when the token shares characters with
-`[REDACTED]`. Successful response text is returned in full after redaction;
-only error diagnostics are truncated. JSON output stays valid and recursively
-redacts both keys and values.
+Every output path passes through `src/redact.js`, including error text, JSON
+values, Markdown and streamed deltas. It redacts the current bearer token and
+any credential-shaped environment value this process can see. Redaction markers
+are chosen not to collide with a secret. Tokens are never included in `--json`/`--ndjson`
+results; `config show` reports only `tokenConfigured` and a masked prefix/suffix.
 
-## Timeouts
+## Permissions and approvals
 
-Every request has a timeout (default 15s, bound to 100–120000 ms) so a hung
-deployment cannot block a pipeline indefinitely.
+Work defaults to `requireApproval: true`. An approval prompt names the tool,
+scope, resource, request id and description; the default answer is deny. The
+decision is sent to `/v1/work/{taskId}/permissions` and is scoped to that one
+request. `--approve-all` and `--deny-all` are opt-in non-interactive policies.
+A non-interactive run without a policy exits `8` rather than silently granting
+or hanging.
 
-## Non-goals
+## Cloud-only execution
 
-Storing refresh tokens, OIDC device flows, or acting as a credential broker.
-Deployment-bound OIDC machine identities are issued and validated by the Coderax
-deployment; the CLI only carries the resulting bearer token.
+The CLI never runs model inference, a local agent, repository builds, tests,
+databases or development servers. Repository inspection, code changes, test
+execution, diffs, PR preparation, review remediation and CI monitoring are
+Work objectives executed by the WorkflowEngine in its cloud workspace. If the
+engine reports that its agent lacks `tools`, the command fails explicitly with
+`CAPABILITY_UNSUPPORTED`; it does not emulate the workflow locally.
+
+## Idempotency and integrity
+
+Work submission uses a client-generated key persisted before the request. A
+definite HTTP rejection is retried only by an explicit user action; an ambiguous
+network failure is recorded as `SUBMISSION_UNCERTAIN` and reconciled with
+`coderax work resolve`. This prevents duplicate cloud tasks and duplicate
+spending.
 
 ## Reporting
 
-Report suspected vulnerabilities privately to the repository owner.
+Report suspected vulnerabilities privately to the repository owner. Do not open
+a public issue containing a token, a provider key, a private repository path or
+engine response data.

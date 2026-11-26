@@ -1,236 +1,230 @@
 #!/usr/bin/env node
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import {
-  ConfigError,
-  describeConfig,
-  loadConfig,
-  saveConfig,
-} from "./config.js";
-import { CoderaxError, formatJson, redact, request } from "./client.js";
-import { discoverOpenApi, findOperation } from "./discover.js";
-import * as product from "./product-commands.js";
+import { CoderaxError, EXIT, UsageError, errorDocument, exitFor } from "./errors.js";
+import { createRuntime } from "./runtime.js";
 import { VERSION } from "./version.js";
+import { completionScript } from "./commands/completion.js";
+import { configCommand } from "./commands/config.js";
+import { login, logout, refreshAuth, status } from "./commands/auth.js";
+import { chatCommand } from "./commands/chat.js";
+import { workCommand } from "./commands/work.js";
+import { sessionsCommand } from "./commands/sessions.js";
+import { notificationsCommand } from "./commands/notifications.js";
+import { permissionsCommand } from "./commands/permissions.js";
+import {
+  engineCapabilities,
+  engineContract,
+  engineHealth,
+  engineReady,
+  doctor,
+  listAgents,
+  listModels,
+} from "./commands/engine.js";
+import { deployCommand } from "./commands/deploy.js";
+import { cloud, products, projects, update } from "./product-commands.js";
+import { runInteractive } from "./interactive/app.js";
 
 export { VERSION };
 
-const USAGE = `coderax ${VERSION} - command-line client for a Coderax deployment
+const USAGE = `coderax ${VERSION} - the Coderax terminal client
 
 Usage:
-  coderax products [--json]
-  coderax chat [message] [--model <id>] [--json]
-  coderax work [message] [--model <id>] [--json]
-  coderax models [--json]
-  coderax agents [--json]
-  coderax cloud [--json]
-  coderax projects [--json]
-  coderax login [--token <token>] [--json]
-  coderax logout [--json]
-  coderax status [--json]
-  coderax config show|list [--json]
-  coderax config get <key>
-  coderax config set <key> <value>
-  coderax config set [--base-url <url>] [--token <token>] [--timeout <ms>]
-  coderax doctor [--json]
-  coderax update [--json]
-  coderax health [--json]
-  coderax openapi [--json]
-  coderax call <METHOD> <PATH> [--data <json>] [--json]
+  coderax                          Interactive Chat and Work terminal
+  coderax chat [message]           One Chat turn (reads stdin when piped)
+  coderax work [objective]         Submit a durable cloud Work task and stream it
+  coderax work <command>           submit | list | status | watch | attach | report
+                                   cancel | resume | retry | resolve | uncertain | templates
+  coderax sessions [list|show|switch|new|current]
+  coderax agents                   Agent identities, availability and capabilities
+  coderax models                   Models, cost class and the zero-cost route
+  coderax notifications            Durable completion notifications
+  coderax permissions <taskId>     Pending approvals for a task
+  coderax permissions decide <taskId> [requestId] --approve|--deny [--reason <text>]
+
+  coderax login                    Store the owner token in the OS credential store
+  coderax logout                   Remove the stored owner token
+  coderax status                   Configuration, contract and local journal status
+  coderax auth refresh             Refresh the owner token with the configured helper
+
+  coderax engine [health|ready|contract|capabilities|agents|models]
+  coderax doctor                   Diagnostics for the CLI, engine and credential store
+  coderax config show|get|set|unset|path
+  coderax completion bash|zsh|fish
+  coderax update
+
+  Deployment surface (OpenAPI discovery):
+  coderax deploy health|openapi|agents|models|call
+  coderax health                   Alias for 'coderax engine health'
+  coderax openapi                  Alias for 'coderax deploy openapi'
+  coderax call <METHOD> <PATH> [--data <json>]
+  coderax products | cloud | projects
+
+Work templates:
+  inspect | implement | test | diff | pr | review | ci
+  coderax work --template implement "add the missing validation"
 
 Global options:
-  --base-url <url>   Override the deployment URL (HTTPS, or HTTP on loopback)
-  --token <token>    Override the configured bearer token
-  --timeout <ms>     Per-request timeout, 100-120000
-  --model <id>       Override the model for one invocation
-  --endpoint <name>  Override the chat endpoint name
-  --chat-path <path> Override the streaming path
-  --url <path>       Override the streaming path for one invocation
-  --json             Machine-readable output
-  --no-color         Accepted for compatibility
-  -h, --help         Show this help
-  -v, --version      Show the version
+  --engine-url <url>     WorkflowEngine URL (HTTPS, or HTTP on loopback)
+  --base-url <url>       Coderax deployment URL for the OpenAPI surface
+  --token <token>        One-shot owner token; prefer 'coderax login'
+  --timeout <ms>         Per-request timeout, 100-120000 (default 30000)
+  --model <provider/model>  Model for this invocation
+  --agent <id>           coderax | opencode | freebuff
+  --conversation <id>    Continue a specific engine conversation
+  --json                 One machine-readable document on stdout
+  --ndjson               One JSON event per line, then a result line
+  --no-color             Disable ANSI styling
+  --quiet                Suppress non-essential human output
+  --verbose              More event and reconnect detail
+  --config <path>        Override the config file
+  --state <path>         Override the local journal
+  -h, --help             Show this help
+  -v, --version          Show the version
 
 Environment:
-  CODERAX_BASE_URL, CODERAX_TOKEN, CODERAX_TIMEOUT_MS, CODERAX_CONFIG,
-  CODERAX_CONFIG_DIR, CODERAX_CHAT_PATH, CODERAX_ENDPOINT, CODERAX_MODEL
+  CODERAX_ENGINE_URL, CODERAX_BASE_URL, CODERAX_ENGINE_TOKEN, CODERAX_TOKEN,
+  CODERAX_TIMEOUT_MS, CODERAX_CONFIG, CODERAX_CONFIG_DIR, CODERAX_AGENT,
+  CODERAX_MODEL, CODERAX_CREDENTIAL_STORE
 
-Discovery: agents, models, and openapi use the deployment's OpenAPI document.
-health probes fixed paths, login checks /api/user, doctor probes the same health
-endpoints, and chat and work use the configured chat path. call uses the path you supply.
-A missing discovered route fails with OPERATION_NOT_FOUND.
+Exit codes:
+  0 success            1 failure             2 usage/config
+  3 authentication     4 network/timeout     5 not found
+  6 unavailable        7 contract/capability 8 approval required
+  9 submission uncertain  10 conflict/busy   130 cancelled
+
+Security:
+  The owner token is stored in the operating system credential store, never in
+  config.json. Provider keys are never read, printed or inherited by a child
+  process. Remote URLs must use HTTPS. The CLI never enables anonymous access.
 `;
 
-const EXIT = Object.freeze({
-  ok: 0,
-  failure: 1,
-  usage: 2,
-  unauthenticated: 3,
-  network: 4,
-  notFound: 5,
-  unavailable: 6,
-  cancelled: 130,
-});
-
-const CONFIG_KEYS = Object.freeze(Object.assign(Object.create(null), {
-  "base-url": "baseUrl",
-  "chat-path": "chatPath",
-  endpoint: "endpoint",
-  model: "model",
-}));
-const CONFIG_FLAGS = ["base-url", "token", "timeout", "chat-path", "endpoint", "model"];
-
 const KNOWN_COMMANDS = new Set([
-  "config",
-  "health",
-  "openapi",
-  "agents",
-  "models",
-  "call",
-  "products",
-  "chat",
-  "work",
-  "cloud",
-  "projects",
-  "login",
-  "logout",
-  "status",
-  "doctor",
-  "update",
-  "help",
-  "version",
+  "chat", "work", "sessions", "agents", "models", "notifications", "permissions",
+  "login", "logout", "status", "auth", "engine", "doctor", "config", "completion",
+  "products", "cloud", "projects", "update", "deploy", "health", "openapi", "call",
+  "help", "version",
 ]);
-const KNOWN_FLAGS = new Set([
-  "help",
-  "version",
-  "json",
-  "base-url",
-  "token",
-  "timeout",
-  "data",
-  "model",
-  "endpoint",
-  "chat-path",
-  "url",
-  "no-color",
-]);
-const ALLOWED_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
 
-export class UsageError extends Error {
-  constructor(message) {
-    super(message);
-    this.name = "UsageError";
-  }
-}
+const BOOLEAN_FLAGS = new Set([
+  "help", "version", "json", "ndjson", "no-color", "quiet", "verbose", "once",
+  "detach", "new", "refresh", "retry-submission", "approve", "deny", "approve-all",
+  "deny-all", "token-stdin", "unread", "no-watch",
+]);
+
+const VALUE_FLAGS = new Set([
+  "base-url", "engine-url", "token", "timeout", "config", "state", "model", "agent",
+  "conversation", "template", "after", "generation", "reason", "request", "limit",
+  "mode", "budget-requests", "budget-input", "budget-output", "idempotency-key",
+  "objective", "message", "max-reconnects", "task", "url", "data", "endpoint",
+  "chat-path", "refresh-command", "credential-store", "theme", "output",
+]);
+
+const CONFIG_SET_FLAGS = new Set([
+  "base-url", "engine-url", "timeout", "endpoint", "chat-path", "model", "agent",
+  "credential-store", "refresh-command", "theme", "output",
+]);
+
+const WORK_SUBCOMMANDS = new Set([
+  "submit", "list", "status", "watch", "attach", "report", "cancel", "resume",
+  "retry", "resolve", "uncertain", "templates",
+]);
+
+const ALLOWED_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
 
 export function parseArgv(argv) {
   const flags = new Map();
   const positionals = [];
+  let literal = false;
 
   for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-
-    if (arg === "--help" || arg === "-h") {
+    const arg = String(argv[index]);
+    if (literal) {
+      positionals.push(arg);
+      continue;
+    }
+    if (arg === "--") {
+      literal = true;
+      continue;
+    }
+    if (arg === "-h") {
       flags.set("help", true);
       continue;
     }
-    if (arg === "--version" || arg === "-v") {
+    if (arg === "-v") {
       flags.set("version", true);
       continue;
     }
-    if (arg === "--json") {
-      flags.set("json", true);
-      continue;
-    }
-    if (arg === "--no-color") {
-      flags.set("no-color", true);
-      continue;
+    if (arg.startsWith("-") && !arg.startsWith("--") && arg !== "-") {
+      throw new UsageError(`unknown option: ${arg}`);
     }
     if (arg.startsWith("--")) {
       const body = arg.slice(2);
       const equals = body.indexOf("=");
       const name = equals === -1 ? body : body.slice(0, equals);
-      if (!KNOWN_FLAGS.has(name)) {
+      if (BOOLEAN_FLAGS.has(name)) {
+        if (equals !== -1) throw new UsageError(`--${name} does not take a value`);
+        flags.set(name, true);
+        continue;
+      }
+      if (!VALUE_FLAGS.has(name)) {
         throw new UsageError(`unknown option: --${name}`);
       }
       if (equals !== -1) {
-        flags.set(name, body.slice(equals + 1));
+        const value = body.slice(equals + 1);
+        if (value === "") throw new UsageError(`--${name} requires a value`);
+        flags.set(name, value);
         continue;
       }
       const value = argv[index + 1];
-      if (value === undefined || value.startsWith("--")) {
+      if (value === undefined || (String(value).startsWith("--") && String(value) !== "--")) {
         throw new UsageError(`--${name} requires a value`);
       }
-      flags.set(name, value);
+      flags.set(name, String(value));
       index += 1;
       continue;
     }
-
     positionals.push(arg);
   }
-
   return { flags, positionals };
 }
 
-function emit(write, flags, human, machine) {
-  write(flags.has("json") ? formatJson(machine) : human);
-}
-
-function responseBody(response) {
-  return response.text.trim() === "null" ? null : response.json ?? response.text;
-}
-
-/**
- * Validate everything that does not need configuration before touching the
- * config file, so a typo reports a usage error instead of a missing base URL.
- */
 function preflight(positionals, flags) {
   const [command] = positionals;
-  let call = null;
-
   if (!KNOWN_COMMANDS.has(command)) {
     throw new UsageError(`unknown command: ${command}. Run \`coderax --help\`.`);
   }
-
-  if (command === "config") {
-    const action = positionals[1] ?? "show";
-    if (!["show", "list", "get", "set"].includes(action)) {
-      throw new UsageError(`unknown config action: ${action}`);
-    }
-    if (action === "get" && (!positionals[2] || !(positionals[2] in CONFIG_KEYS))) {
-      throw new UsageError(`config get requires one of: ${Object.keys(CONFIG_KEYS).join(", ")}`);
-    }
-    if (action === "set") {
-      const key = positionals[2];
-      const hasFlags = CONFIG_FLAGS.some((name) => flags.has(name));
-      if (!hasFlags && !key) {
-        throw new UsageError("config set requires a key and value, or --base-url/--token/--timeout");
-      }
-      if (key && hasFlags) {
-        throw new UsageError("config set accepts either a key and value or flags, not both");
-      }
-      if (key && !(key in CONFIG_KEYS)) {
-        throw new UsageError(`unknown config key: ${key}`);
-      }
-      if (key && key in CONFIG_KEYS && !hasFlags && !positionals[3]) {
-        throw new UsageError(`config set ${key} requires a value`);
-      }
+  if (flags.has("json") && flags.has("ndjson")) {
+    throw new UsageError("--json and --ndjson are mutually exclusive");
+  }
+  if (flags.has("approve") && flags.has("deny")) {
+    throw new UsageError("--approve and --deny are mutually exclusive");
+  }
+  if (flags.has("approve-all") && flags.has("deny-all")) {
+    throw new UsageError("--approve-all and --deny-all are mutually exclusive");
+  }
+  if (flags.has("token") && flags.has("token-stdin")) {
+    throw new UsageError("use --token or --token-stdin, not both");
+  }
+  if (flags.has("timeout")) {
+    const timeout = Number(flags.get("timeout"));
+    if (!Number.isInteger(timeout) || timeout < 100 || timeout > 120_000) {
+      throw new UsageError("--timeout must be an integer between 100 and 120000");
     }
   }
 
-  if (command === "call") {
-    const methodRaw = positionals[1];
-    const path = positionals[2];
+  let call = null;
+  if (command === "call" || (command === "deploy" && positionals[1] === "call")) {
+    const offset = command === "deploy" ? 2 : 1;
+    const methodRaw = positionals[offset];
+    const path = positionals[offset + 1];
     if (methodRaw === undefined || path === undefined) {
       throw new UsageError("call requires <METHOD> <PATH>");
     }
     const method = methodRaw.toUpperCase();
-    if (!ALLOWED_METHODS.has(method)) {
-      throw new UsageError(`unsupported method: ${methodRaw}`);
-    }
+    if (!ALLOWED_METHODS.has(method)) throw new UsageError(`unsupported method: ${methodRaw}`);
     if (flags.has("data")) {
-      if (method === "GET" || method === "HEAD") {
-        throw new UsageError(`${method} does not accept --data`);
-      }
+      if (method === "GET" || method === "HEAD") throw new UsageError(`${method} does not accept --data`);
       try {
         call = { method, path, body: JSON.parse(flags.get("data")) };
       } catch {
@@ -241,332 +235,253 @@ function preflight(positionals, flags) {
     }
   }
 
+  if (command === "work") {
+    const sub = positionals[1];
+    if (sub === "resolve" && (!positionals[2] || !positionals[3])) {
+      throw new UsageError("work resolve requires <submission-key> <task-id>");
+    }
+    if (sub && !WORK_SUBCOMMANDS.has(sub) && sub.startsWith("-")) {
+      throw new UsageError(`unknown work command: ${sub}`);
+    }
+  }
+
+  if (command === "permissions" && positionals[1] === "decide") {
+    if (!positionals[2]) throw new UsageError("permissions decide requires a task id");
+    if (!flags.has("approve") && !flags.has("deny")) {
+      throw new UsageError("permissions decide requires --approve or --deny");
+    }
+  }
+
+  if (command === "config") {
+    const action = positionals[1] ?? "show";
+    if (!["show", "list", "get", "set", "unset", "path"].includes(action)) {
+      throw new UsageError(`unknown config action: ${action}`);
+    }
+    if (action === "get" && !positionals[2]) throw new UsageError("config get requires a key");
+    if (action === "unset" && !positionals[2]) throw new UsageError("config unset requires a key");
+    if (action === "set") {
+      if (flags.has("token")) throw new UsageError("the owner token is stored by `coderax login`, not by `config set`");
+      const hasFlag = [...CONFIG_SET_FLAGS].some((name) => flags.has(name));
+      const key = positionals[2];
+      if (key && hasFlag) throw new UsageError("config set accepts either a key and value or flags, not both");
+      if (!key && !hasFlag) throw new UsageError("config set requires a key and value, or --engine-url/--base-url/...");
+      if (key && positionals.length < 4) throw new UsageError(`config set ${key} requires a value`);
+    }
+  }
+
+  if (command === "engine") {
+    const action = positionals[1] ?? "health";
+    if (!["health", "ready", "contract", "capabilities", "agents", "models"].includes(action)) {
+      throw new UsageError(`unknown engine action: ${action}`);
+    }
+  }
+
+  if (command === "deploy") {
+    const action = positionals[1] ?? "health";
+    if (!["health", "openapi", "agents", "models", "call"].includes(action)) {
+      throw new UsageError(`unknown deploy action: ${action}`);
+    }
+  }
+
+  if (command === "sessions") {
+    const action = positionals[1] ?? "list";
+    if (!["list", "show", "switch", "new", "current"].includes(action)) {
+      throw new UsageError(`unknown sessions action: ${action}`);
+    }
+  }
+
+  if (command === "permissions") {
+    const arg = positionals[1];
+    if (arg !== undefined && !["list", "decide"].includes(arg) && positionals.length > 2) {
+      throw new UsageError(`unknown permissions action: ${arg}`);
+    }
+  }
+
+  if (command === "auth") {
+    const action = positionals[1] ?? "refresh";
+    if (action !== "refresh") throw new UsageError(`unknown auth action: ${action}`);
+  }
+
   return { call };
 }
 
-async function resolveSettings(flags, deps) {
-  const overrides = {};
-  if (flags.has("base-url")) overrides.baseUrl = flags.get("base-url");
-  if (flags.has("timeout")) overrides.timeoutMs = flags.get("timeout");
-  // Apply overrides before validation so an invalid lower-priority environment
-  // value cannot block a valid flag.
-  const config = await loadConfig({
-    env: deps.env,
-    ...(deps.configDeps ?? {}),
-    overrides,
-  });
+function interactiveFactory(runtime) {
+  return (mode) => runInteractive(runtime, { initialMode: mode });
+}
 
-  const baseUrl = config.baseUrl;
-  const token = flags.has("token") ? flags.get("token") : config.token;
-  const timeoutMs = config.timeoutMs;
+async function dispatch(runtime, command, positionals, call, options) {
+  const rest = positionals.slice(1);
+  switch (command) {
+    case "chat":
+      return chatCommand(runtime, rest, { interactive: interactiveFactory(runtime) });
+    case "work":
+      return workCommand(runtime, rest, { interactive: interactiveFactory(runtime) });
+    case "sessions":
+      return sessionsCommand(runtime, rest);
+    case "agents":
+      return listAgents(runtime);
+    case "models":
+      return listModels(runtime);
+    case "notifications":
+      return notificationsCommand(runtime);
+    case "permissions": {
+      const explicitAction = rest[0] === "list" || rest[0] === "decide";
+      return permissionsCommand(runtime, explicitAction ? rest : ["list", ...rest]);
+    }
+    case "login":
+      return login(runtime);
+    case "logout":
+      return logout(runtime);
+    case "status":
+      return status(runtime);
+    case "auth":
+      return refreshAuth(runtime);
+    case "engine": {
+      const action = rest[0] ?? "health";
+      if (action === "health") return engineHealth(runtime);
+      if (action === "ready") return engineReady(runtime);
+      if (action === "contract") return engineContract(runtime);
+      if (action === "capabilities") return engineCapabilities(runtime);
+      if (action === "agents") return listAgents(runtime);
+      if (action === "models") return listModels(runtime);
+      throw new UsageError(`unknown engine action: ${action}`);
+    }
+    case "doctor":
+      return doctor(runtime);
+    case "config":
+      return configCommand(runtime, rest);
+    case "products":
+      return products(runtime);
+    case "cloud":
+      return cloud(runtime);
+    case "projects":
+      return projects(runtime);
+    case "update":
+      return update(runtime);
+    case "deploy":
+      return deployCommand(runtime, rest, call);
+    case "health":
+      return engineHealth(runtime);
+    case "openapi":
+      return deployCommand(runtime, ["openapi"], call);
+    case "call":
+      return deployCommand(runtime, ["call"], call);
+    case "completion": {
+      const script = completionScript(rest[0]);
+      runtime.raw(script);
+      return EXIT.OK;
+    }
+    case "help":
+      runtime.raw(USAGE);
+      return EXIT.OK;
+    case "version":
+      runtime.write(`coderax-cli ${VERSION}`);
+      return EXIT.OK;
+    default:
+      throw new UsageError(`unknown command: ${command}`);
+  }
+}
 
-  // `config` commands must work on a fresh install, so the base URL is only
-  // required by the commands that actually send requests.
+function installSignals(options) {
+  if (options.handleSignals === false) return { controller: new AbortController(), cleanup: () => {} };
+  const controller = new AbortController();
+  if (options.signal) {
+    if (options.signal.aborted) controller.abort(options.signal.reason);
+    else options.signal.addEventListener("abort", () => controller.abort(options.signal.reason), { once: true });
+  }
+  let interrupts = 0;
+  const onSigint = () => {
+    interrupts += 1;
+    if (interrupts === 1 && !controller.signal.aborted) {
+      controller.abort("cancel");
+      return;
+    }
+    process.exitCode = EXIT.CANCELLED;
+    process.exit(EXIT.CANCELLED);
+  };
+  process.on("SIGINT", onSigint);
   return {
-    ...config,
-    baseUrl,
-    token: token || null,
-    timeoutMs,
-    model: flags.has("model") ? flags.get("model") : config.model,
-    endpoint: flags.has("endpoint") ? flags.get("endpoint") : config.endpoint,
-    chatPath: flags.has("chat-path") ? flags.get("chat-path") : config.chatPath,
+    controller,
+    cleanup: () => process.removeListener("SIGINT", onSigint),
   };
 }
 
-function requireBaseUrl(context) {
-  if (!context.baseUrl) {
-    throw new CoderaxError(
-      "BASE_URL_REQUIRED",
-      "no deployment configured; run `coderax config set --base-url <url>` or set CODERAX_BASE_URL",
-    );
-  }
-  return context;
-}
-
-async function commandHealth(context, deps, write, flags) {
-  const { path, response } = await product.probeHealth({ ...context, fetchImpl: deps.fetchImpl });
-  const body = responseBody(response);
-  emit(
-    write,
-    flags,
-    `health: ok (GET ${path}) HTTP ${response.status}\n${response.json ? formatJson(response.json) : ""}`,
-    { endpoint: path, status: response.status, body },
-  );
-}
-
-async function commandOpenapi(context, deps, write, flags) {
-  const discovery = await discoverOpenApi({ ...context, fetchImpl: deps.fetchImpl });
-  const displayOperations = discovery.operations.map((operation) => ({
-    ...operation,
-    path: redact(operation.path, context.token),
-    operationId: operation.operationId ? redact(operation.operationId, context.token) : null,
-    summary: operation.summary ? redact(operation.summary, context.token) : null,
-  }));
-  const lines = displayOperations
-    .slice(0, 50)
-    .map((operation) => `  ${operation.method.padEnd(6)} ${operation.path}${operation.operationId ? `  # ${operation.operationId}` : ""}`);
-  emit(
-    write,
-    flags,
-    `contract: ${discovery.sourcePath} (${displayOperations.length} operations)\n${lines.join("\n")}\n`,
-    {
-      sourcePath: discovery.sourcePath,
-      operationCount: displayOperations.length,
-      operations: displayOperations,
-    },
-  );
-}
-
-async function commandResource(kind, context, deps, write, flags) {
-  const discovery = await discoverOpenApi({ ...context, fetchImpl: deps.fetchImpl });
-  const matcher = kind === "agents" ? /\/agents\/?$/i : /\/models\/?$/i;
-  const operation = findOperation(discovery.operations, matcher);
-
-  if (operation === null) {
-    throw new CoderaxError(
-      "OPERATION_NOT_FOUND",
-      `the deployment's OpenAPI document has no GET ${kind} operation; run \`coderax openapi\` to list available paths`,
-    );
-  }
-
-  const response = await request({
-    ...context,
-    path: operation.path,
-    fetchImpl: deps.fetchImpl,
-  });
-  const payload = responseBody(response);
-  const displayPath = redact(operation.path, context.token);
-
-  emit(
-    write,
-    flags,
-    `${operation.method} ${displayPath} -> ${response.status}\n${response.json ? formatJson(response.json) : response.text}\n`,
-    { method: operation.method, path: displayPath, status: response.status, body: payload },
-  );
-}
-
-async function commandCall(call, context, deps, write, flags) {
-  const { method, path, body } = call;
-  const response = await request({ ...context, path, method, body, fetchImpl: deps.fetchImpl });
-  const payload = responseBody(response);
-  const displayPath = redact(path, context.token);
-
-  emit(
-    write,
-    flags,
-    `${method} ${displayPath} -> ${response.status}\n${response.json !== null ? formatJson(response.json) : response.text}\n`,
-    { method, path: displayPath, status: response.status, body: payload },
-  );
-}
-
-async function commandConfig(positionals, context, deps, write, flags) {
-  const action = positionals[1] ?? "show";
-
-  if (action === "show" || action === "list") {
-    const described = describeConfig(context);
-    emit(
-      write,
-      flags,
-      `config: ${described.configPath}\nbase URL: ${described.baseUrl ?? "(not set)"}\ntoken: ${described.tokenConfigured ? "configured" : "not configured"}\ntimeout: ${described.timeoutMs}ms\nchat path: ${described.chatPath}\nendpoint: ${described.endpoint}\nmodel: ${described.model || "(not set)"}\n`,
-      described,
-    );
-    return;
-  }
-
-  if (action === "get") {
-    const key = positionals[2];
-    if (!key || !(key in CONFIG_KEYS)) {
-      throw new UsageError(`config get requires one of: ${Object.keys(CONFIG_KEYS).join(", ")}`);
-    }
-    const value = context[CONFIG_KEYS[key]];
-    write(flags.has("json") ? formatJson({ [key]: value }) : String(value || "(unset)"));
-    return;
-  }
-
-  if (action !== "set") {
-    throw new UsageError(`unknown config action: ${action}`);
-  }
-
-  const patch = {};
-  const key = positionals[2];
-  const hasFlags = CONFIG_FLAGS.some((name) => flags.has(name));
-  if (key && key in CONFIG_KEYS && !hasFlags) {
-    const value = positionals.slice(3).join(" ").trim();
-    if (!value) throw new UsageError(`config set ${key} requires a value`);
-    patch[CONFIG_KEYS[key]] = value;
+function writeFailure(runtime, error, command, options, argv = []) {
+  const code = exitFor(error);
+  const message = runtime ? runtime.redact(error?.message ?? String(error)) : String(error?.message ?? error);
+  const hint = runtime ? runtime.redact(error?.hint ?? "") : error?.hint;
+  const jsonFallback = argv.includes("--json") || argv.includes("--ndjson");
+  if (runtime?.json || runtime?.ndjson) {
+    const doc = errorDocument({ ...error, message, hint, details: runtime?.redactValue(error?.details) }, { command });
+    runtime.write(JSON.stringify(doc));
+  } else if (!runtime && jsonFallback) {
+    const doc = errorDocument({ ...error, message, hint }, { command });
+    (options.stdout ?? ((text) => process.stdout.write(text)))(`${JSON.stringify(doc, null, 2)}\n`);
   } else {
-    if (flags.has("base-url")) patch.baseUrl = flags.get("base-url");
-    if (flags.has("token")) patch.token = flags.get("token");
-    if (flags.has("chat-path")) patch.chatPath = flags.get("chat-path");
-    if (flags.has("endpoint")) patch.endpoint = flags.get("endpoint");
-    if (flags.has("model")) patch.model = flags.get("model");
-    if (flags.has("timeout")) {
-      const timeoutMs = Number(flags.get("timeout"));
-      if (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 120000) {
-        throw new UsageError("--timeout must be an integer between 100 and 120000");
-      }
-      patch.timeoutMs = timeoutMs;
+    const writer = runtime?.err ?? ((text) => (options?.stderr ?? process.stderr.write)(text));
+    if (error instanceof UsageError || error?.code === "USAGE") {
+      writer(`coderax: ${message}`);
+    } else if (error instanceof CoderaxError || error?.code) {
+      writer(`coderax: ${error.code}: ${message}`);
+    } else {
+      writer(`coderax: unexpected failure: ${message}`);
     }
+    if (hint) writer(`  \u2192 ${hint}`);
+    if (error?.requestId) writer(`  request ${error.requestId}`);
   }
-  if (Object.keys(patch).length === 0) {
-    throw new UsageError("config set requires a key and value, or --base-url/--token/--timeout");
-  }
-
-  const saved = await saveConfig(patch, {
-    ...(deps.saveDeps ?? {}),
-    filePath: context.configPath,
-  });
-  const described = describeConfig(
-    await loadConfig({ env: deps.env, filePath: saved.path }),
-  );
-
-  emit(write, flags, `wrote ${saved.path}\nbase URL: ${described.baseUrl ?? "(not set)"}\ntoken: ${described.tokenConfigured ? "configured" : "not configured"}\n`, described);
-}
-
-function exitFor(error) {
-  if (error instanceof UsageError || error instanceof ConfigError || error.code === "USAGE") {
-    return EXIT.usage;
-  }
-  if (error.code === "UNAVAILABLE") return EXIT.unavailable;
-  if (error.code === "CANCELLED") return EXIT.cancelled;
-  if (error.code === "HTTP_401" || error.code === "HTTP_403") return EXIT.unauthenticated;
-  if (error.code === "HTTP_404") return EXIT.notFound;
-  if (error.code === "REQUEST_TIMEOUT" || error.code === "REQUEST_FAILED") return EXIT.network;
-  return EXIT.failure;
+  return code;
 }
 
 export async function runCli(argv, options = {}) {
-  const deps = {
-    env: options.env ?? process.env,
-    fetchImpl: options.fetchImpl ?? fetch,
-    stdout: options.stdout ?? ((text) => process.stdout.write(text)),
-    stderr: options.stderr ?? ((text) => process.stderr.write(text)),
-    configDeps: options.configDeps,
-    saveDeps: options.saveDeps,
-    signal: options.signal,
-    stdinIsTTY: options.stdinIsTTY ?? Boolean(process.stdin.isTTY),
-    readSecret: options.readSecret ?? readStdin,
-  };
-
-  const write = (text) => deps.stdout(text.endsWith("\n") ? text : `${text}\n`);
-  const raw = (text) => deps.stdout(String(text));
-
+  let runtime = null;
+  let command = null;
+  let signals = null;
   try {
     const { flags, positionals } = parseArgv(argv);
 
-    if (flags.has("help")) {
-      deps.stdout(USAGE);
-      return EXIT.ok;
+    if (flags.has("help") || positionals[0] === "help") {
+      (options.stdout ?? ((text) => process.stdout.write(text)))(USAGE);
+      return EXIT.OK;
     }
-    if (flags.has("version")) {
-      write(`coderax-cli ${VERSION}`);
-      return EXIT.ok;
+    if (flags.has("version") || positionals[0] === "version") {
+      (options.stdout ?? ((text) => process.stdout.write(text)))(`coderax-cli ${VERSION}\n`);
+      return EXIT.OK;
     }
     if (positionals.length === 0) {
-      deps.stdout(USAGE);
-      return EXIT.ok;
+      const tty = options.stdinIsTTY ?? Boolean(process.stdin.isTTY);
+      if (!tty) {
+        (options.stdout ?? ((text) => process.stdout.write(text)))(USAGE);
+        return EXIT.OK;
+      }
+      signals = options.handleSignals === false ? null : installSignals(options);
+      runtime = await createRuntime({ flags, options, command: "interactive" });
+      return await runInteractive(runtime);
     }
 
+    command = positionals[0];
     const { call } = preflight(positionals, flags);
 
-    const settings = await resolveSettings(flags, deps);
-    const [command] = positionals;
-    const ctx = {
-      ...settings,
-      settings,
-      args: positionals.slice(1),
-      flags,
-      env: deps.env,
-      json: flags.has("json"),
-      out: write,
-      raw,
-      err: (text) => deps.stderr(`${text}\n`),
-      fetchImpl: deps.fetchImpl,
-      signal: deps.signal,
-      stdinIsTTY: deps.stdinIsTTY,
-      readSecret: deps.readSecret,
-    };
-
-    if (command === "config") {
-      await commandConfig(positionals, settings, deps, write, flags);
-      return EXIT.ok;
+    if (command === "completion") {
+      const script = completionScript(positionals[1]);
+      (options.stdout ?? ((text) => process.stdout.write(text)))(script);
+      return EXIT.OK;
     }
 
-    switch (command) {
-      case "products":
-        return await product.products(ctx);
-      case "cloud":
-        return await product.cloud(ctx);
-      case "projects":
-        return await product.projects(ctx);
-      case "status":
-        return await product.status(ctx);
-      case "login":
-        return await product.login(ctx);
-      case "logout":
-        return await product.logout(ctx);
-      case "chat":
-        return await product.chat(ctx);
-      case "work":
-        return await product.work(ctx);
-      case "doctor":
-        return await product.doctor(ctx);
-      case "update":
-        return await product.update(ctx);
-      case "help":
-        deps.stdout(USAGE);
-        return EXIT.ok;
-      case "version":
-        write(`coderax-cli ${VERSION}`);
-        return EXIT.ok;
-      default:
-        break;
-    }
-
-    const context = requireBaseUrl(settings);
-
-    switch (command) {
-      case "health":
-        await commandHealth(context, deps, write, flags);
-        return EXIT.ok;
-      case "openapi":
-        await commandOpenapi(context, deps, write, flags);
-        return EXIT.ok;
-      case "agents":
-      case "models":
-        await commandResource(command, context, deps, write, flags);
-        return EXIT.ok;
-      case "call":
-        await commandCall(call, context, deps, write, flags);
-        return EXIT.ok;
-      default:
-        throw new UsageError(`unknown command: ${command}. Run \`coderax --help\`.`);
-    }
+    signals = installSignals(options);
+    runtime = await createRuntime({ flags, options, command });
+    runtime.args = positionals.slice(1);
+    return await dispatch(runtime, command, positionals, call, options);
   } catch (error) {
-    const known = error instanceof UsageError || error instanceof ConfigError || error instanceof CoderaxError;
-    const detail =
-      error instanceof UsageError ? error.message : `${error.code ?? "ERROR"}: ${error.message}`;
-    deps.stderr(`coderax: ${known ? detail : "unexpected failure"}\n`);
-    return exitFor(error);
+    return writeFailure(runtime, error, command, options, argv);
+  } finally {
+    signals?.cleanup();
   }
-}
-
-async function readStdin() {
-  if (process.stdin.isTTY) {
-    return "";
-  }
-  let data = "";
-  for await (const chunk of process.stdin) {
-    data += chunk;
-  }
-  return data.trim();
 }
 
 export function isEntrypoint(entry = process.argv[1]) {
   if (entry === undefined) return false;
   const modulePath = fileURLToPath(import.meta.url);
   try {
-    // npm exposes package executables as symlinks on POSIX; compare real paths.
     return realpathSync(entry) === realpathSync(modulePath);
   } catch {
     return entry === modulePath;

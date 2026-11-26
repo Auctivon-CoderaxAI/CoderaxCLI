@@ -1,73 +1,188 @@
-# CLI ↔ deployment contract
+# WorkflowEngine contract
 
-Version: CLI `0.1.0`, targeting Coderax deployments that publish an OpenAPI 3.x
-document.
+CLI `1.0.0` targets the authoritative Coderax WorkflowEngine API:
+
+- API prefix `/v1`
+- `CONTRACT_VERSION` `1.0.0`
+- `EVENT_SCHEMA_VERSION` `1`
+- OpenAPI 3.1 document generated from the engine's route catalogue
+
+The canonical sources are the WorkflowEngine repository's
+`packages/contracts` and its published `openapi.json`. This CLI contains a
+dependency-free mirror in `src/engine/contract.js`; the reviewed OpenAPI
+artifact is vendored in `contracts/workflow-engine-1.0.0.openapi.json` with its
+commit and digest in `contracts/PROVENANCE.md`. CI validates the digest, the
+route table and a live engine checkout at the same pinned commit.
 
 ## Authentication
 
-The CLI sends `Authorization: Bearer <token>` on every request. The deployment is
-responsible for issuing and revoking tokens, including the machine-client
-identities described in the Coderax repository's Agent Management API surface.
+Owner routes require `Authorization: Bearer <owner token>`. `/v1/health` and
+`/v1/ready` are `public` in the route catalogue. The CLI never sends an
+anonymous owner request, and it does not add cookies.
 
-The CLI adds no headers beyond `accept`, `authorization`, and `content-type` on
-bodies, and it never forwards cookies.
+The owner token is sent only to the configured engine origin. Redirects are
+refused. `401` triggers one token refresh attempt; if no different token is
+available, the command exits `3`.
 
-## Discovery
+## Negotiation
 
-Candidates, tried in order:
+`GET /v1/health` returns `contractVersion`. The CLI compares it with
+`CONTRACT_VERSION` before submitting Chat or Work. A mismatch exits `7` with
+`CONTRACT_MISMATCH` and both versions; the client does not partially use a
+different contract.
 
-1. `/openapi.json`
-2. `/api/openapi.json`
-3. `/.well-known/openapi.json`
+Execution events are negotiated independently. Every event carries
+`v: 1`. An event with another `v` is a contract error. An unknown event type
+with a supported `v` is skipped, so a newer engine can add event types without
+breaking an older CLI.
 
-A candidate is accepted only when it is a JSON object with an `openapi` version
-starting `3.`, a `paths` object, and at least one operation. The first accepted
-document wins; failures from every candidate are reported when none is usable.
-An `HTTP_401`, `HTTP_403`, or `REQUEST_TIMEOUT` is surfaced immediately instead
-of being hidden behind `OPENAPI_NOT_FOUND`, so authentication and timeout
-exit codes remain meaningful.
+## Routes used
 
-## Health
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/v1/health` | Public liveness, contract version, engines and capabilities |
+| `GET` | `/v1/ready` | Public readiness |
+| `GET` | `/v1/agents` | Agent identities and truthful availability |
+| `GET` | `/v1/models` | Models, cost class and free route |
+| `POST` | `/v1/chat` | One Chat turn, SSE when accepted |
+| `POST` | `/v1/work` | Submit a durable Work task (`202`) |
+| `GET` | `/v1/work/{taskId}` | Authoritative task status |
+| `POST` | `/v1/work/{taskId}/cancel` | Cancel from any replica |
+| `POST` | `/v1/work/{taskId}/resume` | Resume from checkpoint |
+| `POST` | `/v1/work/{taskId}/retry` | Retry with a new generation |
+| `GET` | `/v1/work/{taskId}/events` | Replay and tail execution events |
+| `GET` | `/v1/work/{taskId}/permissions` | Pending and decided approvals |
+| `POST` | `/v1/work/{taskId}/permissions` | Approve or deny one request |
+| `GET` | `/v1/conversations` | Shared conversation history |
+| `GET` | `/v1/conversations/{conversationId}` | Conversation with messages |
+| `GET` | `/v1/memory?mode=` | Owner-scoped memory |
+| `GET` | `/v1/notifications` | Durable completion notifications |
 
-Candidates, tried in order: `/health`, `/api/health`, `/healthz`. A `404` or `405`
-moves to the next candidate; any other failure is surfaced immediately, so an
-authentication problem is not mistaken for a missing endpoint.
+The CLI uses `eventsPath` from the submit response when supplied; otherwise it
+constructs `/v1/work/{taskId}/events`, which is the contract route.
 
-## Convenience routes
+## Work submission and idempotency
 
-| Command | Match rule |
+`WorkSubmitRequest` is strict:
+
+```json
+{
+  "objective": "string (1..200000)",
+  "conversationId": "optional id",
+  "agent": "coderax | opencode | freebuff",
+  "model": { "providerId": "...", "modelId": "..." },
+  "mode": "private | cloud",
+  "budget": { "maxRequests": 1, "maxInputTokens": 1, "maxOutputTokens": 1 },
+  "requireApproval": true
+}
+```
+
+The engine's submit operation is not idempotent. The CLI generates an
+idempotency key, persists it before sending, and sends it as `idempotency-key`
+and `x-coderax-client-request-id`. The local ledger is authoritative:
+
+- An accepted key maps to exactly one `taskId`.
+- A definite 4xx rejection is recorded as failed; it is not retried
+  automatically.
+- A timeout, lost response, `408`, `429` or `5xx` leaves the outcome unknown and
+  records `SUBMISSION_UNCERTAIN`. The CLI exits `9` and does not submit again.
+- `coderax work resolve <key> <taskId>` binds the key to the task that actually
+  exists. `--retry-submission` is an explicit owner decision to submit again.
+
+The engine may ignore the advisory header; this does not weaken the at-most-once
+behavior, because the CLI never sends the same key twice without explicit
+confirmation.
+
+## Task control
+
+`POST .../cancel` accepts `{ "reason"?: string }`.
+`POST .../resume` and `.../retry` require the current `generation`.
+Responses are `TaskControlResult`:
+
+```json
+{ "taskId": "...", "state": "queued", "generation": 0, "outcome": "accepted" }
+```
+
+`outcome` is `accepted`, `already_terminal`, `not_found` or `superseded`. The
+CLI reports the engine's outcome; it never pretends a request succeeded.
+
+## Execution events
+
+Envelope fields: `v`, `eventId`, `taskId`, `seq`, `at`, `agent`, `generation`,
+`type`, and `payload` for types that need one.
+
+| Type | Payload |
 | --- | --- |
-| `agents` | first `GET` operation whose path ends in `/agents` |
-| `models` | first `GET` operation whose path ends in `/models` |
+| `task.queued` | none |
+| `task.started` | optional `{ sessionId? }` |
+| `step.started`, `step.completed` | `{ stepId, title }` |
+| `text.delta` | `{ text }` (non-empty) |
+| `text.replace` | `{ text }` (may be empty) |
+| `tool.call` | `{ callId, tool, input? }` |
+| `tool.result` | `{ callId, tool, ok, output? }` |
+| `file.edit` | `{ path }` |
+| `approval.required` | `{ requestId, tool, description }` |
+| `usage` | `{ inputTokens?, outputTokens? }` |
+| `task.completed` | optional `{ summary?, model?, usage? }` |
+| `task.failed` | `{ code, retryable, detail? }` |
+| `task.cancelled` | `{ reason? }` |
+| `task.interrupted` | `{ detail }` |
 
-No path is hardcoded. When the match is absent the CLI exits `1` with
-`OPERATION_NOT_FOUND` and suggests `coderax openapi`.
+Terminal events are `task.completed`, `task.failed`, `task.cancelled` and
+`task.interrupted`. Terminal task states also include `interrupted`.
 
-## Requests
+## Cursors, replay and deduplication
 
-- Route paths are appended beneath the configured deployment prefix, so
-  `--base-url https://example.com/coderax` requests
-  `https://example.com/coderax/health`, not `https://example.com/health`.
-- `call <METHOD> <PATH> [--data <json>]` — `--data` is rejected on `GET`/`HEAD`.
-- Bodies are serialized as JSON; responses are parsed as JSON when possible and
-  shown verbatim otherwise.
-- Timeout: 15s default, `--timeout` or `CODERAX_TIMEOUT_MS` to override.
-- Redirects are refused.
+`GET /v1/work/{taskId}/events` accepts `?after=<seq>` and honours
+`Last-Event-ID`. The CLI sends both. Sequence numbers are monotonic per task
+and start at 1.
 
-## Exit codes
+- An event with `seq <= lastSeq` is ignored.
+- A repeated `eventId` is ignored.
+- `seq != lastSeq + 1` is a gap. The CLI does not apply the frame; it reconnects
+  from `lastSeq`. More than three gaps exits `7` with `EVENT_GAP` rather than
+  silently losing an event.
+- A stream that closes without a terminal event re-reads task status. If the
+  task is still active, it reconnects with bounded exponential backoff and
+  jitter. If the status is terminal, that authoritative state is used.
+- After the reconnect budget, the CLI exits with `STREAM_INTERRUPTED`, including
+  the cursor, and tells the owner to attach again. The cloud task is not
+  cancelled.
 
-- `0` success
-- `1` other operational failure (missing operation, unavailable health check,
-  other non-2xx HTTP status)
-- `2` usage error or invalid configuration
-- `3` HTTP 401/403 authentication or authorization failure
-- `4` network failure or timeout
-- `5` HTTP 404 not found
-- `6` Cloud/projects unavailable
-- `130` cancelled
+## Problems and exit codes
 
-## Compatibility
+Errors use the engine's Problem document:
 
-The CLI depends only on the OpenAPI document shape and bearer auth. Adding routes
-to a deployment does not require a CLI release; removing a route degrades the
-matching command to `OPERATION_NOT_FOUND` while `coderax call` keeps working.
+```json
+{
+  "type": "https://...",
+  "title": "...",
+  "status": 409,
+  "code": "conflict",
+  "detail": "...",
+  "requestId": "...",
+  "retryable": false
+}
+```
+
+`code` is preserved in machine output. HTTP `401`/`403` maps to exit `3`,
+`404` to `5`, `408`/network to `4`, `409`/`busy` to `10`, `429` and `5xx` are
+retryable where the operation is safe, and `permission_required`/approval to
+`8`. Unknown codes are reported, not invented.
+
+## Legacy deployment surface
+
+`coderax deploy ...`, `coderax call`, `coderax products`, `coderax cloud` and
+`coderax projects` address an older OpenAPI deployment, not the WorkflowEngine
+`/v1` API. They are retained for compatibility. They do not fall back to a
+different engine, and they never execute a workflow locally.
+
+## Compatibility policy
+
+- A CLI release pins one `CONTRACT_VERSION` and one `EVENT_SCHEMA_VERSION`.
+- Adding routes or event types is backward compatible for this client: unknown
+  event types are skipped, and unused routes are ignored.
+- Changing a validated field, removing a route, or changing an enum is a
+  contract change and requires a CLI release.
+- The pinned engine commit and its `openapi.json` are checked in CI. Update the
+  pin only after reviewing the engine's contract diff and running the CLI suite.

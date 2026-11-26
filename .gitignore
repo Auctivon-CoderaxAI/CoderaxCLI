@@ -1,8 +1,12 @@
 node_modules/
-.coderax/config.json
+dist/
+.coderax/
+.engine/
+.engine-check/
 .env
 .env.*
 !.env.example
 coverage/
 *.log
+*.tgz
 .DS_Store

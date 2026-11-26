@@ -1,8 +1,8 @@
 {
   "name": "coderax-cli",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
-  "description": "Canonical Coderax CLI: chat, Work mode, products, login, health, OpenAPI discovery, and authenticated calls",
+  "description": "Coderax terminal client: interactive Chat and Work, durable WorkflowEngine tasks, cloud engineering workflows, notifications and approvals",
   "type": "module",
   "bin": {
     "coderax": "src/cli.js"
@@ -10,9 +10,45 @@
   "engines": {
     "node": ">=24"
   },
+  "files": [
+    "src",
+    "contracts",
+    "docs",
+    "README.md",
+    "ARCHITECTURE.md",
+    "SECURITY.md",
+    "CHANGELOG.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Auctivon-CoderaxAI/CoderaxCLI.git"
+  },
+  "homepage": "https://github.com/Auctivon-CoderaxAI/CoderaxCLI",
+  "bugs": {
+    "url": "https://github.com/Auctivon-CoderaxAI/CoderaxCLI/issues"
+  },
+  "keywords": [
+    "coderax",
+    "cli",
+    "terminal",
+    "workflow-engine",
+    "coding-agent"
+  ],
+  "coderax": {
+    "contractVersion": "1.0.0",
+    "eventSchemaVersion": 1,
+    "sdk": "@coderax/sdk@1.0.0"
+  },
   "scripts": {
-    "start": "node src/cli.js --help",
-    "test": "node --test",
-    "check": "node --check src/config.js && node --check src/client.js && node --check src/discover.js && node --check src/cli.js && node --check src/product-commands.js && node --check src/product-registry.js && node --check src/version.js"
+    "start": "node src/cli.js",
+    "check": "node scripts/check.mjs",
+    "test": "node --test \"test/**/*.test.js\"",
+    "test:integration": "node --test \"test/integration/**/*.test.js\"",
+    "test:contract": "node scripts/check-contract.mjs",
+    "test:engine": "node --test \"test/integration/engine.test.js\"",
+    "verify": "npm run check && npm test && npm run test:contract && npm run pack:check",
+    "pack:check": "node scripts/verify-pack.mjs",
+    "release:build": "node scripts/package-release.mjs",
+    "fixture:engine": "node test/fixtures/engine-server.js"
   }
 }

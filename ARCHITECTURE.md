@@ -1,61 +1,105 @@
 # Architecture
 
-```
-argv ──► parseArgv ──► preflight ──► resolveSettings ──► command
-                          │              │                │
-                     usage errors   config.js        health / openapi /
-                     (exit 2)       (env + file)     agents / models / call
-                                                        │
-                                                        ├─► discover.js (OpenAPI)
-                                                        └─► client.js (HTTP + SSE)
+`coderax` is a thin terminal client. It renders cloud execution; it never
+performs it.
 
-product commands (chat / work / products / cloud / login / doctor)
-  └─► product-commands.js ─► product-registry.js
-                           ├─► client.js (HTTP + SSE)
-                           └─► config.js (atomic 0600 config)
+```
+argv
+  │
+  ▼
+src/cli.js ── parse ── preflight ── dispatch ── exit code
+  │                                      │
+  │                                      ├─ interactive/app.js
+  │                                      ├─ commands/work.js ── engine/{client,submit,stream}
+  │                                      ├─ commands/chat.js ── engine/client.js
+  │                                      ├─ commands/{agents,models,...} ── engine/client.js
+  │                                      └─ commands/deploy.js ── legacy client.js
+  │
+  └─ runtime.js ── config.js ── credentials.js
+                ├─ state.js   (durable local journal)
+                └─ redact.js  (all output paths)
 ```
 
 ## Layers
 
-| Module | Responsibility | Knows about |
-| --- | --- | --- |
-| `src/config.js` | resolve, validate, persist deployment settings | filesystem, environment |
-| `src/client.js` | one HTTP request, error mapping, redaction | `fetch` only |
-| `src/discover.js` | find and summarize the OpenAPI document | client |
-| `src/product-registry.js` | canonical five-product status data | none |
-| `src/product-commands.js` | chat, Work, products, Cloud, login, doctor | config, client, registry |
-| `src/cli.js` | parsing, preflight, dispatch, output | all of the above |
+| Module | Responsibility |
+| --- | --- |
+| `src/cli.js` | Argument parsing, preflight, command dispatch, help, exit-code mapping |
+| `src/runtime.js` | Composition root: config, token provider, engine client, journal, output, redaction |
+| `src/config.js` | URL/timeout validation, config precedence, atomic `0600` config writes |
+| `src/credentials.js` | Keychain / DPAPI / Secret Service / fallback storage, helper execution |
+| `src/state.js` | Lock-protected local journal: active conversations, tasks, cursors, history |
+| `src/engine/contract.js` | Strict dependency-free contract mirror and validators, with the pinned engine OpenAPI artifact in `contracts/` |
+| `src/engine/client.js` | `/v1` requests, Problem mapping, contract negotiation, auth refresh, capability checks |
+| `src/engine/stream.js` | SSE cursor replay, reconnect, dedupe, gap detection, final status reconciliation |
+| `src/engine/submit.js` | At-most-once Work submission and the idempotency ledger |
+| `src/commands/*` | Chat, Work, auth, config, sessions, notifications, permissions, completion, deploy |
+| `src/interactive/app.js` | Readline shell, slash commands, prompt state, approvals, detachment |
+| `src/ui/*` | ANSI, incremental Markdown/code rendering, Spinner, PromptSession, tables, presenter |
+| `src/work/templates.js` | Cloud-work objectives and their capability requirements |
+| `src/product-*`, `src/discover.js`, `src/client.js` | Legacy deployment/OpenAPI surface |
 
-Each layer is injectable: tests pass `fetchImpl`, `env`, `stdout`, and file
-readers, so the suite runs offline and never touches a real deployment.
+## Cloud execution boundary
 
-## Ordering rules
+The CLI has no inference client, model runtime, sandbox, build runner or local
+agent. `chat`, `work` and every engineering template serialize an objective and
+send it to the WorkflowEngine. The only local processes are the OS credential
+helper (`security`, `secret-tool`, `powershell`) and an explicitly configured
+token-refresh command.
 
-`preflight` runs before config resolution on purpose. `coderax deplyo` must say
-"unknown command", not "no base URL configured". Usage errors exit `2`, so
-scripts can separate a bad invocation from a failed deployment.
+## Work flow
 
-## Failure semantics
+1. Resolve config, owner token, engine URL and selected agent.
+2. Fetch health, negotiate `contractVersion`, fetch agents/models.
+3. Validate the agent's `tools`, `durable`, `resume` and `modelSelection`
+   capabilities before submitting a template or detaching.
+4. Create or reuse an idempotency key; persist an `inflight` ledger entry.
+5. `POST /v1/work`; a definite 4xx rejection clears the attempt, an ambiguous
+   network/timeout outcome becomes `SUBMISSION_UNCERTAIN`.
+6. Stream `/v1/work/{taskId}/events?after=<seq>` with `Last-Event-ID`, or read
+   `eventsPath` when the engine supplies it.
+7. Persist event sequence and task state after every applied event; render
+   text, tool calls, file edits, steps, usage and approvals.
+8. On disconnect, reconnect from the persisted cursor. On a terminal event or
+   exhausted reconnect, fetch `GET /v1/work/{taskId}` and use the authoritative
+   state and artifacts.
+9. Exit with the task's state and the shared exit-code table.
 
-| Condition | Code | Exit |
-| --- | --- | --- |
-| unknown command or flag misuse | `UsageError` | 2 |
-| HTTPS violated, bad URL, bad timeout | `BASE_URL_*`, `TIMEOUT_INVALID` | 2 |
-| no deployment configured | `BASE_URL_REQUIRED` | 1 |
-| request timeout | `REQUEST_TIMEOUT` | 4 |
-| redirect or network failure | `REQUEST_FAILED` | 4 |
-| HTTP 401 or 403 | `HTTP_401`, `HTTP_403` | 3 |
-| HTTP 404 | `HTTP_404` | 5 |
-| other non-2xx response | `HTTP_<status>` | 1 |
-| no OpenAPI document | `OPENAPI_NOT_FOUND` | 1 |
-| route absent from the document | `OPERATION_NOT_FOUND` | 1 |
-| Cloud or projects unavailable | `UNAVAILABLE` | 6 |
-| cancelled by the caller | `CANCELLED` | 130 |
+## Local durability
+
+`state.json` lives beside the config, is written atomically under a lock, and
+holds only non-secret data: active mode and conversations, selected agent/model,
+task cursors/status, a bounded submission ledger, seen notification keys and
+per-mode input history. Cross-process updates re-read under the lock before
+writing, so two terminals do not overwrite each other's active conversation or
+submission ledger.
+
+## Authentication
+
+Token precedence: explicit one-shot flag, `CODERAX_ENGINE_TOKEN`,
+`CODERAX_TOKEN`, OS credential store, legacy config token. The legacy value is
+returned so `login` can migrate it and remove it from disk.
+
+On `401`, the engine client invokes the token provider once. The provider can
+run the configured refresh helper (explicit argv, no shell) or reload a newly
+stored token. If neither produces a different token, the request fails with
+`AUTH_REFRESH_UNAVAILABLE`; it never retries indefinitely.
+
+## Output and errors
+
+`--json` produces one document; `--ndjson` produces one event per line plus a
+final result. Human progress is suppressed or sent to stderr in these modes.
+All text passes through the redactor, which knows the current token and any
+`CODERAX_ENGINE_TOKEN`/`CODERAX_TOKEN` environment secret. Errors are typed and
+mapped by `src/errors.js`; the exit code is part of the public interface.
 
 ## Deliberate constraints
 
-- No retries. A caller that wants retries wraps the command.
-- No redirects: `redirect: "error"` prevents a token being forwarded to another host.
-- No persistent HTTP agent, cookie jar, or telemetry.
-- One request per command except `agents`/`models`, which discover first.
-- The token is never serialized into output, config summaries, or error text.
+- No local workflow engine or fallback execution path.
+- No provider API keys read, stored, logged or inherited.
+- No anonymous owner operations.
+- No redirects, cookies, telemetry or background daemon.
+- No automatic retry of an ambiguous Work submission.
+- No registry publication; releases are GitHub archives with checksums.
+- The legacy OpenAPI deployment commands remain separate from `/v1` engine
+  commands so a deployment URL cannot be mistaken for a WorkflowEngine.
