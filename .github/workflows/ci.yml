@@ -1,9 +1,13 @@
 name: ci
 
+# Every pushed branch is verified, not only main: a feature branch gets hosted
+# Linux, Windows and macOS evidence before a pull request exists. Pull requests
+# are verified again at the exact head.
 on:
   push:
-    branches: [main]
+    branches: ["**"]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
