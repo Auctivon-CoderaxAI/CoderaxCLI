@@ -45,6 +45,16 @@ test("every supported shell gets a marker, every command, and every flag", () =>
   }
 });
 
+test("descriptions with apostrophes are escaped for every shell", () => {
+  const scripts = Object.fromEntries(COMPLETION_SHELLS.map((shell) => [shell, completionScript(shell)]));
+  for (const [shell, script] of Object.entries(scripts)) {
+    assert.doesNotMatch(script, /deployment's/, `${shell} contains an unescaped apostrophe`);
+  }
+  assert.match(scripts.zsh, /deployment'\\''s/);
+  assert.match(scripts.fish, /deployment\\'s/);
+  assert.match(scripts.powershell, /deployment''s/);
+});
+
 test("each shell script uses its own completion mechanism", () => {
   assert.match(completionScript("bash"), /complete -F _coderax_complete coderax/);
   assert.match(completionScript("zsh"), /^#compdef coderax/m);

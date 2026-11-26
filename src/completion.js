@@ -22,6 +22,12 @@ export const COMPLETION_FLAGS = Object.freeze(
 const COMMAND_NAMES = COMPLETION_COMMANDS.map(([name]) => name);
 const VALUE_FLAGS = COMPLETION_FLAGS.filter(([, , takesValue]) => takesValue).map(([flag]) => flag);
 
+// Descriptions are prose and can contain apostrophes. Every generator quotes
+// them with the target shell's own escaping rules.
+const posixQuote = (value) => value.replaceAll("'", "'\\''");
+const fishQuote = (value) => value.replaceAll("\\", "\\\\").replaceAll("'", "\\'");
+const powershellQuote = (value) => value.replaceAll("'", "''");
+
 function bashScript() {
   return `# coderax-cli ${VERSION} bash completion
 ${COMPLETION_MARKER}
@@ -83,9 +89,12 @@ complete -F _coderax_complete coderax
 }
 
 function zshScript() {
-  const commandLines = COMPLETION_COMMANDS.map(([name, description]) => `    '${name}:${description}'`).join("\n");
+  const commandLines = COMPLETION_COMMANDS.map(
+    ([name, description]) => `    '${posixQuote(`${name}:${description}`)}'`,
+  ).join("\n");
   const flagLines = COMPLETION_FLAGS.map(
-    ([flag, description, takesValue]) => `    '${flag}[${description}]${takesValue ? ":value:" : ""}' \\`,
+    ([flag, description, takesValue]) =>
+      `    '${posixQuote(`${flag}[${description}]`)}${takesValue ? ":value:" : ""}' \\`,
   ).join("\n");
   return `#compdef coderax
 ${COMPLETION_MARKER}
@@ -124,11 +133,12 @@ _coderax "$@"
 
 function fishScript() {
   const commandLines = COMPLETION_COMMANDS.map(
-    ([name, description]) => `complete -c coderax -n '__fish_use_subcommand' -a ${name} -d '${description}'`,
+    ([name, description]) =>
+      `complete -c coderax -n '__fish_use_subcommand' -a ${name} -d '${fishQuote(description)}'`,
   ).join("\n");
   const flagLines = COMPLETION_FLAGS.map(
     ([flag, description, takesValue]) =>
-      `complete -c coderax -l ${flag.replace(/^--/, "")}${takesValue ? " -r" : ""} -d '${description}'`,
+      `complete -c coderax -l ${flag.replace(/^--/, "")}${takesValue ? " -r" : ""} -d '${fishQuote(description)}'`,
   ).join("\n");
   return `# coderax-cli ${VERSION} fish completion
 ${COMPLETION_MARKER}
@@ -146,10 +156,12 @@ ${flagLines}
 
 function powershellScript() {
   const commandEntries = COMPLETION_COMMANDS.map(
-    ([name, description]) => `    @{ Name = '${name}'; Description = '${description}' }`,
+    ([name, description]) =>
+      `    @{ Name = '${name}'; Description = '${powershellQuote(description)}' }`,
   ).join("\n");
   const flagEntries = COMPLETION_FLAGS.map(
-    ([flag, description]) => `    @{ Name = '${flag}'; Description = '${description}' }`,
+    ([flag, description]) =>
+      `    @{ Name = '${flag}'; Description = '${powershellQuote(description)}' }`,
   ).join("\n");
   const quoted = (values) => values.map((value) => `'${value}'`).join(", ");
   return `# coderax-cli ${VERSION} PowerShell completion
