@@ -8,12 +8,14 @@ PR descriptions.
 | --- | --- | --- |
 | #4 `ci/fix-work-sse-fixtures` | `0932259` | 1 file, +7/−7: real newlines in the Work SSE fixtures |
 | #5 `feat/owner-cloud-client-contract` | `5ca4d70` | 28 files, +5075/−423: owner client, shared workflow SDK, contract tests |
-| #6 `freebuff/980c7f6b…` | `327d3ea` | 57 files, +9704/−423: release 0.3.0, installers, shared SDK, workflow commands |
+| #6 `freebuff/980c7f6b…` | `89c4038` | 57 files, +9748/−423: release 0.3.0, installers, shared SDK, workflow commands |
 | feature branch | `d2c086d` | 46 files, +8324/−18: bounded interactive terminal, secure store, terminal tests |
 
 The reconciled branch is based on PR #6's head, not on `main`, so its release
 engineering, installers, shared SDK and contract tests are preserved rather
-than copied.
+than copied. PR #6 advanced twice during this work (`327d3ea` → `90a4b0f` →
+`89c4038`, both installer fixes); the final tree merges `89c4038`, so those
+fixes are included rather than overwritten.
 
 ## Capability comparison
 
@@ -66,6 +68,10 @@ than copied.
   `SHA256SUMS`, SPDX SBOM and release manifest.
 - `npm run verify`: tarball contents, checksums, installer safety, spawn
   allowlist and documented files.
+- `npm run install-test`: 20/20 checks, including install into a path with
+  spaces and Unicode, hostile archives, SSE through the installed launcher,
+  rollback, credential-leak scanning and uninstall. Repeated after merging PR
+  #6's Unicode/launcher installer fixes.
 
 ## Not verified here, and why
 
