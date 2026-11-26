@@ -1,3 +1,9 @@
+> **Private-repository note (GitHub Free):** GitHub artifact attestations are
+> public-repository-only on Free. Releases are signed with keyless Sigstore and
+> publish a `.sigstore.json` bundle next to each asset; verify with
+> `cosign verify-blob --bundle …`. npm provenance is also public-only and is not
+> produced from a private repository.
+
 # Security
 
 ## Credentials
