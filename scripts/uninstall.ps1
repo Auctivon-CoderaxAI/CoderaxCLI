@@ -45,10 +45,25 @@ foreach ($target in $targets) {
   Remove-Item -LiteralPath $target -Recurse -Force
 }
 
-# Only remove the launcher when it came from this prefix.
+# Only remove the launcher when it came from this prefix. The Windows shim
+# keeps its entrypoint base64-encoded so paths with spaces and Unicode survive
+# cmd.exe, so inspect both the literal text and the embedded payload.
 if (Test-Path -LiteralPath $launcher) {
   $content = Get-Content -Raw -LiteralPath $launcher
-  if ($content -and $content.Contains($Prefix)) {
+  $marker = $Prefix.TrimEnd([char]'\') + '\'
+  $owned = [bool]($content -and $content.Contains($marker))
+  if (-not $owned -and $content) {
+    $pattern = 'Buffer\.from\(''([A-Za-z0-9+/=]+)'',\s*''base64''\)'
+    foreach ($encoded in [regex]::Matches($content, $pattern)) {
+      try {
+        $decoded = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($encoded.Groups[1].Value))
+      } catch {
+        continue
+      }
+      if ($decoded.Contains($marker)) { $owned = $true; break }
+    }
+  }
+  if ($owned) {
     Remove-Item -LiteralPath $launcher -Force
   } else {
     Write-Warning "leaving $launcher (it does not reference $Prefix)"
