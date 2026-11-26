@@ -57,7 +57,7 @@ test("login verifies and stores a token, then status masks it and logout removes
   const env = { CODERAX_CONFIG: file };
   const fetchImpl = async (url) => {
     assert.match(String(url), /\/api\/user$/);
-    return new Response(JSON.stringify({ email: "dev@coderax.test" }), {
+    return new Response(JSON.stringify({ email: "dev@coderax.test", role: "ADMIN" }), {
       status: 200,
       headers: { "Content-Type": "application/json" },
     });
@@ -65,8 +65,14 @@ test("login verifies and stores a token, then status masks it and logout removes
 
   const loginIo = capture();
   const loginCode = await runCli(
-    ["login", "--base-url", "https://coderax.test", "--token", TOKEN, "--json"],
-    { env, fetchImpl, stdout: loginIo.stdout, stderr: loginIo.stderr, stdinIsTTY: true },
+    ["login", "--base-url", "https://coderax.test", "--json"],
+    {
+      env: { CODERAX_CREDENTIAL_STORE: "file", ...env },
+      fetchImpl,
+      stdout: loginIo.stdout,
+      stderr: loginIo.stderr,
+      readSecret: async () => TOKEN,
+    },
   );
   assert.equal(loginCode, 0);
   assert.equal(loginIo.out().includes(TOKEN), false);
