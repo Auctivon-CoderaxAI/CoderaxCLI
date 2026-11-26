@@ -31,6 +31,7 @@ export const COMMANDS = Object.freeze([
 ]);
 
 export const WORK_SUBCOMMANDS = Object.freeze([
+  "run",
   "submit",
   "list",
   "status",

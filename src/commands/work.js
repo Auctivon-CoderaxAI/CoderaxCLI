@@ -6,11 +6,9 @@ import { WorkPresenter, renderTaskStatus } from "../ui/presenter.js";
 import { PromptSession, Spinner } from "../ui/prompt.js";
 import { renderTable } from "../ui/tables.js";
 import { parseModelRef } from "../engine/submit.js";
+import { WORK_SUBCOMMANDS } from "./registry.js";
 
-const SUBCOMMANDS = new Set([
-  "submit", "list", "status", "watch", "attach", "report", "cancel", "resume",
-  "retry", "resolve", "uncertain", "templates",
-]);
+const SUBCOMMANDS = new Set(WORK_SUBCOMMANDS);
 
 const TERMINAL = new Set(["completed", "failed", "cancelled", "interrupted"]);
 

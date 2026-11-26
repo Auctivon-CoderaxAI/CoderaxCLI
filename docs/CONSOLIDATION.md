@@ -92,7 +92,7 @@ Top-level commands in `src/commands/registry.js`:
 `products`, `cloud`, `projects`, `update`, `deploy`, `health`, `openapi`, `call`,
 `help`, `version`.
 
-Work subcommands: `submit`, `list`, `status`, `watch`, `attach`, `report`,
+Work subcommands: `run`, `submit`, `list`, `status`, `watch`, `attach`, `report`,
 `cancel`, `resume`, `retry`, `resolve`, `uncertain`, `templates`.
 
 The legacy `deploy`, `products`, `cloud`, `projects`, `openapi` and `call`
