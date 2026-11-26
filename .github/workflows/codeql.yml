@@ -3,6 +3,7 @@ name: CodeQL
 # Static security analysis for the JavaScript and TypeScript sources. This is a
 # verification job: it never deploys anything and uses only standard
 # GitHub-hosted runners. Findings are uploaded as SARIF to the Security tab.
+# Actions are pinned to full commit SHAs; the comment records the release.
 
 on:
   push:
@@ -30,17 +31,17 @@ jobs:
       security-events: write
     steps:
       - name: Check out source
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4
+        uses: github/codeql-action/init@915412ff23e8b7659517e607487dbeae018f2934 # v4.39.5
         with:
           languages: javascript-typescript
           build-mode: none
 
       - name: Analyze
-        uses: github/codeql-action/analyze@v4
+        uses: github/codeql-action/analyze@915412ff23e8b7659517e607487dbeae018f2934 # v4.39.5
         with:
           category: /language:javascript-typescript
