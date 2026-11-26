@@ -75,10 +75,11 @@ and fails if the bearer token appears anywhere.
 - `install.sh` and `install.ps1` verify the archive against the release
   `SHA256SUMS` by default and refuse to install on a mismatch. `--from-file`
   requires `--checksum` unless verification is explicitly disabled.
-- `--provenance` / `-Provenance` (or `CODERAX_REQUIRE_PROVENANCE=1`) runs
-  `gh attestation verify` against the repository. This is opt-in because the
-  release workflow does not publish attestations until the owner authorizes a
-  release; checksums are always enforced.
+- `--provenance` / `-Provenance` (or `CODERAX_REQUIRE_PROVENANCE=1`) verifies
+  the archive with Cosign against the CoderaxCLI release workflow and the
+  GitHub Actions OIDC issuer. When no bundle exists, the installer requires
+  a valid GitHub attestation for legacy releases. Verification failure stops
+  installation.
 - Builds are reproducible: fixed metadata, sorted entries, fixed compression and
   a fixed `SOURCE_DATE_EPOCH`. `npm run repro` proves two builds are identical.
 - An SPDX SBOM (`sbom.spdx.json`) records the package and its zero runtime

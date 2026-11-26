@@ -1,0 +1,4 @@
+# Synthetic input for the terminal's sensitive prompt detector.
+1402b3fdd613b5346335fcf9511149441e11e720:test/terminal-history.test.js:generic-api-key:37
+# OpenAPI SHA-256 digest in contract metadata.
+6984f84ffad61f4033f8fbbacf2c619eb19aa92a:src/contract.js:generic-api-key:26

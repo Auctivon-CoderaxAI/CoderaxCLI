@@ -80,7 +80,7 @@ jobs:
       # Keyless Sigstore signing is free for private repositories and produces a
       # portable bundle that ships beside each asset.
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@d7543c93d881b35a8faa02e8e3605f69b7a1ce62 # v3.10.0
       - name: Sign release assets with Sigstore
         run: |
           set -euo pipefail
@@ -115,9 +115,9 @@ jobs:
   npm:
     name: publish to npm (requires authorization)
     needs: release
-    # Triple gate: a manual dispatch that explicitly asks to publish, a
-    # repository variable the owner sets, and the protected "npm-publish"
-    # environment (configure required reviewers in repository settings).
+    # Requires an explicit manual dispatch and an owner-set repository variable.
+    # Configure npm-publish reviewers where supported. On private GitHub Free,
+    # keep NPM_PUBLISH_ENABLED unset until a replacement approval control exists.
     # package.json is also "private": true until the owner authorizes
     # publication, so even a misconfigured run is refused by npm.
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_npm == true && vars.NPM_PUBLISH_ENABLED == 'true' }}
@@ -125,7 +125,7 @@ jobs:
     environment: npm-publish
     permissions:
       contents: read
-      id-token: write # trusted publishing / provenance, no long-lived token
+      id-token: write # trusted publishing, no long-lived token
     steps:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -149,7 +149,7 @@ jobs:
         run: |
           cd dist
           sha256sum -c SHA256SUMS --ignore-missing
-      - name: Publish with provenance
+      - name: Publish to npm
         run: |
           version="$(node -p 'require("./package.json").version')"
           # npm provenance requires a public source repository; private Free cannot use it.
