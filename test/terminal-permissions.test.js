@@ -172,7 +172,10 @@ test("canonical resources normalise only where that is safe", () => {
   assert.equal(canonicalResource("run_command", "  ls   -la ", { platform: "linux" }).value, "ls   -la");
   assert.equal(canonicalResource("network", "https://user:pass@example.com/x", { platform: "linux" }).ok, false);
   assert.equal(canonicalResource("network", "https://example.com/x").value, "https://example.com/x");
-  assert.equal(canonicalResource("send_files", JSON.stringify(["/b", "/a"])).value, JSON.stringify(["/a", "/b"]));
+  assert.equal(
+    canonicalResource("send_files", JSON.stringify(["/b", "/a"]), { platform: "linux" }).value,
+    JSON.stringify(["/a", "/b"]),
+  );
 });
 
 test("verifyPermissionRequest reports scopes and display values", () => {

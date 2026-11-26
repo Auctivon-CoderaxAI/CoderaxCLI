@@ -103,7 +103,12 @@ test("clearing removes the file", async () => {
 });
 
 test("historyPathFor honours the override and lives beside the config", () => {
-  assert.equal(historyPathFor("/home/me/.coderax/config.json"), "/home/me/.coderax/history.json");
+  // Built with join() so the expectation follows the host separator instead of
+  // asserting POSIX paths on Windows.
+  assert.equal(
+    historyPathFor(join("/home/me", ".coderax", "config.json")),
+    join("/home/me", ".coderax", "history.json"),
+  );
   assert.equal(historyPathFor("/x/config.json", { CODERAX_HISTORY_FILE: "/tmp/h.json" }), "/tmp/h.json");
 });
 
