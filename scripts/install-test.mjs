@@ -66,6 +66,15 @@ async function step(name, fn) {
   } catch (error) {
     results.push({ name, ok: false, detail: error.message, ms: Date.now() - started });
     console.error(`  x   ${name}\n      ${error.message.split("\n").join("\n      ")}`);
+    // Job logs need repository access; the check-run annotation does not, so a
+    // failure on a hosted runner stays reviewable from a public repository.
+    const annotation = `${name}: ${error.message}`
+      .split("%")
+      .join("%25")
+      .split("\n")
+      .join("%0A")
+      .slice(0, 6000);
+    console.log(`::error title=Installation acceptance failed::${annotation}`);
     throw error;
   }
 }
