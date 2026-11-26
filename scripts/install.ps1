@@ -205,9 +205,14 @@ try {
   # A shim rather than a copied launcher: the shipped launcher resolves paths
   # relative to its own location, so copying it would break.
   try {
+    # cmd.exe reads a .cmd file in the console's OEM code page, so an ASCII
+    # write would replace non-ASCII prefix characters with '?' and break the
+    # launcher. Write in the OEM code page cmd will actually use.
     $shim = "@echo off`r`ncall `"$destination\bin\coderax.cmd`" %*`r`nexit /b %ERRORLEVEL%`r`n"
     $tmpLauncher = "$launcher.new"
-    Set-Content -LiteralPath $tmpLauncher -Value $shim -Encoding ascii -NoNewline
+    $oem = [System.Text.Encoding]::GetEncoding(
+      [System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
+    [System.IO.File]::WriteAllText($tmpLauncher, $shim, $oem)
     Move-Item -LiteralPath $tmpLauncher -Destination $launcher -Force
   } catch {
     Remove-Item -LiteralPath $destination -Recurse -Force -ErrorAction SilentlyContinue
