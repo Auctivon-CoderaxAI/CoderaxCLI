@@ -1,0 +1,136 @@
+{
+  "schemaVersion": 1,
+  "contract": "workflow-engine",
+  "sharedClient": {
+    "module": "src/client.js",
+    "version": "0.1.0"
+  },
+  "api": {
+    "versionField": "info.version",
+    "minimum": "1.0.0",
+    "supportedMajors": [1]
+  },
+  "requiredOperations": [
+    "GET /health",
+    "GET /api/user",
+    "GET /api/models",
+    "GET /api/agents",
+    "POST /api/ask/agents",
+    "POST /api/work/chat"
+  ],
+  "unsupportedOperations": [
+    "GET /api/work/chat/{streamId}/events",
+    "POST /api/work/chat/{streamId}/cancel"
+  ],
+  "capabilities": [
+    {
+      "id": "executable-entrypoints",
+      "status": "supported",
+      "description": "bin entry, shebang, executable bit, and installed shim",
+      "verifiedBy": ["test/package.test.js"]
+    },
+    {
+      "id": "shared-sdk-integrity",
+      "status": "supported",
+      "description": "the shared WorkflowEngine client is dependency-free ESM with a stable export surface",
+      "verifiedBy": ["test/package.test.js"]
+    },
+    {
+      "id": "command-registration",
+      "status": "supported",
+      "description": "every documented command is registered and dispatched, never reported as unknown",
+      "verifiedBy": ["test/cli.test.js"]
+    },
+    {
+      "id": "owner-auth",
+      "status": "supported",
+      "description": "only the instance owner token is accepted; 401 and 403 map to exit 3",
+      "verifiedBy": ["test/integration/cli-http.test.js"]
+    },
+    {
+      "id": "credential-storage",
+      "status": "supported",
+      "description": "credentials persist atomically at 0600 and never appear in output",
+      "verifiedBy": ["test/integration/cli-http.test.js"]
+    },
+    {
+      "id": "chat-streaming",
+      "status": "supported",
+      "description": "chat consumes SSE deltas over a real socket",
+      "verifiedBy": ["test/integration/cli-http.test.js"]
+    },
+    {
+      "id": "work-submission",
+      "status": "supported",
+      "description": "work posts to the native Work route and consumes cumulative snapshots and final text",
+      "verifiedBy": ["test/integration/cli-http.test.js"]
+    },
+    {
+      "id": "stream-integrity",
+      "status": "supported",
+      "description": "a Work stream that ends without a final frame fails instead of reporting success",
+      "verifiedBy": ["test/integration/cli-http.test.js"]
+    },
+    {
+      "id": "cancellation",
+      "status": "supported",
+      "description": "an aborted run stops streaming and exits 130",
+      "verifiedBy": ["test/integration/cli-http.test.js"]
+    },
+    {
+      "id": "error-codes",
+      "status": "supported",
+      "description": "documented exit codes 0-6 and 130 are produced for their conditions",
+      "verifiedBy": ["test/integration/cli-http.test.js"]
+    },
+    {
+      "id": "api-version-compatibility",
+      "status": "supported",
+      "description": "required operations and a supported API version are enforced before CI passes",
+      "verifiedBy": ["test/contract.test.js"]
+    },
+    {
+      "id": "release-artifact-integrity",
+      "status": "supported",
+      "description": "byte-reproducible release tarballs, checksums, and extracted content verification",
+      "verifiedBy": ["test/release.test.js"]
+    },
+    {
+      "id": "dependency-security",
+      "status": "supported",
+      "description": "no runtime dependencies, no install scripts, no stale or vulnerable lockfile",
+      "verifiedBy": ["test/standalone.test.js"]
+    },
+    {
+      "id": "workload-isolation",
+      "status": "supported",
+      "description": "the installed CLI has no local inference, database, daemon, Docker or Ollama surface",
+      "verifiedBy": ["test/standalone.test.js"]
+    },
+    {
+      "id": "event-replay",
+      "status": "unsupported",
+      "reason": "The CLI has no replay cursor or resume command. The harness implements SSE id replay so a future client change can be verified, but the CLI makes no claim to support it."
+    },
+    {
+      "id": "reconnection",
+      "status": "unsupported",
+      "reason": "The CLI does not reconnect a dropped stream; it fails with exit 4 rather than silently resuming."
+    },
+    {
+      "id": "resumption",
+      "status": "unsupported",
+      "reason": "There is no CLI command or flag to resume an interrupted Work run."
+    },
+    {
+      "id": "permission-requests",
+      "status": "unsupported",
+      "reason": "pending_action frames are tolerated but not surfaced or approved by the CLI; no approval workflow exists to verify."
+    },
+    {
+      "id": "cross-client-continuity",
+      "status": "unsupported",
+      "reason": "The CLI does not persist or reopen conversations, so continuity can only be verified in the deployment's clients, not here."
+    }
+  ]
+}

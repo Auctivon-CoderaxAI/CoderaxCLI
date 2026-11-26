@@ -499,6 +499,39 @@ test("call preserves a JSON null body", async () => {
   });
 });
 
+test("[capability:command-registration] every documented command is registered and dispatched", async () => {
+  const help = capture();
+  assert.equal(
+    await runCli(["--help"], { env: {}, stdout: help.stdout, stderr: help.stderr }),
+    0,
+  );
+
+  const commands = [
+    "config", "products", "chat", "work", "models", "agents", "cloud", "projects",
+    "login", "logout", "status", "doctor", "update", "health", "openapi", "call",
+    "help", "version",
+  ];
+
+  for (const command of commands) {
+    assert.match(help.out(), new RegExp(`coderax ${command}\\b`), `${command} is missing from --help`);
+
+    const io = capture();
+    const code = await runCli([command], {
+      env: await tempEnv(),
+      stdout: io.stdout,
+      stderr: io.stderr,
+      // Without a TTY, chat/work would wait on stdin for a piped prompt.
+      stdinIsTTY: true,
+    });
+    assert.equal(
+      /unknown command/.test(io.err()),
+      false,
+      `${command} is documented but not dispatched: ${io.err()}`,
+    );
+    assert.ok(Number.isInteger(code), `${command} must return an exit code`);
+  }
+});
+
 const CLI_PATH = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 
 test("the packaged executable reaches runCli", () => {

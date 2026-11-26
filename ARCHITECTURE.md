@@ -44,6 +44,7 @@ scripts can separate a bad invocation from a failed deployment.
 | no deployment configured | `BASE_URL_REQUIRED` | 1 |
 | request timeout | `REQUEST_TIMEOUT` | 4 |
 | redirect or network failure | `REQUEST_FAILED` | 4 |
+| Work stream ended before its final frame | `STREAM_INCOMPLETE` | 4 |
 | HTTP 401 or 403 | `HTTP_401`, `HTTP_403` | 3 |
 | HTTP 404 | `HTTP_404` | 5 |
 | other non-2xx response | `HTTP_<status>` | 1 |

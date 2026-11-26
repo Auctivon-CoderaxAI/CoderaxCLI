@@ -471,6 +471,68 @@ test("streamRequest redacts a token split across content fields", async () => {
   assert.equal(JSON.stringify(events).includes(token), false);
 });
 
+test("[capability:cancellation] an aborted stream reports CANCELLED", async () => {
+  // A real socket that sends one delta and never finishes, so the abort has to
+  // cancel an in-flight body read rather than a completed response.
+  await withStub(
+    (req, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write('data: {"delta":"partial"}\n\n');
+    },
+    async (baseUrl) => {
+      const controller = new AbortController();
+      const pending = streamRequest({
+        baseUrl,
+        token: TOKEN,
+        path: "/api/ask",
+        signal: controller.signal,
+      });
+
+      setTimeout(() => controller.abort(), 50);
+      await assert.rejects(pending, (error) => error.code === "CANCELLED");
+    },
+  );
+});
+
+test("[capability:stream-integrity] requireFinal rejects a stream that ends without a final frame", async () => {
+  const encoder = new TextEncoder();
+  const streamOf = (chunks) =>
+    new Response(
+      new ReadableStream({
+        start(controller) {
+          for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+          controller.close();
+        },
+      }),
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+
+  await assert.rejects(
+    () =>
+      streamRequest({
+        baseUrl: "https://coderax.test",
+        token: TOKEN,
+        path: "/api/work/chat",
+        requireFinal: true,
+        fetchImpl: async () => streamOf(['data: {"message":true,"text":"half done"}\n\n']),
+      }),
+    (error) => error.code === "STREAM_INCOMPLETE",
+  );
+
+  const text = await streamRequest({
+    baseUrl: "https://coderax.test",
+    token: TOKEN,
+    path: "/api/work/chat",
+    requireFinal: true,
+    fetchImpl: async () =>
+      streamOf([
+        'data: {"message":true,"text":"done"}\n\n',
+        'data: {"final":true,"responseMessage":{"text":"done"}}\n\n',
+      ]),
+  });
+  assert.equal(text, "done");
+});
+
 test("streamRequest redacts a token split across SSE events", async () => {
   const token = "split-token";
   const events = [];

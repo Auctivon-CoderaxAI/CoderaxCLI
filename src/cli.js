@@ -36,6 +36,8 @@ Usage:
   coderax health [--json]
   coderax openapi [--json]
   coderax call <METHOD> <PATH> [--data <json>] [--json]
+  coderax help
+  coderax version
 
 Global options:
   --base-url <url>   Override the deployment URL (HTTPS, or HTTP on loopback)
@@ -431,7 +433,13 @@ function exitFor(error) {
   if (error.code === "CANCELLED") return EXIT.cancelled;
   if (error.code === "HTTP_401" || error.code === "HTTP_403") return EXIT.unauthenticated;
   if (error.code === "HTTP_404") return EXIT.notFound;
-  if (error.code === "REQUEST_TIMEOUT" || error.code === "REQUEST_FAILED") return EXIT.network;
+  if (
+    error.code === "REQUEST_TIMEOUT"
+    || error.code === "REQUEST_FAILED"
+    || error.code === "STREAM_INCOMPLETE"
+  ) {
+    return EXIT.network;
+  }
   return EXIT.failure;
 }
 
@@ -574,5 +582,23 @@ export function isEntrypoint(entry = process.argv[1]) {
 }
 
 if (isEntrypoint()) {
-  process.exitCode = await runCli(process.argv.slice(2));
+  // Cancellation has to reach the stream, not kill the process before the
+  // partial answer is accounted for. A second signal, or a request that never
+  // settles, still exits 130 instead of hanging a pipeline.
+  const controller = new AbortController();
+  let forced;
+  const cancel = () => {
+    controller.abort();
+    forced = setTimeout(() => process.exit(EXIT.cancelled), 2000);
+    forced.unref?.();
+  };
+  process.once("SIGINT", cancel);
+  process.once("SIGTERM", cancel);
+  try {
+    process.exitCode = await runCli(process.argv.slice(2), { signal: controller.signal });
+  } finally {
+    clearTimeout(forced);
+    process.removeListener("SIGINT", cancel);
+    process.removeListener("SIGTERM", cancel);
+  }
 }

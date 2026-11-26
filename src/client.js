@@ -322,6 +322,7 @@ export async function streamRequest({
   timeoutMs = 15000,
   signal,
   onEvent,
+  requireFinal = false,
   fetchImpl = fetch,
 } = {}) {
   if (!baseUrl) {
@@ -379,6 +380,7 @@ export async function streamRequest({
     let buffer = "";
     let assembled = "";
     let lastMessageSnapshot = null;
+    let sawFinal = false;
     armTimer();
 
     while (true) {
@@ -437,6 +439,7 @@ export async function streamRequest({
                 onEvent?.({ type: "replace", text: assembled, payload: redactValue(event, token) });
               }
             }
+            sawFinal = true;
             onEvent?.({ type: "final", payload: redactValue(event, token) });
             if (event.error) {
               throw new CoderaxError("STREAM_ERROR", redact(detailText(event.error) || "stream error", token));
@@ -451,6 +454,15 @@ export async function streamRequest({
     if (tail) {
       assembled += tail;
       onEvent?.({ type: "delta", text: tail });
+    }
+
+    // A Work run is not done until the engine says so. A dropped connection
+    // must not be reported as a completed job just because some text arrived.
+    if (requireFinal && !sawFinal) {
+      throw new CoderaxError(
+        "STREAM_INCOMPLETE",
+        `the stream from ${displayPath} ended before a final frame; the run may still be in progress`,
+      );
     }
 
     return assembled;

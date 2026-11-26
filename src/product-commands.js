@@ -220,6 +220,8 @@ async function streamPrompt(ctx, mode) {
     timeoutMs: ctx.settings.timeoutMs,
     fetchImpl: ctx.fetchImpl,
     signal: ctx.signal,
+    // Work is a single engine run; an interrupted stream is not a success.
+    requireFinal: mode === "work",
     body: {
       text,
       mode,
