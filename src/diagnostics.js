@@ -63,7 +63,13 @@ const GLOBAL_PREFIX_MARKERS = Object.freeze([
 export function detectInstallMethod(modulePath = MODULE_PATH) {
   const path = portable(realpathOrSelf(modulePath));
   if (path.includes("/node_modules/coderax-cli/")) {
-    return GLOBAL_PREFIX_MARKERS.some((marker) => path.includes(marker)) ? "npm-global" : "npm-local";
+    if (GLOBAL_PREFIX_MARKERS.some((marker) => path.includes(marker))) return "npm-global";
+    // A custom npm prefix on Windows places the shim at its root and has no
+    // project manifest; a local dependency lives beside one.
+    const prefix = dirname(dirname(PACKAGE_ROOT));
+    const globalShim = existsSync(join(prefix, "coderax.cmd")) || existsSync(join(prefix, "bin", "coderax"));
+    if (globalShim && !existsSync(join(prefix, "package.json"))) return "npm-global";
+    return "npm-local";
   }
   // The standalone build ships this marker at the package root, so a custom
   // --prefix is recognised without assuming the default ~/.coderax/cli path.
