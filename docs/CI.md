@@ -12,19 +12,16 @@ succeeds. Branch protection should require only that check.
 
 | Job | What it proves | Where |
 | --- | --- | --- |
-| `unit` | syntax, shared modules, parsing, config, redaction, release and contract logic on all three operating systems | `npm run check`, `npm run test:unit` |
-| `integration` | the real CLI process talks to a WorkflowEngine harness over real HTTP sockets on all three operating systems | `npm run test:integration` |
-| `package` | the release tarball installs into a clean prefix and its installed entrypoint runs | `npm run verify:package` |
-| `contract` | workflow policy, required operations, API version, version consistency and capability claims | `npm run verify:workflows`, `npm run verify:contract` |
-| `security` | dependency audit plus the no-local-execution gate | `npm audit --omit=dev`, `npm run verify:isolation` |
-| `release` | reproducible tarball, `SHA256SUMS`, manifest, checksum verification and a second clean install | `npm run release:build`, `sha256sum -c` |
+| `verify` (Ubuntu, Windows, macOS) | syntax, shared modules, parsing, config and redaction; the real CLI process against the HTTP harness; the packed tarball installed into a clean prefix | `npm run check`, `npm run test:unit`, `npm run test:integration`, `npm run verify:package` |
+| `contract` | workflow policy, required operations, API version, version consistency, capability claims, dependency audit and the no-local-execution gate | `npm run verify:workflows`, `npm run verify:contract`, `npm audit`, `npm run verify:isolation` |
+| `release` | reproducible tarball, `SHA256SUMS`, manifest, checksum verification and a second clean install | `npm run release:build`, `sha256sum -c`, `npm run verify:package` |
 | `gate` | aggregates every result so a skip cannot pass | workflow expression |
 
 ## Coverage of the required checks
 
 | Requirement | Verification |
 | --- | --- |
-| Windows, Linux, macOS compatibility | `unit`, `integration` and `package` matrices run the same suite on `ubuntu-latest`, `windows-latest` and `macos-latest` |
+| Windows, Linux, macOS compatibility | the `verify` matrix runs the same suite on `ubuntu-latest`, `windows-latest` and `macos-latest` |
 | Clean installation | `scripts/verify-package.mjs` installs the packed tarball with `npm install` into an empty prefix, with `--ignore-scripts`, and asserts only `coderax-cli` appears |
 | Executable entrypoints | `test/package.test.js` checks the shebang, the executable bit, the single `bin` entry and `node src/cli.js`; `verify-package` runs the installed shim |
 | Shared SDK package integrity | `test/package.test.js` pins the dependency-free ESM surface of `src/client.js`, the frozen registry, `src/version.js` and relative/`node:` imports only |

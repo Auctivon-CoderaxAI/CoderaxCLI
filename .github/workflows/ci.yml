@@ -15,10 +15,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  unit:
-    name: unit (${{ matrix.os }})
+  verify:
+    name: verify (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -39,55 +39,13 @@ jobs:
         run: npm run check
       - name: Unit tests
         run: npm run test:unit
-
-  integration:
-    name: integration (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    steps:
-      - name: Check out source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          persist-credentials: false
-      - name: Set up Node
-        uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b # v4.0.3
-        with:
-          node-version: "24"
-          cache: npm
-      - name: Clean install from the lockfile
-        run: npm ci --ignore-scripts --no-audit --no-fund
       - name: HTTP integration against the WorkflowEngine harness
         run: npm run test:integration
-
-  package:
-    name: package (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    steps:
-      - name: Check out source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          persist-credentials: false
-      - name: Set up Node
-        uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b # v4.0.3
-        with:
-          node-version: "24"
-          cache: npm
-      - name: Clean install from the lockfile
-        run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Package, clean install, entrypoint
         run: npm run verify:package
 
   contract:
-    name: contract and API version
+    name: contract, dependencies and isolation
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -106,23 +64,6 @@ jobs:
         run: npm run verify:workflows
       - name: Contract, version and capability claims
         run: npm run verify:contract
-
-  security:
-    name: dependencies and isolation
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Check out source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          persist-credentials: false
-      - name: Set up Node
-        uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b # v4.0.3
-        with:
-          node-version: "24"
-          cache: npm
-      - name: Clean install from the lockfile
-        run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Dependency audit
         run: npm audit --omit=dev --audit-level=low
       - name: No local inference, database, daemon, Docker or Ollama
@@ -130,7 +71,7 @@ jobs:
 
   release:
     name: release artifact
-    needs: [unit, integration, package, contract, security]
+    needs: [verify, contract]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -162,7 +103,7 @@ jobs:
   gate:
     name: ci gate
     if: always()
-    needs: [unit, integration, package, contract, security, release]
+    needs: [verify, contract, release]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
