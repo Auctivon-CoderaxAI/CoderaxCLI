@@ -24,7 +24,7 @@ import { spawn as spawnProcess, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
-import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -77,7 +77,7 @@ function spawn(command, args, options) {
 // Spaces and non-ASCII characters are both real Windows/macOS user-profile
 // shapes and classic quoting bugs.
 const sandbox = await mkdtemp(join(tmpdir(), "coderax install ünïcode "));
-const prefix = join(sandbox, "prefix dir");
+const prefix = join(sandbox, IS_WINDOWS ? "prefix dir 工具" : "prefix dir");
 const binDir = join(sandbox, "bin dir");
 const home = join(sandbox, "home");
 const configPath = join(sandbox, "coderax", "config.json");
@@ -296,6 +296,24 @@ try {
     return "exit code is non-zero";
   });
 
+  if (IS_WINDOWS) {
+    await step("Windows installer restricts HTTP mirrors to loopback", async () => {
+      for (const [url, expected] of [
+        ["https://releases.example.com/mirror", 0],
+        ["http://localhost:8080/mirror", 0],
+        ["http://127.0.0.1:8080/mirror", 0],
+        ["http://localhost.example.com/mirror", 2],
+        ["http://127.0.0.10/mirror", 2],
+        ["not a URL", 2],
+      ]) {
+        const result = installer(["-DryRun", "-BaseUrl", url]);
+        assert.equal(result.status, expected, `${url}: ${tail(result)}`);
+        if (expected === 2) assert.match(result.stderr, /releases URL must use HTTPS/);
+      }
+      return "checked URL parsing and exact loopback host matching without making requests";
+    });
+  }
+
   await step("hostile archives cannot traverse, link, duplicate or overwrite", async () => {
     await hostileCase(
       "traversal",
@@ -346,6 +364,22 @@ try {
 
   await step("launcher and non-interactive entrypoints work", async () => {
     const version = await cli(["--version"]);
+    if (version.status !== 0) {
+      const present = existsSync(launcher);
+      const raw = present ? await readFile(launcher) : Buffer.alloc(0);
+      const program = join(prefix, VERSION, "bin", IS_WINDOWS ? "coderax.cmd" : "coderax");
+      let binEntries = [];
+      try {
+        binEntries = await readdir(binDir);
+      } catch {
+        binEntries = ["<missing>"];
+      }
+      throw new Error(
+        `${tail(version)}\nlauncher=${launcher} exists=${present} bytes=${raw.length} ` +
+          `head=${JSON.stringify(raw.subarray(0, 240).toString("utf8"))} ` +
+          `program=${program} exists=${existsSync(program)} bin=${JSON.stringify(binEntries)}`,
+      );
+    }
     assert.equal(version.status, 0, tail(version));
     assert.equal(version.stdout.trim(), `coderax-cli ${VERSION}`);
     const help = await cli(["--help"]);
@@ -365,7 +399,7 @@ try {
     assert.equal(info.supportedApiVersion, "1.x");
     assert.equal(info.supportedDeploymentRange, ">=0.8.8 <1.0.0");
     assert.match(info.compatibilityBasis, /x-coderax-api-version/);
-    assert.equal(info.installPath, join(prefix, VERSION));
+    assert.equal(await realpath(info.installPath), await realpath(join(prefix, VERSION)));
     return `${info.cliVersion} on node ${info.node} (${info.platform}-${info.arch})`;
   });
 
