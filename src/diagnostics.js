@@ -14,12 +14,6 @@ import { configDir, configPath } from "./config.js";
 import { NODE_REQUIREMENT, PACKAGE_NAME, VERSION } from "./version.js";
 
 const MODULE_PATH = fileURLToPath(import.meta.url);
-export const PACKAGE_ROOT = dirname(dirname(MODULE_PATH));
-export const CLI_ENTRYPOINT = dirname(MODULE_PATH) + "/cli.js";
-
-function portable(path) {
-  return path.replaceAll("\\", "/");
-}
 
 function realpathOrSelf(path) {
   try {
@@ -27,6 +21,16 @@ function realpathOrSelf(path) {
   } catch {
     return path;
   }
+}
+
+// A Windows launcher can invoke the CLI through an 8.3 short path. Resolve once
+// so diagnostics always report the same canonical install location.
+const RESOLVED_MODULE_PATH = realpathOrSelf(MODULE_PATH);
+export const PACKAGE_ROOT = dirname(dirname(RESOLVED_MODULE_PATH));
+export const CLI_ENTRYPOINT = dirname(RESOLVED_MODULE_PATH) + "/cli.js";
+
+function portable(path) {
+  return path.replaceAll("\\", "/");
 }
 
 /**
