@@ -38,6 +38,7 @@ const WORK_KEYS = new Set([
   "agent",
   "model",
   "mode",
+  "budget",
   "requireApproval",
 ]);
 
@@ -430,6 +431,7 @@ function requireConversationId(value) {
 function adaptWork(ctx, args) {
   const rest = args[0] === "submit" ? args.slice(1) : [...args];
   const flags = new Map(ctx.flags);
+  let workRequest = null;
   if (flags.has("follow") && flags.has("detach")) {
     throw new EngineUsageError("--follow and --detach cannot be combined");
   }
@@ -447,16 +449,28 @@ function adaptWork(ctx, args) {
       );
     }
     const body = validateWorkBody(parseJsonBody({ ...ctx, flags }));
-    if (body.budget !== undefined) {
-      throw new EngineUsageError("--data budget is not supported by the adopted engine surface");
-    }
     rest.push(body.objective);
-    if (body.agent !== undefined) flags.set("agent", body.agent);
-    if (body.mode !== undefined) flags.set("mode", body.mode);
-    if (body.conversationId !== undefined) flags.set("conversation", body.conversationId);
+    workRequest = {
+      objective: body.objective,
+      requireApproval: body.requireApproval !== false,
+    };
+    if (body.agent !== undefined) {
+      flags.set("agent", body.agent);
+      workRequest.agent = body.agent;
+    }
+    if (body.mode !== undefined) {
+      flags.set("mode", body.mode);
+      workRequest.mode = body.mode;
+    }
+    if (body.conversationId !== undefined) {
+      flags.set("conversation", body.conversationId);
+      workRequest.conversationId = body.conversationId;
+    }
     if (body.model !== undefined) {
       flags.set("model", `${body.model.providerId}/${body.model.modelId}`);
+      workRequest.model = body.model;
     }
+    if (body.budget !== undefined) workRequest.budget = body.budget;
     if (body.requireApproval === false) flags.set("no-approval", true);
     flags.delete("data");
   }
@@ -472,7 +486,9 @@ function adaptWork(ctx, args) {
   // This CLI's documented default is submit-only; --follow opts into the
   // owner surface's streaming mode. --detach remains an explicit alias.
   if (!flags.has("follow")) flags.set("detach", true);
-  return surfaceContext(ctx, rest, flags);
+  const prepared = surfaceContext(ctx, rest, flags);
+  if (workRequest !== null) prepared.workRequest = workRequest;
+  return prepared;
 }
 
 /**

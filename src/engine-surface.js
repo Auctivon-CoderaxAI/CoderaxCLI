@@ -258,14 +258,18 @@ export async function work(ctx) {
   const { agent, mode, model, conversationId } = selection(ctx);
   const engine = engineFor(ctx);
 
-  const request = {
-    objective,
-    requireApproval: !ctx.flags.has("no-approval"),
-  };
-  if (agent !== undefined) request.agent = agent;
-  if (mode !== undefined) request.mode = mode;
-  if (model !== undefined) request.model = model;
-  if (conversationId !== undefined) request.conversationId = conversationId;
+  const request = ctx.workRequest
+    ? { ...ctx.workRequest }
+    : {
+        objective,
+        requireApproval: !ctx.flags.has("no-approval"),
+      };
+  if (!ctx.workRequest) {
+    if (agent !== undefined) request.agent = agent;
+    if (mode !== undefined) request.mode = mode;
+    if (model !== undefined) request.model = model;
+    if (conversationId !== undefined) request.conversationId = conversationId;
+  }
 
   const accepted = await engine.submitWork(request);
   if (!ctx.json) ctx.err(`task ${accepted.taskId} (${accepted.state}) conversation ${accepted.conversationId}`);

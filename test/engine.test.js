@@ -283,7 +283,14 @@ test("Work --data is validated then submitted as one durable task", async () => 
       }),
   });
   const code = await runCli(
-    ["engine", "work", "submit", "--data", '{"objective":"say hello","mode":"cloud"}', "--json"],
+    [
+      "engine",
+      "work",
+      "submit",
+      "--data",
+      '{"objective":"say hello","mode":"cloud","budget":{"maxRequests":1,"maxInputTokens":100,"maxOutputTokens":50}}',
+      "--json",
+    ],
     {
       env: await env(),
       fetchImpl: stub.fetchImpl,
@@ -299,6 +306,7 @@ test("Work --data is validated then submitted as one durable task", async () => 
   assert.deepEqual(work.body, {
     objective: "say hello",
     mode: "cloud",
+    budget: { maxRequests: 1, maxInputTokens: 100, maxOutputTokens: 50 },
     requireApproval: true,
   });
   const result = JSON.parse(io.out());
