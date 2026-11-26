@@ -45,25 +45,13 @@ foreach ($target in $targets) {
   Remove-Item -LiteralPath $target -Recurse -Force
 }
 
-# Windows paths are case-insensitive and may be written with either slash, so
-# ownership compares normalized paths at a directory boundary. This keeps a
-# sibling prefix such as "cli-other" foreign.
-function Test-LauncherOwnership([string]$Text, [string]$Prefix) {
-  if ([string]::IsNullOrEmpty($Text)) { return $false }
-  try {
-    $marker = [IO.Path]::GetFullPath($Prefix).TrimEnd([char]'\', [char]'/') + '\'
-  } catch {
-    return $false
-  }
-  return ($Text.Replace('/', '\').IndexOf($marker, [StringComparison]::OrdinalIgnoreCase) -ge 0)
-}
-
 # Only remove the launcher when it came from this prefix. The Windows shim
 # keeps its entrypoint base64-encoded so paths with spaces and Unicode survive
 # cmd.exe, so inspect both the literal text and the embedded payload.
 if (Test-Path -LiteralPath $launcher) {
   $content = Get-Content -Raw -LiteralPath $launcher
-  $owned = Test-LauncherOwnership $content $Prefix
+  $marker = $Prefix.TrimEnd([char]'\') + '\'
+  $owned = [bool]($content -and $content.Contains($marker))
   if (-not $owned -and $content) {
     $pattern = 'Buffer\.from\(''([A-Za-z0-9+/=]+)'',\s*''base64''\)'
     foreach ($encoded in [regex]::Matches($content, $pattern)) {
@@ -72,7 +60,7 @@ if (Test-Path -LiteralPath $launcher) {
       } catch {
         continue
       }
-      if (Test-LauncherOwnership $decoded $Prefix) { $owned = $true; break }
+      if ($decoded.Contains($marker)) { $owned = $true; break }
     }
   }
   if ($owned) {
