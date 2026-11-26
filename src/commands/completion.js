@@ -1,15 +1,14 @@
 import { UsageError } from "../errors.js";
+import {
+  COMMANDS,
+  COMPLETION_SHELLS,
+  CONFIG_ACTIONS,
+  ENGINE_ACTIONS,
+  SESSIONS_ACTIONS,
+  WORK_SUBCOMMANDS,
+} from "./registry.js";
 
-export const COMMANDS = Object.freeze([
-  "chat", "work", "sessions", "agents", "models", "notifications", "permissions",
-  "login", "logout", "status", "engine", "doctor", "config", "completion",
-  "products", "cloud", "projects", "update", "deploy", "help", "version",
-]);
-
-const WORK_SUBCOMMANDS = Object.freeze([
-  "submit", "list", "status", "watch", "attach", "report", "cancel", "resume",
-  "retry", "resolve", "uncertain", "templates",
-]);
+export { COMMANDS };
 
 const GLOBAL_FLAGS = Object.freeze([
   "--help", "--version", "--json", "--ndjson", "--no-color", "--quiet", "--verbose",
@@ -31,9 +30,10 @@ _coderax() {
   previous="\${COMP_WORDS[COMP_CWORD-1]}"
   case "\${COMP_WORDS[1]}" in
     work) COMPREPLY=( $(compgen -W "${words(WORK_SUBCOMMANDS)} ${words(GLOBAL_FLAGS)}" -- "\${current}") ); return 0 ;;
-    engine) COMPREPLY=( $(compgen -W "health ready contract capabilities ${words(GLOBAL_FLAGS)}" -- "\${current}") ); return 0 ;;
-    config) COMPREPLY=( $(compgen -W "show get set unset path ${words(GLOBAL_FLAGS)}" -- "\${current}") ); return 0 ;;
-    completion) COMPREPLY=( $(compgen -W "bash zsh fish" -- "\${current}") ); return 0 ;;
+    engine) COMPREPLY=( $(compgen -W "${words(ENGINE_ACTIONS)} ${words(GLOBAL_FLAGS)}" -- "\${current}") ); return 0 ;;
+    config) COMPREPLY=( $(compgen -W "${words(CONFIG_ACTIONS)} ${words(GLOBAL_FLAGS)}" -- "\${current}") ); return 0 ;;
+    sessions) COMPREPLY=( $(compgen -W "${words(SESSIONS_ACTIONS)} ${words(GLOBAL_FLAGS)}" -- "\${current}") ); return 0 ;;
+    completion) COMPREPLY=( $(compgen -W "${words(COMPLETION_SHELLS)}" -- "\${current}") ); return 0 ;;
   esac
   COMPREPLY=( $(compgen -W "${words(COMMANDS)} ${words(GLOBAL_FLAGS)}" -- "\${current}") )
 }
@@ -50,9 +50,10 @@ _coderax() {
   fi
   case "\${words[2]}" in
     work) _values 'work command' ${WORK_SUBCOMMANDS.map((value) => `'${value}'`).join(" ")} ;;
-    engine) _values 'engine command' health ready contract capabilities ;;
-    config) _values 'config command' show get set unset path ;;
-    completion) _values 'shell' bash zsh fish ;;
+    engine) _values 'engine command' ${ENGINE_ACTIONS.map((value) => `'${value}'`).join(" ")} ;;
+    config) _values 'config command' ${CONFIG_ACTIONS.map((value) => `'${value}'`).join(" ")} ;;
+    sessions) _values 'sessions command' ${SESSIONS_ACTIONS.map((value) => `'${value}'`).join(" ")} ;;
+    completion) _values 'shell' ${COMPLETION_SHELLS.map((value) => `'${value}'`).join(" ")} ;;
   esac
 }
 _coderax "$@"
@@ -61,9 +62,10 @@ _coderax "$@"
       return `# fish completion for coderax
 complete -c coderax -f -a "${words(COMMANDS)}"
 complete -c coderax -n "__fish_seen_subcommand_from work" -f -a "${words(WORK_SUBCOMMANDS)}"
-complete -c coderax -n "__fish_seen_subcommand_from engine" -f -a "health ready contract capabilities"
-complete -c coderax -n "__fish_seen_subcommand_from config" -f -a "show get set unset path"
-complete -c coderax -n "__fish_seen_subcommand_from completion" -f -a "bash zsh fish"
+complete -c coderax -n "__fish_seen_subcommand_from engine" -f -a "${words(ENGINE_ACTIONS)}"
+complete -c coderax -n "__fish_seen_subcommand_from config" -f -a "${words(CONFIG_ACTIONS)}"
+complete -c coderax -n "__fish_seen_subcommand_from sessions" -f -a "${words(SESSIONS_ACTIONS)}"
+complete -c coderax -n "__fish_seen_subcommand_from completion" -f -a "${words(COMPLETION_SHELLS)}"
 `;
     default:
       throw new UsageError("completion requires one of: bash, zsh, fish");

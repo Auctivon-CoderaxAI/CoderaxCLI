@@ -30,6 +30,7 @@ export function backoffDelay(attempt, { base = 500, cap = 15_000, random = Math.
 function retryable(error) {
   if (!error) return false;
   if (error.code === "CONTRACT_MISMATCH" || error.code === "CONTRACT_UNSUPPORTED") return false;
+  if (error.code === "CONTRACT_ADAPTER_PENDING") return false;
   if (error.code === "CAPABILITY_UNSUPPORTED") return false;
   if (error.code === "not_found" || error.code === "HTTP_404") return false;
   if (error.code === "validation_failed") return false;

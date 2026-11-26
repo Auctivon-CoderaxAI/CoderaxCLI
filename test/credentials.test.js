@@ -62,7 +62,7 @@ test("the memory store never touches disk", async () => {
   assert.equal(store.describe().backend, "memory");
 });
 
-test("a missing OS backend falls back to the 0600 file and says so", async () => {
+test("auto refuses to fall back to a plaintext file", async () => {
   const dir = await tempDir();
   const calls = [];
   const store = createCredentialStore({
@@ -74,10 +74,12 @@ test("a missing OS backend falls back to the 0600 file and says so", async () =>
       return { code: null, error: Object.assign(new Error("missing"), { code: "ENOENT" }), stdout: "", stderr: "" };
     },
   });
-  const written = await store.write(TOKEN);
-  assert.equal(written.kind, "file");
-  assert.match(written.warning, /CREDENTIAL_BACKEND_MISSING/);
-  assert.equal(await store.read(), TOKEN);
+  await assert.rejects(
+    () => store.write(TOKEN),
+    (error) => error.code === "CREDENTIAL_BACKEND_MISSING" && /credential-store file/.test(error.hint),
+  );
+  assert.equal(await store.read(), null);
+  assert.match(store.describe().warning, /no plaintext fallback/);
   assert.ok(calls.some((call) => call[0] === "secret-tool"));
 });
 

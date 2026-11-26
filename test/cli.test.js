@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgv, runCli } from "../src/cli.js";
 import { completionScript } from "../src/commands/completion.js";
+import { COMMANDS } from "../src/commands/registry.js";
 import { capture, optionsFor, tempDir, validAgents, validHealth } from "./helpers.js";
 
 const TOKEN = "owner-token-0123456789";
@@ -115,9 +116,9 @@ test("completion scripts cover every top-level command", () => {
   const zsh = completionScript("zsh");
   const fish = completionScript("fish");
   for (const script of [bash, zsh, fish]) {
-    assert.match(script, /work/);
-    assert.match(script, /chat/);
-    assert.match(script, /permissions/);
+    for (const command of COMMANDS) {
+      assert.ok(script.includes(command), `${command} missing from completion`);
+    }
   }
   assert.throws(() => completionScript("powershell"), /completion requires/);
 });

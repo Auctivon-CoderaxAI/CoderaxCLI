@@ -27,9 +27,10 @@ available, the command exits `3`.
 ## Negotiation
 
 `GET /v1/health` returns `contractVersion`. The CLI compares it with
-`CONTRACT_VERSION` before submitting Chat or Work. A mismatch exits `7` with
-`CONTRACT_MISMATCH` and both versions; the client does not partially use a
-different contract.
+`CONTRACT_VERSION` before submitting Chat or Work. An unknown mismatch exits
+`7` with `CONTRACT_UNSUPPORTED` and both versions; a known newer contract
+(`1.1.0`/`1.2.0`) exits `7` with `CONTRACT_ADAPTER_PENDING`. The client does not
+partially use a different contract.
 
 Execution events are negotiated independently. Every event carries
 `v: 1`. An event with another `v` is a contract error. An unknown event type
@@ -180,6 +181,10 @@ different engine, and they never execute a workflow locally.
 ## Compatibility policy
 
 - A CLI release pins one `CONTRACT_VERSION` and one `EVENT_SCHEMA_VERSION`.
+- `1.1.0` (engine PR #7) and the unpublished unified `1.2.0` contract are
+  classified as adapter-pending. The CLI exits `7` with
+  `CONTRACT_ADAPTER_PENDING`; it does not guess routes or simulate operations.
+  See `docs/CONSOLIDATION.md`.
 - Adding routes or event types is backward compatible for this client: unknown
   event types are skipped, and unused routes are ignored.
 - Changing a validated field, removing a route, or changing an enum is a

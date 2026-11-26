@@ -226,19 +226,47 @@ export async function httpRequest({
 }
 
 /**
+ * Normalize SSE line endings without assuming a network read ends on a line
+ * boundary. A trailing `\r` is held until the next read: converting it to `\n`
+ * immediately would turn a CRLF split across reads into two newlines and
+ * fabricate a frame boundary.
+ */
+export class SseTextNormalizer {
+  constructor() {
+    this.pendingCR = false;
+  }
+
+  push(text) {
+    let input = `${this.pendingCR ? "\r" : ""}${text}`;
+    this.pendingCR = false;
+    if (input.endsWith("\r")) {
+      this.pendingCR = true;
+      input = input.slice(0, -1);
+    }
+    return input.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  }
+
+  end() {
+    const input = this.pendingCR ? "\r" : "";
+    this.pendingCR = false;
+    return input.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  }
+}
+
+/**
  * Parse an SSE byte stream into frames. `id`, `event` and `retry` are preserved
  * so a reconnecting stream can send `Last-Event-ID` and honour a server hint.
  */
 export async function* parseSseStream(stream) {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
+  const normalizer = new SseTextNormalizer();
   let buffer = "";
   try {
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      buffer = buffer.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+      buffer += normalizer.push(decoder.decode(value, { stream: true }));
       let boundary = buffer.indexOf("\n\n");
       while (boundary !== -1) {
         const raw = buffer.slice(0, boundary);
@@ -248,7 +276,8 @@ export async function* parseSseStream(stream) {
         boundary = buffer.indexOf("\n\n");
       }
     }
-    buffer += decoder.decode();
+    buffer += normalizer.push(decoder.decode());
+    buffer += normalizer.end();
     if (buffer.trim().length > 0) {
       const frame = parseSseFrame(buffer);
       if (frame) yield frame;
@@ -391,6 +420,7 @@ export async function openSseStream({
 
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
+  const normalizer = new SseTextNormalizer();
   let buffer = "";
   let received = 0;
   let closed = false;
@@ -405,8 +435,7 @@ export async function openSseStream({
         if (received > maxBytes) {
           throw new CoderaxError("RESPONSE_TOO_LARGE", `the event stream exceeded ${maxBytes} bytes`);
         }
-        buffer += decoder.decode(value, { stream: true });
-        buffer = buffer.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+        buffer += normalizer.push(decoder.decode(value, { stream: true }));
         let boundary = buffer.indexOf("\n\n");
         while (boundary !== -1) {
           const raw = buffer.slice(0, boundary);
@@ -422,7 +451,8 @@ export async function openSseStream({
           boundary = buffer.indexOf("\n\n");
         }
       }
-      buffer += decoder.decode();
+      buffer += normalizer.push(decoder.decode());
+      buffer += normalizer.end();
       if (buffer.trim().length > 0) {
         const frame = parseSseFrame(buffer);
         if (frame) {

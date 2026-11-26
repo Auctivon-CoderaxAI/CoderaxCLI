@@ -51,6 +51,7 @@ test("work run completes, renders Markdown and returns a machine result", async 
     const data = json().data;
     assert.equal(data.state, "completed");
     assert.match(data.summary, /Fixture result/);
+    assert.equal(data.status?.result?.summary, undefined);
     assert.equal(data.artifacts[0].path, "src/index.js");
     assert.ok(data.events.some((event) => event.type === "file.edit"));
     assert.equal(io.out().includes("owner-token"), false);

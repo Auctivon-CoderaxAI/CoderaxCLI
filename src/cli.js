@@ -5,6 +5,15 @@ import { CoderaxError, EXIT, UsageError, errorDocument, exitFor } from "./errors
 import { createRuntime } from "./runtime.js";
 import { VERSION } from "./version.js";
 import { completionScript } from "./commands/completion.js";
+import {
+  COMMANDS,
+  CONFIG_ACTIONS,
+  DEPLOY_ACTIONS,
+  ENGINE_ACTIONS,
+  PERMISSIONS_ACTIONS,
+  SESSIONS_ACTIONS,
+  WORK_SUBCOMMANDS,
+} from "./commands/registry.js";
 import { configCommand } from "./commands/config.js";
 import { login, logout, refreshAuth, status } from "./commands/auth.js";
 import { chatCommand } from "./commands/chat.js";
@@ -99,12 +108,7 @@ Security:
   process. Remote URLs must use HTTPS. The CLI never enables anonymous access.
 `;
 
-const KNOWN_COMMANDS = new Set([
-  "chat", "work", "sessions", "agents", "models", "notifications", "permissions",
-  "login", "logout", "status", "auth", "engine", "doctor", "config", "completion",
-  "products", "cloud", "projects", "update", "deploy", "health", "openapi", "call",
-  "help", "version",
-]);
+const KNOWN_COMMANDS = new Set(COMMANDS);
 
 const BOOLEAN_FLAGS = new Set([
   "help", "version", "json", "ndjson", "no-color", "quiet", "verbose", "once",
@@ -125,10 +129,7 @@ const CONFIG_SET_FLAGS = new Set([
   "credential-store", "refresh-command", "theme", "output",
 ]);
 
-const WORK_SUBCOMMANDS = new Set([
-  "submit", "list", "status", "watch", "attach", "report", "cancel", "resume",
-  "retry", "resolve", "uncertain", "templates",
-]);
+const WORK_SUBCOMMAND_SET = new Set(WORK_SUBCOMMANDS);
 
 const ALLOWED_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
 
@@ -240,7 +241,7 @@ function preflight(positionals, flags) {
     if (sub === "resolve" && (!positionals[2] || !positionals[3])) {
       throw new UsageError("work resolve requires <submission-key> <task-id>");
     }
-    if (sub && !WORK_SUBCOMMANDS.has(sub) && sub.startsWith("-")) {
+    if (sub && !WORK_SUBCOMMAND_SET.has(sub) && sub.startsWith("-")) {
       throw new UsageError(`unknown work command: ${sub}`);
     }
   }
@@ -254,7 +255,7 @@ function preflight(positionals, flags) {
 
   if (command === "config") {
     const action = positionals[1] ?? "show";
-    if (!["show", "list", "get", "set", "unset", "path"].includes(action)) {
+    if (!CONFIG_ACTIONS.includes(action)) {
       throw new UsageError(`unknown config action: ${action}`);
     }
     if (action === "get" && !positionals[2]) throw new UsageError("config get requires a key");
@@ -271,28 +272,28 @@ function preflight(positionals, flags) {
 
   if (command === "engine") {
     const action = positionals[1] ?? "health";
-    if (!["health", "ready", "contract", "capabilities", "agents", "models"].includes(action)) {
+    if (!ENGINE_ACTIONS.includes(action)) {
       throw new UsageError(`unknown engine action: ${action}`);
     }
   }
 
   if (command === "deploy") {
     const action = positionals[1] ?? "health";
-    if (!["health", "openapi", "agents", "models", "call"].includes(action)) {
+    if (!DEPLOY_ACTIONS.includes(action)) {
       throw new UsageError(`unknown deploy action: ${action}`);
     }
   }
 
   if (command === "sessions") {
     const action = positionals[1] ?? "list";
-    if (!["list", "show", "switch", "new", "current"].includes(action)) {
+    if (!SESSIONS_ACTIONS.includes(action)) {
       throw new UsageError(`unknown sessions action: ${action}`);
     }
   }
 
   if (command === "permissions") {
     const arg = positionals[1];
-    if (arg !== undefined && !["list", "decide"].includes(arg) && positionals.length > 2) {
+    if (arg !== undefined && !PERMISSIONS_ACTIONS.includes(arg) && positionals.length > 2) {
       throw new UsageError(`unknown permissions action: ${arg}`);
     }
   }

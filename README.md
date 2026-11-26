@@ -58,7 +58,10 @@ saving it. The token is stored in the operating system credential store:
 | macOS | Keychain (`security`) |
 | Windows | DPAPI, current-user scope |
 | Linux | Secret Service (`secret-tool`) |
-| Explicit fallback | Private file, only with `--credential-store file` or when no OS backend exists; `0600` on POSIX, per-user ACL on Windows |
+| Explicit fallback | Private file, only with `--credential-store file`; `0600` on POSIX, user-profile file on Windows |
+
+`auto` fails closed with `CREDENTIAL_BACKEND_MISSING` when the native helper is
+missing. It never silently writes a plaintext token file.
 
 `config.json` never contains the token. `CODERAX_ENGINE_TOKEN` and
 `CODERAX_TOKEN` override the store for short-lived CI use; `CODERAX_ENGINE_URL`
@@ -213,7 +216,7 @@ when supplied by the engine, `requestId`.
 
 - Owner authentication only. The CLI sends no anonymous request to owner routes;
   `/v1/health` and `/v1/ready` are public by contract.
-- Tokens are held in the OS credential store, never written to `config.json`,
+- Tokens are held in the OS credential store (or an explicitly requested private fallback file), never written to `config.json`,
   logs, machine output or error text.
 - Provider API keys are never read by the CLI. Credential refresh helpers run
   with an allowlisted environment, no shell, bounded output and a timeout; the

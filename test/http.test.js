@@ -208,6 +208,21 @@ test("parseSseStream reassembles frames split across arbitrary chunks and CRLF",
   assert.deepEqual(frames.map((frame) => frame.id), ["1", "2", undefined]);
 });
 
+test("a CRLF split across reads is one line ending, not a frame boundary", async () => {
+  const encoder = new TextEncoder();
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode("data: one\r"));
+      controller.enqueue(encoder.encode("\ndata: two\r\n\r\n"));
+      controller.close();
+    },
+  });
+  const frames = [];
+  for await (const frame of parseSseStream(body)) frames.push(frame);
+  assert.equal(frames.length, 1);
+  assert.equal(frames[0].data, "one\ntwo");
+});
+
 test("openSseStream sends Last-Event-ID, enforces the content type and redacts data", async () => {
   await withServer(
     (req, res) => {

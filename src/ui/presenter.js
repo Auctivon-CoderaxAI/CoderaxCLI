@@ -2,6 +2,7 @@ import { CoderaxError } from "../errors.js";
 import { formatElapsed } from "./prompt.js";
 import { truncate } from "./ansi.js";
 import { MarkdownRenderer } from "./markdown.js";
+import { TextAssembler } from "./text-assembler.js";
 
 function oneLine(value, limit = 160) {
   const text = typeof value === "string" ? value : JSON.stringify(value ?? "");
@@ -41,6 +42,7 @@ export class WorkPresenter {
     this.onProgress = onProgress;
     this.now = now;
     this.markdown = null;
+    this.assembler = new TextAssembler();
     this.assistantText = "";
     this.textSeen = false;
     this.usage = null;
@@ -74,6 +76,17 @@ export class WorkPresenter {
     this.#startText();
     this.assistantText += text;
     this.markdown.write(text);
+  }
+
+  #onDelta(value) {
+    const outcome = this.assembler.delta(value);
+    if (outcome.kind === "delta") this.#renderText(outcome.text);
+  }
+
+  #onSnapshot(value) {
+    const outcome = this.assembler.snapshot(value);
+    if (outcome.kind === "delta") this.#renderText(outcome.text);
+    else if (outcome.kind === "replace") this.#replaceText(outcome.text);
   }
 
   #replaceText(text) {
@@ -115,10 +128,10 @@ export class WorkPresenter {
         break;
       }
       case "text.delta":
-        this.#renderText(payload.text);
+        this.#onDelta(payload.text);
         break;
       case "text.replace":
-        this.#replaceText(payload.text);
+        this.#onSnapshot(payload.text);
         break;
       case "tool.call": {
         this.toolCalls.set(payload.callId, payload);

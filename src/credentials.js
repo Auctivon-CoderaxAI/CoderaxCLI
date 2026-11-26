@@ -141,7 +141,6 @@ export function createCredentialStore({
   let warning = null;
 
   const requested = ["auto", "keychain", "file", "memory"].includes(mode) ? mode : "auto";
-  const fallbackDescription = platform === "win32" ? "fallback credential file" : "0600 fallback file";
 
   async function readFileToken() {
     try {
@@ -287,13 +286,16 @@ export function createCredentialStore({
     if (requested === "memory") return null;
     if (requested === "file") return readFileToken();
     try {
-      const token = await keychain.read();
-      if (token) return token;
+      // `auto` means the native OS store. A missing helper is not permission
+      // to read a plaintext fallback silently. Returning no token keeps
+      // read-only commands working without pretending a secure login happened;
+      // writing still fails closed in `write`.
+      return await keychain.read();
     } catch (error) {
       if (requested === "keychain") throw error;
-      warning = `${error.code}: ${error.message}; using the ${fallbackDescription}`;
+      warning = `${error.code ?? "CREDENTIAL_BACKEND_MISSING"}: ${error.message}; no plaintext fallback was read`;
+      return null;
     }
-    return readFileToken();
   }
 
   async function write(token) {
@@ -301,7 +303,10 @@ export function createCredentialStore({
     if (requested === "memory") return { kind: "memory" };
     if (requested === "file") {
       await writeFileToken(value);
-      return { kind: "file" };
+      return {
+        kind: "file",
+        warning: "the owner token is in the explicit fallback file, not an OS credential store",
+      };
     }
     try {
       await keychain.write(value);
@@ -309,10 +314,7 @@ export function createCredentialStore({
       await deleteFileToken().catch(() => {});
       return { kind: "keychain" };
     } catch (error) {
-      if (requested === "keychain") throw error;
-      warning = `${error.code}: ${error.message}; using the ${fallbackDescription}`;
-      await writeFileToken(value);
-      return { kind: "file", warning };
+      throw unavailable(error);
     }
   }
 
@@ -336,11 +338,22 @@ export function createCredentialStore({
     return { backendRemoved, fileRemoved };
   }
 
+  function unavailable(error) {
+    const failure = new CredentialError(
+      error?.code ?? "CREDENTIAL_BACKEND_MISSING",
+      error?.message ?? "the operating-system credential store is unavailable",
+    );
+    failure.hint =
+      "Install the platform credential helper (Keychain, DPAPI/PowerShell, or Secret Service), "
+      + "or explicitly opt into the private fallback with `--credential-store file`.";
+    return failure;
+  }
+
   function describe() {
     const backend = requested === "memory"
       ? "memory"
       : requested === "file"
-        ? platform === "win32" ? "private file (Windows ACL)" : "0600 file"
+        ? "explicit fallback file (not an OS credential store)"
         : platform === "darwin"
           ? "macOS Keychain"
           : platform === "win32"

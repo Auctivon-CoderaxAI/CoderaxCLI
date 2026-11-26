@@ -259,13 +259,24 @@ async function startWatch({
       updatedAt: new Date().toISOString(),
       lastSummary: summary.summary ?? null,
     });
+    // Keep exactly one authoritative summary field in the JSON document. The
+    // task status stays available for steps/artifacts, but its nested summary
+    // would be a second copy of the same text.
+    const statusForOutput = finalStatus
+      ? {
+          ...finalStatus,
+          result: finalStatus.result
+            ? { ...finalStatus.result, summary: undefined }
+            : finalStatus.result,
+        }
+      : null;
     const data = {
       task: task.taskId,
       conversationId: task.conversationId,
       state: summary.state,
       ...summary,
       events,
-      status: finalStatus,
+      status: statusForOutput,
     };
     runtime.emit(command, data);
     return exitForTaskState(summary.state);

@@ -20,6 +20,7 @@ import {
   assertTaskControl,
   assertTaskStatus,
 } from "./contract.js";
+import { contractSupport } from "./contract-support.js";
 
 const AUTH_CODES = new Set(["unauthorized", "HTTP_401"]);
 
@@ -143,16 +144,21 @@ export class EngineClient {
   async negotiate({ force = false } = {}) {
     if (this.negotiated && !force) return this.negotiated;
     const health = await this.health();
-    if (health.contractVersion !== CONTRACT_VERSION) {
+    const support = contractSupport(health.contractVersion);
+    if (!support.supported) {
+      const pending = support.status === "adapter-pending";
       throw new CoderaxError(
-        "CONTRACT_UNSUPPORTED",
-        `the engine serves contract ${health.contractVersion}; this CLI supports ${CONTRACT_VERSION}`,
+        pending ? "CONTRACT_ADAPTER_PENDING" : "CONTRACT_UNSUPPORTED",
+        `the engine serves contract ${health.contractVersion}; ${support.note}`,
         {
           details: {
             serverContract: health.contractVersion,
             clientContract: CONTRACT_VERSION,
+            contractStatus: support.status,
           },
-          hint: "Install a CLI release that matches the engine, or deploy an engine that serves this contract.",
+          hint: pending
+            ? "Use a 1.0.0 engine until the canonical 1.2.0 adapter is published; this CLI does not simulate newer operations."
+            : "Install a CLI release that matches the engine, or deploy an engine that serves this contract.",
         },
       );
     }
