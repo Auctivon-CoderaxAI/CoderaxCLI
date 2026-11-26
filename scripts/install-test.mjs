@@ -228,7 +228,11 @@ async function withEngine(mode, run) {
     const url = new URL(req.url, "http://127.0.0.1");
     const authenticated = req.headers.authorization === authorization;
     const json = (status, payload) => {
-      res.writeHead(status, { "content-type": "application/json", "x-coderax-api-version": compatible ? "1" : "2" });
+      const headers = { "content-type": "application/json" };
+      // An unavailable deployment advertises no version anywhere, not even on
+      // the 404 that hides its metadata; otherwise the header is a real signal.
+      if (apiVersion !== null) headers["x-coderax-api-version"] = apiVersion;
+      res.writeHead(status, headers);
       res.end(JSON.stringify(payload));
     };
     if (unauthenticated) return json(401, { message: "unauthorized" });
