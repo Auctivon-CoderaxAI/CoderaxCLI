@@ -41,12 +41,12 @@ test("runCommand does not inherit a token and bounds output", async () => {
   assert.equal(result.stdout, "missing");
 });
 
-test("a file store writes a 0600 credential atomically and reads it back", async () => {
+test("a file store writes a private credential atomically and reads it back", async () => {
   const dir = await tempDir();
-  const store = createCredentialStore({ platform: "linux", directory: dir, mode: "file" });
+  const store = createCredentialStore({ platform: process.platform, directory: dir, mode: "file" });
   const written = await store.write(TOKEN);
   assert.equal(written.kind, "file");
-  assert.equal((await stat(store.filePath)).mode & 0o777, 0o600);
+  if (process.platform !== "win32") assert.equal((await stat(store.filePath)).mode & 0o777, 0o600);
   assert.equal(JSON.parse(await readFile(store.filePath, "utf8")).token, TOKEN);
   assert.equal(await store.read(), TOKEN);
   await store.delete();

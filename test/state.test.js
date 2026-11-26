@@ -18,11 +18,16 @@ test("emptyState has the documented shape", () => {
   assert.deepEqual(state.submissions, {});
 });
 
-test("the journal is created with 0600 in a 0700 directory", async () => {
+test("the journal is created with private permissions where the OS enforces them", async () => {
   const { dir, file, state } = await store();
   await state.setActive({ mode: "work" });
-  assert.equal((await stat(file)).mode & 0o777, 0o600);
-  assert.equal((await stat(dir)).mode & 0o777, 0o700);
+  if (process.platform === "win32") {
+    // Windows has no POSIX mode bits; the per-user profile ACL is the boundary.
+    assert.equal((await stat(file)).isFile(), true);
+  } else {
+    assert.equal((await stat(file)).mode & 0o777, 0o600);
+    assert.equal((await stat(dir)).mode & 0o777, 0o700);
+  }
   assert.equal(JSON.parse(await readFile(file, "utf8")).active.mode, "work");
 });
 

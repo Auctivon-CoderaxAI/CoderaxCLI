@@ -27,7 +27,7 @@ src/cli.js ── parse ── preflight ── dispatch ── exit code
 | --- | --- |
 | `src/cli.js` | Argument parsing, preflight, command dispatch, help, exit-code mapping |
 | `src/runtime.js` | Composition root: config, token provider, engine client, journal, output, redaction |
-| `src/config.js` | URL/timeout validation, config precedence, atomic `0600` config writes |
+| `src/config.js` | URL/timeout validation, config precedence, atomic private config writes |
 | `src/credentials.js` | Keychain / DPAPI / Secret Service / fallback storage, helper execution |
 | `src/state.js` | Lock-protected local journal: active conversations, tasks, cursors, history |
 | `src/engine/contract.js` | Strict dependency-free contract mirror and validators, with the pinned engine OpenAPI artifact in `contracts/` |

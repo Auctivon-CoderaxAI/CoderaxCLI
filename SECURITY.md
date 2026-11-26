@@ -25,10 +25,12 @@ token is never saved.
 | macOS | Keychain generic password, service `coderax-cli`, account `owner` |
 | Windows | DPAPI-encrypted `credential.dpapi`, current-user scope |
 | Linux | Secret Service item via `secret-tool` |
-| Fallback | `credentials.json` with mode `0600` in a `0700` directory |
+| Fallback | `credentials.json`, mode `0600` in a `0700` directory on POSIX; per-user profile ACL on Windows |
 
 The fallback is used only when the requested OS backend is unavailable or when
-`--credential-store file` is explicitly selected. `coderax status` and `doctor`
+`--credential-store file` is explicitly selected. On Windows the DPAPI backend
+is attempted first; an explicit file fallback relies on the ACL of the user's
+profile directory because Windows does not expose POSIX mode bits. `coderax status` and `doctor`
 report the actual backend and any fallback warning. `config.json` never contains
 the token; `login` removes a legacy token from it.
 

@@ -58,7 +58,7 @@ saving it. The token is stored in the operating system credential store:
 | macOS | Keychain (`security`) |
 | Windows | DPAPI, current-user scope |
 | Linux | Secret Service (`secret-tool`) |
-| Explicit fallback | `0600` file, only with `--credential-store file` or when no OS backend exists |
+| Explicit fallback | Private file, only with `--credential-store file` or when no OS backend exists; `0600` on POSIX, per-user ACL on Windows |
 
 `config.json` never contains the token. `CODERAX_ENGINE_TOKEN` and
 `CODERAX_TOKEN` override the store for short-lived CI use; `CODERAX_ENGINE_URL`

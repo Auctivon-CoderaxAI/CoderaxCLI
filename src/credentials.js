@@ -141,6 +141,7 @@ export function createCredentialStore({
   let warning = null;
 
   const requested = ["auto", "keychain", "file", "memory"].includes(mode) ? mode : "auto";
+  const fallbackDescription = platform === "win32" ? "fallback credential file" : "0600 fallback file";
 
   async function readFileToken() {
     try {
@@ -290,7 +291,7 @@ export function createCredentialStore({
       if (token) return token;
     } catch (error) {
       if (requested === "keychain") throw error;
-      warning = `${error.code}: ${error.message}; using the 0600 fallback file`;
+      warning = `${error.code}: ${error.message}; using the ${fallbackDescription}`;
     }
     return readFileToken();
   }
@@ -309,7 +310,7 @@ export function createCredentialStore({
       return { kind: "keychain" };
     } catch (error) {
       if (requested === "keychain") throw error;
-      warning = `${error.code}: ${error.message}; using the 0600 fallback file`;
+      warning = `${error.code}: ${error.message}; using the ${fallbackDescription}`;
       await writeFileToken(value);
       return { kind: "file", warning };
     }
@@ -338,13 +339,15 @@ export function createCredentialStore({
   function describe() {
     const backend = requested === "memory"
       ? "memory"
-      : platform === "darwin"
-        ? "macOS Keychain"
-        : platform === "win32"
-          ? "Windows DPAPI"
-          : platform === "linux"
-            ? "Secret Service (secret-tool)"
-            : "0600 file";
+      : requested === "file"
+        ? platform === "win32" ? "private file (Windows ACL)" : "0600 file"
+        : platform === "darwin"
+          ? "macOS Keychain"
+          : platform === "win32"
+            ? "Windows DPAPI"
+            : platform === "linux"
+              ? "Secret Service (secret-tool)"
+              : "0600 file";
     return {
       requested,
       backend,

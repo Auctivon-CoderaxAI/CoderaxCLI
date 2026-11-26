@@ -77,10 +77,10 @@ test("a token can never be written into config.json", async () => {
   await assert.rejects(() => saveConfig({ token: TOKEN }, { filePath }), (error) => error.code === "USAGE");
 });
 
-test("save writes 0600 JSON atomically and token:null removes a legacy token", async () => {
+test("save writes private JSON atomically and token:null removes a legacy token", async () => {
   const filePath = await path();
   await saveConfig({ engineUrl: "https://engine.example", model: "p/m" }, { filePath });
-  assert.equal((await stat(filePath)).mode & 0o777, 0o600);
+  if (process.platform !== "win32") assert.equal((await stat(filePath)).mode & 0o777, 0o600);
   const parsed = JSON.parse(await readFile(filePath, "utf8"));
   assert.equal(parsed.engineUrl, "https://engine.example");
   assert.equal(parsed.model, "p/m");
