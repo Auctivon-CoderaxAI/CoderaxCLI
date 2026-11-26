@@ -41,8 +41,11 @@ jobs:
           npm test 2>&1 | tee test-output.log
           test_exit=${PIPESTATUS[0]}
           if [ "$test_exit" -ne 0 ]; then
-            grep -E '^✖|^not ok' test-output.log | head -20 | while IFS= read -r line; do
+            grep -nE '✖|not ok|failing tests|AssertionError|Error:|ERR_' test-output.log | head -40 | while IFS= read -r line; do
               echo "::error title=test failure::$line"
+            done
+            tail -60 test-output.log | tr '\n' ' ' | cut -c1-4000 | while IFS= read -r line; do
+              echo "::error title=test output tail::$line"
             done
           fi
           exit "$test_exit"
