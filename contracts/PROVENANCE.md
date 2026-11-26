@@ -14,9 +14,11 @@ WorkflowEngine's generated OpenAPI document.
 | Event schema | `1` |
 
 `test/contract-source.test.js` verifies the digest, the document version, the
-route catalogue and the operation ids used by the CLI. `scripts/check-contract.mjs`
-checks the same artifact locally and can also compare a live engine checkout.
-CI pins the same commit for the real-engine harness job.
+route catalogue and the operation ids used by the CLI. The repository rule in
+`.gitattributes` keeps `contracts/**` byte-exact on Windows, so the digest is
+not made platform-dependent. `scripts/check-contract.mjs` checks the same
+artifact locally and can also compare a live engine checkout. CI pins the same
+commit for the real-engine harness job.
 
 ## Why the SDK is mirrored, not installed
 
