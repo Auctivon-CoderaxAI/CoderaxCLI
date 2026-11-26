@@ -97,11 +97,14 @@ const env = {
 
 const launcher = join(binDir, IS_WINDOWS ? "coderax.cmd" : "coderax");
 const commandPath = (path) => (IS_WINDOWS ? `"${path}"` : path);
+// With shell: true Windows joins argv with spaces, so an argument that
+// contains one has to carry its own quoting.
+const shellArg = (value) => (IS_WINDOWS && /[\s"]/.test(value) ? `"${value.replaceAll('"', '""')}"` : value);
 
 /** Run the installed launcher without blocking the event loop (stub server). */
 function cli(args, extraEnv = {}, { input = null } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawnProcess(commandPath(launcher), args, {
+    const child = spawnProcess(commandPath(launcher), args.map(shellArg), {
       env: { ...env, ...extraEnv },
       shell: IS_WINDOWS,
       stdio: ["pipe", "pipe", "pipe"],
@@ -529,7 +532,7 @@ try {
     await mkdir(project, { recursive: true });
     await writeFile(join(project, "package.json"), `${JSON.stringify({ name: "sdk-check", private: true, type: "module" }, null, 2)}\n`);
     const npm = IS_WINDOWS ? "npm.cmd" : "npm";
-    const install = spawn(npm, ["install", "--no-audit", "--no-fund", "--ignore-scripts", "--prefer-offline", NPM_TARBALL], {
+    const install = spawn(npm, ["install", "--no-audit", "--no-fund", "--ignore-scripts", "--prefer-offline", shellArg(NPM_TARBALL)], {
       cwd: project,
       env,
       shell: IS_WINDOWS,
@@ -568,7 +571,7 @@ console.log(version.VERSION);
     const npm = IS_WINDOWS ? "npm.cmd" : "npm";
     const install = spawn(
       npm,
-      ["install", "--global", "--prefix", globalPrefix, "--no-audit", "--no-fund", "--ignore-scripts", "--prefer-offline", NPM_TARBALL],
+      ["install", "--global", "--prefix", shellArg(globalPrefix), "--no-audit", "--no-fund", "--ignore-scripts", "--prefer-offline", shellArg(NPM_TARBALL)],
       { cwd: sandbox, env, shell: IS_WINDOWS },
     );
     assert.equal(install.status, 0, tail(install));
