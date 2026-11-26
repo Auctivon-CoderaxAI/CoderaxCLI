@@ -19,7 +19,7 @@ export class CoderaxError extends Error {
  * Append a route beneath the configured deployment prefix. `new URL(path, base)`
  * would discard a prefix such as `https://example.com/coderax`.
  */
-function joinRoute(baseUrl, path) {
+export function joinRoute(baseUrl, path) {
   const base = baseUrl.replace(/\/+$/, "");
   const suffix = path.startsWith("/") ? path : `/${path}`;
   const target = new URL(`${base}${suffix}`);

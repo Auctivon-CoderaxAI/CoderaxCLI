@@ -1,9 +1,26 @@
-# CLI ↔ deployment contract
+# CLI ↔ Coderax deployment contract
+
+> This document describes the **legacy Coderax deployment API** used by the
+> top-level `chat`, `work`, `tasks`, `runs` and approval commands. The separate,
+> authoritative WorkflowEngine is a different backend with its own 1.0.0
+> contract: see [WORKFLOW-ENGINE.md](WORKFLOW-ENGINE.md). Do not apply these
+> routes to `coderax engine ...` or vice versa.
 
 Version: CLI `0.3.0`, API major `1`. Shapes were read from
 `Auctivon-CoderaxAI/Coderax` at `main` (`a5d237b0`). The client-side checks live
 in `test/contract.test.js`; backend gaps are tracked in
 [`BACKEND-DEFECTS.md`](../BACKEND-DEFECTS.md).
+
+## Separate authoritative WorkflowEngine
+
+`coderax engine ...` uses the fixed 17-operation WorkflowEngine 1.0.0 surface:
+`/v1/health`, `/v1/ready`, `/v1/agents`, `/v1/models`, `/v1/chat`, `/v1/work`,
+work task control/events, conversations, memory, permissions and notifications.
+It validates the engine's reported `contractVersion` (`1.0.x`) before
+authenticated use, proves the owner token against `/v1/agents`, refuses
+redirects, and binds no schedule, artifact, plugin, tool, project, cloud-browser
+or game operation because the engine does not implement one. See
+[WORKFLOW-ENGINE.md](WORKFLOW-ENGINE.md).
 
 ## Authentication and ownership
 

@@ -2,7 +2,9 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    # A feature branch gets hosted evidence before a pull request exists. The
+    # concurrency group below cancels superseded runs for the same ref.
+    branches: ["**"]
   pull_request:
 
 permissions:
@@ -67,10 +69,43 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  # Real HTTP acceptance against the pinned authoritative engine. The engine is
+  # public; its commit is pinned so a moving upstream cannot change the gate.
+  engine:
+    name: engine contract acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the CLI
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b # v4.0.3
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Install the CLI from the lockfile
+        run: npm ci --ignore-scripts
+      - name: Check out the pinned WorkflowEngine
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: Auctivon-CoderaxAI/Coderax-WorkflowEngine
+          ref: 808dfd3797f9b1d7647ebd14bd395806fc4ab9bd
+          path: .engine
+          persist-credentials: false
+      - name: Install and build the engine
+        working-directory: .engine
+        run: npm ci --no-audit --no-fund && npm run build
+      - name: Run the CLI against the real engine
+        run: CODERAX_ENGINE_DIR="$GITHUB_WORKSPACE/.engine" npm run test:engine
+
   # The protected branch requires a check context named exactly "test".
   test:
     name: test
-    needs: verify
+    needs: [verify, engine]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -78,10 +113,12 @@ jobs:
       - name: Require every platform to pass
         shell: bash
         run: |
-          result="${{ needs.verify.result }}"
-          echo "verify result: $result"
-          if [ "$result" != "success" ]; then
-            echo "One or more platform jobs did not pass."
+          verify="${{ needs.verify.result }}"
+          engine="${{ needs.engine.result }}"
+          echo "verify result: $verify"
+          echo "engine result: $engine"
+          if [ "$verify" != "success" ] || [ "$engine" != "success" ]; then
+            echo "One or more required jobs did not pass."
             exit 1
           fi
 

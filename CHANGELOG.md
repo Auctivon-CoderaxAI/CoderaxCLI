@@ -5,6 +5,42 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the major
 version is `0`, a minor release may change behaviour.
 
+## [Unreleased]
+
+### Added
+
+- Authoritative WorkflowEngine 1.0.0 command namespace: `health`, `ready`,
+  `compat`, `verify`, `agents`, `models`, `chat`, `work`, `tasks` (read, events,
+  cancel, resume, retry), `conversations`, `memory`, `permissions`,
+  `notifications` and `capabilities`.
+- One authoritative command registry for the engine surface, top-level dispatch
+  validation, help, capability reporting and generated bash/zsh/fish
+  completion (`coderax completion <shell>`).
+- Contract gate: validate `/v1/health` `contractVersion` (1.0.x) before the
+  owner token is sent; prove the token against `/v1/agents`; refuse redirects
+  and unsupported contract lines.
+- Live HTTP acceptance test against the built engine, including durable Work,
+  SSE replay and fail-closed blocked commands; the CI workflow now runs it on
+  Ubuntu against a pinned engine commit.
+- Adopted the pinned engine contract, vendored OpenAPI digest, validated HTTP
+  client, SSE decoder and event assembler from `feat/engine-thin-client-v1`
+  (`0cd85bf`); no second route catalogue or transport is kept.
+
+### Changed
+
+- Consolidated PR #6's release, authentication, durable-sync and packaging work
+  into this branch; the engine namespace is layered on the release base rather
+  than a parallel CLI.
+- Removed the superseded OpenAPI-discovery command catalog for commands the
+  authoritative engine does not implement.
+
+### Blocked
+
+- Schedules, artifacts and file transfers, plugins, tools, projects, execution
+  lists, detach, cloud browser, Native Game Studio and Native Gaming Agent are
+  declared blocked because WorkflowEngine 1.0.0 has no such operations. They
+  exit `6` without a request and are never simulated.
+
 ## [0.3.0] - 2026-11-26
 
 This release reconciles three implementations that were developed in parallel:

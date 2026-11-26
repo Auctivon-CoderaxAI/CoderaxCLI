@@ -12,6 +12,13 @@ import { discoverOpenApi, findOperation } from "./discover.js";
 import * as product from "./product-commands.js";
 import * as workflow from "./workflow-commands.js";
 import * as maintenance from "./maintenance.js";
+import * as engine from "./engine-commands.js";
+import {
+  BOOLEAN_GLOBAL_FLAGS,
+  GLOBAL_FLAGS,
+  TOP_LEVEL_COMMANDS,
+  completionScript,
+} from "./command-registry.js";
 import { collectVersionInfo, formatVersionInfo } from "./diagnostics.js";
 import { SdkError } from "../packages/workflow-sdk/src/index.js";
 import { VERSION } from "./version.js";
@@ -45,6 +52,9 @@ Usage:
   coderax doctor [--json] / coderax diagnostics [--json]
   coderax version [--json]
   coderax compat [--json]
+  coderax engine <command> [options] [--json]
+  coderax engine help            authoritative WorkflowEngine 1.0.0 command surface
+  coderax completion <bash|zsh|fish>  completion generated from the command registry
   coderax uninstall [--yes] [--dry-run] [--purge] [--json]
   coderax health [--json]
   coderax openapi [--json]
@@ -123,95 +133,10 @@ const CONFIG_KEYS = Object.freeze(Object.assign(Object.create(null), {
 }));
 const CONFIG_FLAGS = ["base-url", "timeout", "chat-path", "endpoint", "model", "agent"];
 
-const KNOWN_COMMANDS = new Set([
-  "config",
-  "health",
-  "openapi",
-  "agents",
-  "models",
-  "call",
-  "products",
-  "chat",
-  "work",
-  "cloud",
-  "projects",
-  "login",
-  "logout",
-  "status",
-  "whoami",
-  "tasks",
-  "workflows",
-  "runs",
-  "run",
-  "cancel",
-  "resume",
-  "retry",
-  "approve",
-  "repos",
-  "doctor",
-  "diagnostics",
-  "update",
-  "compat",
-  "uninstall",
-  "cleanup",
-  "help",
-  "version",
-]);
-const KNOWN_FLAGS = new Set([
-  "help",
-  "version",
-  "json",
-  "base-url",
-  "token-file",
-  "timeout",
-  "data",
-  "model",
-  "agent",
-  "endpoint",
-  "chat-path",
-  "url",
-  "conversation",
-  "new",
-  "repo",
-  "base-ref",
-  "mode",
-  "workspace",
-  "follow",
-  "detach",
-  "no-follow",
-  "approval",
-  "workflow",
-  "task",
-  "notify",
-  "notify-command",
-  "cancel-on-interrupt",
-  "strict",
-  "max-retries",
-  "work",
-  "yes",
-  "dry-run",
-  "purge",
-  "no-color",
-]);
+const KNOWN_COMMANDS = new Set(TOP_LEVEL_COMMANDS);
+const KNOWN_FLAGS = new Set(GLOBAL_FLAGS);
 const ALLOWED_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
-const BOOLEAN_FLAGS = new Set([
-  "help",
-  "version",
-  "json",
-  "no-color",
-  "new",
-  "follow",
-  "detach",
-  "no-follow",
-  "strict",
-  "notify",
-  "cancel-on-interrupt",
-  "work",
-  "task",
-  "yes",
-  "dry-run",
-  "purge",
-]);
+const BOOLEAN_FLAGS = new Set(BOOLEAN_GLOBAL_FLAGS);
 
 export class UsageError extends Error {
   constructor(message) {
@@ -607,6 +532,15 @@ export async function runCli(argv, options = {}) {
       return EXIT.ok;
     }
 
+    if (positionals[0] === "completion") {
+      const shell = positionals[1];
+      if (!["bash", "zsh", "fish"].includes(shell)) {
+        throw new UsageError("completion requires one of: bash, zsh, fish");
+      }
+      deps.stdout(completionScript(shell));
+      return EXIT.ok;
+    }
+
     // Diagnostics must work before configuration exists and even when the
     // config file is unreadable; neither answer needs the deployment.
     if (positionals[0] === "version") {
@@ -692,6 +626,8 @@ export async function runCli(argv, options = {}) {
         return await product.update(ctx);
       case "compat":
         return await product.compat(ctx);
+      case "engine":
+        return await engine.runEngineCommand(ctx);
       case "uninstall":
       case "cleanup":
         return await maintenance.uninstall(ctx);
@@ -732,9 +668,12 @@ export async function runCli(argv, options = {}) {
       error instanceof UsageError ||
       error instanceof ConfigError ||
       error instanceof CoderaxError ||
-      error instanceof SdkError;
+      error instanceof SdkError ||
+      error.code === "USAGE";
     const detail =
-      error instanceof UsageError ? error.message : `${error.code ?? "ERROR"}: ${error.message}`;
+      error instanceof UsageError || error.code === "USAGE"
+        ? error.message
+        : `${error.code ?? "ERROR"}: ${error.message}`;
     deps.stderr(`coderax: ${known ? detail : "unexpected failure"}\n`);
     return exitFor(error);
   }

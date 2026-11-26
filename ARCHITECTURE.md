@@ -18,6 +18,12 @@ argv ──► parseArgv ──► preflight ──► resolveSettings ──►
                                           │
                                           ▼
                                   fetch (HTTPS, no redirects)
+
+engine ──► command-registry ──► engine-client ──► /v1/health + /v1/agents
+           (one command table)   (contract gate)          │
+                                                            ▼
+                                                    engine-commands
+                                                    (available/blocked)
 ```
 
 ## Layers
@@ -35,7 +41,14 @@ argv ──► parseArgv ──► preflight ──► resolveSettings ──►
 | `src/session.js` | per-deployment conversation continuity, bounded and normalized | none |
 | `src/render.js` | human tables and run rendering | none |
 | `src/approval.js` | fail-closed approval policies | SDK |
-| `src/discover.js` | OpenAPI discovery for `openapi`/`agents`/`models` | HTTP client |
+| `src/discover.js` | OpenAPI discovery for legacy `openapi`/`agents`/`models` | HTTP client |
+| `src/command-registry.js` | single command registry: top-level names, flags, WorkflowEngine 1.0.0 operations, blocked reasons, completion generator | contract |
+| `src/contract.js` | pinned engine version, route catalogue, event types and OpenAPI provenance (engine workstream) | none |
+| `src/engine.js` | validated engine HTTP/SSE client with redirect refusal and response checks (engine workstream) | contract, sse |
+| `src/sse.js` | engine SSE framing and JSON frame parsing (engine workstream) | none |
+| `src/events.js` | event assembly, dedupe, terminal detection, reconnect policy (engine workstream) | contract |
+| `src/engine-client.js` | contract-version gate, owner proof and error/exit mapping over `engine.js` | contract, engine, registry |
+| `src/engine-commands.js` | `engine` handlers, capability matrix, fail-closed dispatch | registry, engine-client |
 | `packages/workflow-sdk/src/contract.js` | routes, capabilities, statuses, documented backend gaps | none |
 | `packages/workflow-sdk/src/http.js` | transport, SSE content-type enforcement, version header, idle timeout, cancellation | `fetch` |
 | `packages/workflow-sdk/src/sse.js` | SSE decoder, event sequencing, deduplication, gap handling | none |
@@ -44,6 +57,24 @@ argv ──► parseArgv ──► preflight ──► resolveSettings ──►
 
 The SDK is imported by relative path. There is no workspace install step, no
 npm dependency and no duplicate backend implementation inside the CLI.
+
+## Authoritative WorkflowEngine
+
+`coderax engine ...` targets the separate WorkflowEngine backend. The engine
+does not serve an OpenAPI document, so the CLI binds to the pinned route table
+in `src/contract.js` and checks the vendored document's SHA-256. The HTTP, SSE
+and event-assembly core is adopted from the engine thin-client workstream; the
+command registry remains the only command table. Every
+authenticated command validates `GET /v1/health`'s `contractVersion` (1.0.x)
+first, then proves the owner token with `GET /v1/agents`, and only then calls
+the requested operation. Any other contract line exits `6`; a 401/403 exits
+`3`. Redirects are refused by the shared transport, identifiers are validated
+and URL-encoded, and no side-effecting request is retried.
+
+Commands absent from 1.0.0 are `blocked` in the registry and return exit `6`
+before configuration or HTTP. `engine capabilities --json` reports the same
+matrix. Shell completion is generated from the registry by
+`coderax completion <bash|zsh|fish>`, so completion cannot drift from dispatch.
 
 ## Credentials
 

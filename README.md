@@ -6,6 +6,14 @@ Work, submits autonomous builds, monitors durable runs, lists products, agents,
 models and repositories, checks health, reads the deployment's own OpenAPI
 document, and issues authenticated calls.
 
+The separate **Coderax WorkflowEngine** is exposed through the authoritative
+`coderax engine ...` namespace. It is not the legacy `/api/work` deployment
+API: the engine namespace binds only to the published 1.0.0 contract, validates
+the served contract version and owner token before each authenticated call,
+and marks schedules, artifacts, tools, projects, cloud browser, Game Studio and
+Gaming Agent as blocked because 1.0.0 has no such operations. See
+[docs/WORKFLOW-ENGINE.md](docs/WORKFLOW-ENGINE.md).
+
 The CLI does not run models, agents, containers, or databases locally. Inference
 and state live in the Coderax deployment; this program makes HTTP requests and
 exits. Installing it never pulls in Ollama, Docker, a local AI runtime, a
@@ -15,7 +23,8 @@ database, or a background service.
 - Runtime: Node.js 24 or newer, standard library only, no runtime dependencies
 - Companion: [`Coderax`](https://github.com/Auctivon-CoderaxAI/Coderax) (deployment)
 - Distribution: GitHub Releases (canonical); npm-ready but not published
-- Shared contract: [`packages/workflow-sdk`](packages/workflow-sdk/src/contract.js)
+- Shared contract: [`packages/workflow-sdk`](packages/workflow-sdk/src/contract.js) (legacy deployment)
+- Engine contract: [`src/contract.js`](src/contract.js) and [`contracts/`](contracts) (WorkflowEngine 1.0.0)
 
 This repository is the **canonical** Coderax CLI. The in-repo `Coderax/cli`
 package is deprecated; it is replaced by this implementation.
@@ -74,6 +83,11 @@ else. No administrator rights, services, daemons, or open ports.
 | Autonomous Work submission, durable runs, resume/retry/cancel | ✅ implemented, contract-tested |
 | `tasks`, `workflows`, `runs`, `approve`, `repos`, `whoami` | ✅ implemented, contract-tested |
 | `products`, `cloud` and `projects` status | ✅ implemented, tested |
+| Authoritative WorkflowEngine 1.0.0 (`engine` namespace) | ✅ implemented; live HTTP acceptance test |
+| Pinned engine contract / vendored OpenAPI digest | ✅ adopted from the engine thin-client workstream; drift-tested |
+| Engine HTTP/SSE core with response validation and idle timeout | ✅ adopted; exercised against the real engine |
+| Engine contract/auth preflight, blocked capabilities | ✅ implemented, tested; blocked commands send no request |
+| Engine schedules, artifacts, tools, projects, cloud browser, game features | ⛔ blocked — absent from WorkflowEngine 1.0.0 |
 | `doctor` diagnostics, `version`, `compat`, `uninstall` | ✅ implemented, tested |
 | Reproducible artifacts, SHA-256 checksums, SPDX SBOM | ✅ implemented, verified |
 | Traversal/symlink/overwrite-safe archive extraction | ✅ implemented, tested |
@@ -117,7 +131,22 @@ coderax agents --work --json
 coderax health
 coderax openapi
 coderax call GET /api/models --json
+
+# Authoritative WorkflowEngine 1.0.0 (separate backend)
+coderax engine login
+coderax engine health
+coderax engine verify
+coderax engine chat "Summarize this repository" --mode cloud
+coderax engine work submit "Fix the failing test" --follow
+coderax engine tasks <taskId>
+coderax engine tasks events <taskId> --json
+coderax engine capabilities --json
+coderax completion bash > ~/.coderax-completion.bash
 ```
+
+`coderax engine capabilities` is the authoritative matrix of available,
+unconfigured and blocked capabilities. Blocked commands exit `6` without
+sending a request; they never simulate backend execution.
 
 `openapi`, `agents`, and `models` use the deployment's OpenAPI document. `call`
 uses the path you supply. A missing discovered route fails with
