@@ -39,7 +39,7 @@ jobs:
       - name: Syntax check
         run: npm run check
       - name: Unit, CLI and contract tests
-        run: npm test
+        run: node scripts/run-tests.mjs
       - name: Cross-platform install smoke
         run: node scripts/smoke-install.mjs
       - name: Install Linux Secret Service for real-store verification
