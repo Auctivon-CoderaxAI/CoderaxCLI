@@ -165,7 +165,11 @@ test("Windows DPAPI stores ciphertext, not the token", async () => {
   const file = join(directory, "credentials", "account-1.dpapi");
   const ciphertext = await readFile(file, "utf8");
   assert.equal(ciphertext.includes(SECRET), false);
-  assert.equal((await stat(file)).mode & 0o777, 0o600);
+  // Windows has no POSIX mode bits; DPAPI is the protection boundary there.
+  // The 0600 assertion is meaningful only on a POSIX host.
+  if (process.platform !== "win32") {
+    assert.equal((await stat(file)).mode & 0o777, 0o600);
+  }
 
   assert.equal(await store.get("account-1"), SECRET);
   assert.equal(await store.delete("account-1"), true);
