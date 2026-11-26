@@ -346,6 +346,22 @@ try {
 
   await step("launcher and non-interactive entrypoints work", async () => {
     const version = await cli(["--version"]);
+    if (version.status !== 0) {
+      const present = existsSync(launcher);
+      const raw = present ? await readFile(launcher) : Buffer.alloc(0);
+      const program = join(prefix, VERSION, "bin", IS_WINDOWS ? "coderax.cmd" : "coderax");
+      let binEntries = [];
+      try {
+        binEntries = await readdir(binDir);
+      } catch {
+        binEntries = ["<missing>"];
+      }
+      throw new Error(
+        `${tail(version)}\nlauncher=${launcher} exists=${present} bytes=${raw.length} ` +
+          `head=${JSON.stringify(raw.subarray(0, 240).toString("utf8"))} ` +
+          `program=${program} exists=${existsSync(program)} bin=${JSON.stringify(binEntries)}`,
+      );
+    }
     assert.equal(version.status, 0, tail(version));
     assert.equal(version.stdout.trim(), `coderax-cli ${VERSION}`);
     const help = await cli(["--help"]);

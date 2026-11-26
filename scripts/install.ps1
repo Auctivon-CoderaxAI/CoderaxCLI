@@ -205,14 +205,20 @@ try {
   # A shim rather than a copied launcher: the shipped launcher resolves paths
   # relative to its own location, so copying it would break.
   try {
-    # cmd.exe reads a .cmd file in the console's OEM code page, so an ASCII
-    # write would replace non-ASCII prefix characters with '?' and break the
-    # launcher. Write in the OEM code page cmd will actually use.
-    $shim = "@echo off`r`ncall `"$destination\bin\coderax.cmd`" %*`r`nexit /b %ERRORLEVEL%`r`n"
+    # The launcher must carry the install path, which may contain non-ASCII
+    # characters. A .cmd file is decoded with the console code page, so write
+    # UTF-8 and switch the console to 65001 before the line that uses the path,
+    # restoring the previous code page afterwards.
+    $shim = "@echo off`r`n" +
+      "setlocal`r`n" +
+      "for /f `"tokens=2 delims=:`" %%c in ('chcp') do set `"CODERAX_CP=%%c`"`r`n" +
+      "chcp 65001 >nul`r`n" +
+      "call `"$destination\bin\coderax.cmd`" %*`r`n" +
+      "set `"CODERAX_RC=%ERRORLEVEL%`"`r`n" +
+      "if defined CODERAX_CP chcp%CODERAX_CP% >nul`r`n" +
+      "exit /b %CODERAX_RC%`r`n"
     $tmpLauncher = "$launcher.new"
-    $oem = [System.Text.Encoding]::GetEncoding(
-      [System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
-    [System.IO.File]::WriteAllText($tmpLauncher, $shim, $oem)
+    [System.IO.File]::WriteAllText($tmpLauncher, $shim, [System.Text.UTF8Encoding]::new($false))
     Move-Item -LiteralPath $tmpLauncher -Destination $launcher -Force
   } catch {
     Remove-Item -LiteralPath $destination -Recurse -Force -ErrorAction SilentlyContinue
