@@ -36,9 +36,10 @@ const TOKEN = "install-test-token-9f3a";
 const manifest = JSON.parse(await readFile(join(DIST, "release-manifest.json"), "utf8"));
 const VERSION = manifest.version;
 const NPM_TARBALL = join(DIST, `coderax-cli-${VERSION}.tgz`);
-const TARBALL = join(DIST, `coderax-cli-${VERSION}-standalone.tar.gz`);
-const tarballRecord = manifest.artifacts.find((artifact) => artifact.name.endsWith("-standalone.tar.gz"));
-assert.ok(tarballRecord, "the manifest must list the standalone tarball");
+const STANDALONE_SUFFIX = IS_WINDOWS ? "-standalone.zip" : "-standalone.tar.gz";
+const TARBALL = join(DIST, `coderax-cli-${VERSION}${STANDALONE_SUFFIX}`);
+const tarballRecord = manifest.artifacts.find((artifact) => artifact.name.endsWith(STANDALONE_SUFFIX));
+assert.ok(tarballRecord, `the manifest must list the ${STANDALONE_SUFFIX} archive`);
 
 // A rehearsal of the next release, built from the same source with a bumped
 // version, exercises a real side-by-side upgrade and rollback. Nothing is
@@ -169,10 +170,10 @@ async function buildUpgradeArtifact() {
   assert.equal(result.status, 0, tail(result));
   const upgradeManifest = JSON.parse(await readFile(join(upgradeDist, "release-manifest.json"), "utf8"));
   assert.equal(upgradeManifest.version, NEXT_VERSION);
-  const record = upgradeManifest.artifacts.find((artifact) => artifact.name.endsWith("-standalone.tar.gz"));
-  assert.ok(record, "the rehearsal manifest must list the standalone tarball");
+  const record = upgradeManifest.artifacts.find((artifact) => artifact.name.endsWith(STANDALONE_SUFFIX));
+  assert.ok(record, `the rehearsal manifest must list the ${STANDALONE_SUFFIX} archive`);
   return {
-    tarball: join(upgradeDist, `coderax-cli-${NEXT_VERSION}-standalone.tar.gz`),
+    tarball: join(upgradeDist, `coderax-cli-${NEXT_VERSION}${STANDALONE_SUFFIX}`),
     checksum: record.sha256,
   };
 }
@@ -289,7 +290,10 @@ try {
     assert.equal(result.status, 0, tail(result));
     assert.ok(existsSync(launcher), `launcher missing at ${launcher}`);
     assert.ok(existsSync(join(prefix, VERSION, "src", "cli.js")), "installed sources are missing");
-    assert.ok(existsSync(join(prefix, VERSION, "uninstall.sh")), "the offline uninstaller is missing");
+    assert.ok(
+      existsSync(join(prefix, VERSION, IS_WINDOWS ? "uninstall.ps1" : "uninstall.sh")),
+      "the offline uninstaller is missing",
+    );
     return `${prefix}/${VERSION}`;
   });
 
