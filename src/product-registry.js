@@ -92,8 +92,8 @@ export const PRODUCTS = Object.freeze([
       + 'bash, with JSON output and meaningful exit codes for automation.',
     status: 'preview',
     availabilityNote:
-      'The cli/ package runs from source and passes its test suite; npm '
-      + 'publishing is not configured yet.',
+      'The canonical CLI runs from source against WorkflowEngine contract 1.0.0 '
+      + 'and passes its test suite; npm publishing is not configured yet.',
     icon: 'TerminalSquare',
     shortcut: '2',
     launchKind: 'none',

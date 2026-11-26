@@ -2,7 +2,7 @@
   "name": "coderax-cli",
   "version": "0.1.0",
   "private": true,
-  "description": "Canonical Coderax CLI: chat, Work mode, products, login, health, OpenAPI discovery, and authenticated calls",
+  "description": "Owner-only Coderax CLI: Chat, durable Work, streaming events, task control, history, permissions and engine diagnostics",
   "type": "module",
   "bin": {
     "coderax": "src/cli.js"
@@ -13,6 +13,8 @@
   "scripts": {
     "start": "node src/cli.js --help",
     "test": "node --test",
-    "check": "node --check src/config.js && node --check src/client.js && node --check src/discover.js && node --check src/cli.js && node --check src/product-commands.js && node --check src/product-registry.js && node --check src/version.js"
+    "test:unit": "node --test test/*.test.js",
+    "test:engine": "node --test test/engine.integration.test.js",
+    "check": "node --check src/config.js && node --check src/client.js && node --check src/sse.js && node --check src/contract.js && node --check src/engine.js && node --check src/events.js && node --check src/engine-commands.js && node --check src/discover.js && node --check src/cli.js && node --check src/product-commands.js && node --check src/product-registry.js && node --check src/version.js"
   }
 }

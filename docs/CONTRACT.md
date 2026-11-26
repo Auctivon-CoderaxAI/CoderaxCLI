@@ -1,73 +1,119 @@
-# CLI ↔ deployment contract
+# CLI ↔ WorkflowEngine contract
 
-Version: CLI `0.1.0`, targeting Coderax deployments that publish an OpenAPI 3.x
-document.
+The CLI targets WorkflowEngine HTTP contract **1.0.0**, SDK generation
+`@coderax/sdk` **1.0.0**, and execution event schema **1**. The pinned document
+and its provenance are in [`contracts/PROVENANCE.md`](../contracts/PROVENANCE.md).
+
+Every operation is under `/v1`. No engine command discovers a path or guesses a
+legacy `/api` route.
 
 ## Authentication
 
-The CLI sends `Authorization: Bearer <token>` on every request. The deployment is
-responsible for issuing and revoking tokens, including the machine-client
-identities described in the Coderax repository's Agent Management API surface.
+All owner operations send `Authorization: Bearer <token>`. `GET /v1/health` and
+`GET /v1/ready` are public. `login` proves the token by calling the owner-only
+`GET /v1/agents` before writing it to disk.
 
-The CLI adds no headers beyond `accept`, `authorization`, and `content-type` on
-bodies, and it never forwards cookies.
+There is exactly one principal. The CLI has no signup, memberships, refresh
+tokens or credential brokering.
 
-## Discovery
+## Operations used
 
-Candidates, tried in order:
+| Operation | Method and path | CLI |
+| --- | --- | --- |
+| `getHealth` | `GET /v1/health` | `health` |
+| `getReadiness` | `GET /v1/ready` | `ready`, `doctor` |
+| `listAgents` | `GET /v1/agents` | `login`, `agents`, `capabilities`, `doctor` |
+| `listModels` | `GET /v1/models` | `models`, `capabilities` |
+| `submitChat` | `POST /v1/chat` | `chat` |
+| `submitWork` | `POST /v1/work` | `work` |
+| `getTask` | `GET /v1/work/{taskId}` | `task`, `artifacts`, `resume`, `retry` |
+| `cancelTask` | `POST /v1/work/{taskId}/cancel` | `cancel` |
+| `resumeTask` | `POST /v1/work/{taskId}/resume` | `resume` |
+| `retryTask` | `POST /v1/work/{taskId}/retry` | `retry` |
+| `streamTaskEvents` | `GET /v1/work/{taskId}/events?after=N` | `work`, `events` |
+| `listConversations` | `GET /v1/conversations` | `conversations` |
+| `getConversation` | `GET /v1/conversations/{conversationId}` | `conversation` |
+| `listMemory` | `GET /v1/memory?mode=private\|cloud` | `memory` |
+| `listPermissions` | `GET /v1/work/{taskId}/permissions` | `permissions` |
+| `decidePermission` | `POST /v1/work/{taskId}/permissions` | `approve`, `deny` |
+| `listNotifications` | `GET /v1/notifications` | `notifications`, `tasks` |
 
-1. `/openapi.json`
-2. `/api/openapi.json`
-3. `/.well-known/openapi.json`
+## Chat and Work
 
-A candidate is accepted only when it is a JSON object with an `openapi` version
-starting `3.`, a `paths` object, and at least one operation. The first accepted
-document wins; failures from every candidate are reported when none is usable.
-An `HTTP_401`, `HTTP_403`, or `REQUEST_TIMEOUT` is surfaced immediately instead
-of being hidden behind `OPENAPI_NOT_FOUND`, so authentication and timeout
-exit codes remain meaningful.
+`POST /v1/chat` accepts `message`, optional `conversationId`, `agent`, `model`
+and `mode`. Contract 1.0.0 returns one `ChatReply`; it is not streamed.
 
-## Health
+`POST /v1/work` accepts `objective`, optional `conversationId`, `agent`, `model`,
+`mode` and `budget`, plus `requireApproval`. It returns `202` with a task id,
+state, generation and events path as soon as ownership is recorded. Closing the
+stream never ends the task.
 
-Candidates, tried in order: `/health`, `/api/health`, `/healthz`. A `404` or `405`
-moves to the next candidate; any other failure is surfaced immediately, so an
-authentication problem is not mistaken for a missing endpoint.
+The CLI parses `--model` as `<provider>/<model>` and sends the structured
+`ModelRef`. It never substitutes an unavailable agent or model; the engine
+refuses rather than falling back.
 
-## Convenience routes
+## Event stream
 
-| Command | Match rule |
-| --- | --- |
-| `agents` | first `GET` operation whose path ends in `/agents` |
-| `models` | first `GET` operation whose path ends in `/models` |
+Each frame is `data: <json>\n\n`. An envelope carries:
 
-No path is hardcoded. When the match is absent the CLI exits `1` with
-`OPERATION_NOT_FOUND` and suggests `coderax openapi`.
+- `eventId` — stable identity;
+- `seq` — monotonic per task, starting at 1;
+- `type` and `payload`;
+- `v: 1`, task, agent, generation and timestamp.
 
-## Requests
+Rules implemented by the CLI:
 
-- Route paths are appended beneath the configured deployment prefix, so
-  `--base-url https://example.com/coderax` requests
-  `https://example.com/coderax/health`, not `https://example.com/health`.
-- `call <METHOD> <PATH> [--data <json>]` — `--data` is rejected on `GET`/`HEAD`.
-- Bodies are serialized as JSON; responses are parsed as JSON when possible and
-  shown verbatim otherwise.
-- Timeout: 15s default, `--timeout` or `CODERAX_TIMEOUT_MS` to override.
-- Redirects are refused.
+1. A repeated `eventId`, or `seq <= lastSeen`, is ignored.
+2. `text.delta` appends; a repeated delta is preserved unless a snapshot already
+   contains it.
+3. `text.replace` is cumulative. If it extends the displayed text, only the
+   suffix is emitted; otherwise it replaces the text exactly once.
+4. Legacy `message: true` snapshots and top-level `delta` fields follow the same
+   rule, so a snapshot and its incremental delta cannot print twice.
+5. An unknown event type is ignored but advances the cursor, as the event
+   contract requires.
+6. `task.completed`, `task.failed`, `task.cancelled` and `task.interrupted` are
+   terminal and close the follow loop.
+7. A clean stream close without a terminal event is reconnected from the last
+   sequence with bounded backoff.
+8. `401`/`403` is fatal and never retried. A malformed frame is
+   `STREAM_PROTOCOL`, not silent text.
 
-## Exit codes
+## Errors
 
-- `0` success
-- `1` other operational failure (missing operation, unavailable health check,
-  other non-2xx HTTP status)
-- `2` usage error or invalid configuration
-- `3` HTTP 401/403 authentication or authorization failure
-- `4` network failure or timeout
-- `5` HTTP 404 not found
-- `6` Cloud/projects unavailable
-- `130` cancelled
+The engine returns a `Problem` body with a stable `code`, HTTP `status`,
+optional `requestId` and `retryable`. The CLI preserves the code and maps it to
+an exit status:
+
+- `unauthorized`, `forbidden` → 3
+- `not_found` → 5
+- `validation_failed` → 2
+- `engine_unavailable`, `not_ready` → 6
+- timeout, transport, `STREAM_DISCONNECTED` → 4
+- other problem codes → 1
+
+## Contract-imposed limits
+
+- **Task discovery:** there is no list-tasks operation. `tasks` is derived from
+  durable notifications. An active task is identified by the id returned from
+  `work`.
+- **Transfers:** there is no upload or download operation. `artifact` in task
+  status carries `path`, `bytes` and `digest` metadata only.
+- **Chat streaming:** the published handler returns one JSON reply.
+- **Engine restart durability:** task and conversation state are in memory in
+  the current engine; leases use MongoDB. Restart survival is a deployment
+  property and is not claimed by this client.
 
 ## Compatibility
 
-The CLI depends only on the OpenAPI document shape and bearer auth. Adding routes
-to a deployment does not require a CLI release; removing a route degrades the
-matching command to `OPERATION_NOT_FOUND` while `coderax call` keeps working.
+Adding an optional request field or a new operation is backward compatible.
+Removing or renaming a field, changing a type or changing a status code requires
+a new contract version and `/vN` prefix. The CLI pins one contract version and
+fails `doctor` on a mismatch.
+
+## Provenance
+
+The previously reported `feat/engine-thin-client` commit `d12a8b5` is not
+reachable in any organization repository. This implementation was reconstructed
+against the SDK and OpenAPI above. The sole cross-repository owner
+(`@nnabdelshahid`) should confirm the pin before production use.

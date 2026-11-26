@@ -8,9 +8,19 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -22,5 +32,33 @@ jobs:
           node-version: "24"
       - name: Syntax check
         run: npm run check
-      - name: Unit and CLI tests
+      - name: Unit and HTTP tests
         run: npm test
+
+  engine-integration:
+    name: test (real WorkflowEngine harness)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b # v4.0.3
+        with:
+          node-version: "24"
+      # The engine is public. Pinning its commit makes the contract test
+      # reproducible and keeps a moving upstream out of the merge gate.
+      - name: Check out the pinned WorkflowEngine
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: Auctivon-CoderaxAI/Coderax-WorkflowEngine
+          ref: 808dfd3797f9b1d7647ebd14bd395806fc4ab9bd
+          path: .engine
+          persist-credentials: false
+      - name: Install and build the engine
+        working-directory: .engine
+        run: npm ci --no-audit --no-fund && npm run build
+      - name: Run the CLI against the real engine harness
+        run: WORKFLOW_ENGINE_ROOT="$GITHUB_WORKSPACE/.engine" npm run test:engine

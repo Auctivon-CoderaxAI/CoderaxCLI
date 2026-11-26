@@ -12,6 +12,7 @@ export class ConfigError extends Error {
 
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
 export const DEFAULT_TIMEOUT_MS = 15000;
+export const DEFAULT_EVENT_TIMEOUT_MS = 60000;
 export const DEFAULT_CHAT_PATH = "/api/ask/agents";
 export const DEFAULT_ENDPOINT = "agents";
 
@@ -95,14 +96,32 @@ export async function loadConfig({ env = process.env, filePath, readFileImpl = r
     throw new ConfigError("TIMEOUT_INVALID", "timeout must be an integer between 100 and 120000 milliseconds");
   }
 
+  // Work tasks can legitimately produce no event for longer than a single HTTP
+  // request, so the event stream has its own idle deadline.
+  const eventTimeoutRaw =
+    overrides.eventTimeoutMs
+    ?? envText(env.CODERAX_EVENT_TIMEOUT_MS)
+    ?? stored.eventTimeoutMs
+    ?? Math.max(timeoutMs, DEFAULT_EVENT_TIMEOUT_MS);
+  const eventTimeoutMs = Number(eventTimeoutRaw);
+  if (!Number.isInteger(eventTimeoutMs) || eventTimeoutMs < 1000 || eventTimeoutMs > 600000) {
+    throw new ConfigError(
+      "EVENT_TIMEOUT_INVALID",
+      "event timeout must be an integer between 1000 and 600000 milliseconds",
+    );
+  }
+
   return {
     configPath: path,
     baseUrl: baseUrlRaw ? normalizeBaseUrl(baseUrlRaw).baseUrl : null,
     token: typeof token === "string" && token !== "" ? token : null,
     timeoutMs,
+    eventTimeoutMs,
     chatPath: env.CODERAX_CHAT_PATH?.trim() || stored.chatPath || DEFAULT_CHAT_PATH,
     endpoint: env.CODERAX_ENDPOINT?.trim() || stored.endpoint || DEFAULT_ENDPOINT,
-    model: env.CODERAX_MODEL?.trim() || stored.model || "",
+    model: overrides.model ?? env.CODERAX_MODEL?.trim() ?? stored.model ?? "",
+    agent: overrides.agent ?? env.CODERAX_AGENT?.trim() ?? stored.agent ?? "",
+    mode: overrides.mode ?? env.CODERAX_MODE?.trim() ?? stored.mode ?? "",
     output: stored.output || "text",
     account: typeof stored.account === "string" ? stored.account : null,
   };
@@ -130,6 +149,9 @@ export async function saveConfig(
   if (patch.chatPath !== undefined) next.chatPath = String(patch.chatPath);
   if (patch.endpoint !== undefined) next.endpoint = String(patch.endpoint);
   if (patch.model !== undefined) next.model = String(patch.model);
+  if (patch.agent !== undefined) next.agent = String(patch.agent);
+  if (patch.mode !== undefined) next.mode = String(patch.mode);
+  if (patch.eventTimeoutMs !== undefined) next.eventTimeoutMs = Number(patch.eventTimeoutMs);
   if (patch.output !== undefined) next.output = String(patch.output);
   if (patch.account !== undefined) next.account = patch.account === null ? null : String(patch.account);
 
@@ -167,9 +189,12 @@ export function describeConfig(config) {
     baseUrl: config.baseUrl ?? null,
     tokenConfigured: Boolean(config.token),
     timeoutMs: config.timeoutMs,
+    eventTimeoutMs: config.eventTimeoutMs,
     chatPath: config.chatPath,
     endpoint: config.endpoint,
     model: config.model,
+    agent: config.agent,
+    mode: config.mode,
     account: config.account ?? null,
     output: config.output,
   };

@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runCli } from "../src/cli.js";
 import { discoverOpenApi, summarizeOperations } from "../src/discover.js";
+import { healthBody } from "./support.js";
 
 const TOKEN = "cli-test-token";
 
@@ -33,6 +34,7 @@ function stubHandler(req, res) {
   };
 
   if (url.pathname === "/health") return json(200, { status: "ok", service: "coderax" });
+  if (url.pathname === "/v1/health") return json(200, healthBody());
   if (url.pathname === "/openapi.json") return json(200, OPENAPI);
   if (url.pathname === "/api/agents") {
     if (req.headers.authorization !== `Bearer ${TOKEN}`) return json(401, { message: "unauthorized" });
@@ -81,7 +83,7 @@ test("help exits 0 and lists commands", async () => {
   const code = await runCli(["--help"], { env: {}, stdout: io.stdout, stderr: io.stderr });
   assert.equal(code, 0);
   assert.match(io.out(), /coderax config set/);
-  assert.match(io.out(), /OpenAPI/);
+  assert.match(io.out(), /WorkflowEngine/);
 });
 
 test("unknown commands are usage errors", async () => {
@@ -138,29 +140,32 @@ test("config set rejects an insecure remote URL", async () => {
   assert.match(io.err(), /HTTPS/);
 });
 
-test("health, openapi, agents, models, and call work against a deployment", async () => {
+test("health uses the versioned engine route", async () => {
   await withStub(async (baseUrl) => {
-    const env = { CODERAX_CONFIG: join(await mkdtemp(join(tmpdir(), "coderax-cli-")), "c.json"), CODERAX_BASE_URL: baseUrl, CODERAX_TOKEN: TOKEN };
+    const env = {
+      CODERAX_CONFIG: join(await mkdtemp(join(tmpdir(), "coderax-cli-")), "c.json"),
+      CODERAX_BASE_URL: baseUrl,
+      CODERAX_TOKEN: TOKEN,
+    };
+    const io = capture();
+    assert.equal(await runCli(["health", "--json"], { env, stdout: io.stdout, stderr: io.stderr }), 0);
+    const health = JSON.parse(io.out());
+    assert.equal(health.contractVersion, "1.0.0");
+    assert.equal(health.checks[0].name, "configuration");
+  });
+});
 
-    const healthIo = capture();
-    assert.equal(await runCli(["health", "--json"], { env, stdout: healthIo.stdout, stderr: healthIo.stderr }), 0);
-    const health = JSON.parse(healthIo.out());
-    assert.equal(health.endpoint, "/health");
-    assert.equal(health.body.service, "coderax");
+test("openapi and call work against a legacy deployment", async () => {
+  await withStub(async (baseUrl) => {
+    const env = {
+      CODERAX_CONFIG: join(await mkdtemp(join(tmpdir(), "coderax-cli-")), "c.json"),
+      CODERAX_BASE_URL: baseUrl,
+      CODERAX_TOKEN: TOKEN,
+    };
 
     const openapiIo = capture();
     assert.equal(await runCli(["openapi", "--json"], { env, stdout: openapiIo.stdout, stderr: openapiIo.stderr }), 0);
     assert.equal(JSON.parse(openapiIo.out()).operationCount, 2);
-
-    const agentsIo = capture();
-    assert.equal(await runCli(["agents", "--json"], { env, stdout: agentsIo.stdout, stderr: agentsIo.stderr }), 0);
-    const agents = JSON.parse(agentsIo.out());
-    assert.equal(agents.path, "/api/agents");
-    assert.equal(agents.body.agents.length, 1);
-
-    const modelsIo = capture();
-    assert.equal(await runCli(["models", "--json"], { env, stdout: modelsIo.stdout, stderr: modelsIo.stderr }), 0);
-    assert.equal(JSON.parse(modelsIo.out()).body.models[0], "gpt-4.1");
 
     const callIo = capture();
     assert.equal(
@@ -207,7 +212,7 @@ test("call output redacts a token in the request path", async () => {
   });
 });
 
-test("discovery keeps route keys unredacted while output stays redacted", async () => {
+test("openapi keeps route keys unredacted while output stays redacted", async () => {
   const route = `/api/${TOKEN}/agents`;
   const document = {
     openapi: "3.1.0",
@@ -224,16 +229,6 @@ test("discovery keeps route keys unredacted while output stays redacted", async 
       );
       assert.equal(openapiIo.out().includes(TOKEN), false);
       assert.equal(JSON.parse(openapiIo.out()).operations[0].path, "/api/[REDACTED]/agents");
-
-      const agentsIo = capture();
-      assert.equal(
-        await runCli(["agents", "--json"], { env, stdout: agentsIo.stdout, stderr: agentsIo.stderr }),
-        0,
-      );
-      const agents = JSON.parse(agentsIo.out());
-      assert.equal(agents.path, "/api/[REDACTED]/agents");
-      assert.equal(agents.body.agents.length, 1);
-      assert.equal(agentsIo.out().includes(TOKEN), false);
     },
     (req, res) => {
       const url = new URL(req.url, "http://localhost");
@@ -246,18 +241,6 @@ test("discovery keeps route keys unredacted while output stays redacted", async 
       return json(404, { message: "not found" });
     },
   );
-});
-
-test("doctor probes the same health endpoints", async () => {
-  await withStub(async (baseUrl) => {
-    const io = capture();
-    const env = { ...(await tempEnv()), CODERAX_BASE_URL: baseUrl };
-    const code = await runCli(["doctor", "--json"], { env, stdout: io.stdout, stderr: io.stderr });
-    assert.equal(code, 1);
-    const reachability = JSON.parse(io.out()).checks.find((check) => check.name === "reachability");
-    assert.equal(reachability.ok, true);
-    assert.match(reachability.detail, /GET \/health/);
-  });
 });
 
 test("call rejects body on GET and invalid JSON", async () => {
@@ -279,21 +262,22 @@ test("call rejects body on GET and invalid JSON", async () => {
   assert.match(io.err(), /valid JSON/);
 });
 
-test("missing operations are reported, not guessed", async () => {
+test("a versioned operation is never guessed from an OpenAPI document", async () => {
   const server = createServer((req, res) => {
-    const url = new URL(req.url, "http://localhost");
-    if (url.pathname === "/openapi.json") {
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ openapi: "3.1.0", paths: { "/api/healthz": { get: {} } } }));
-      return;
-    }
-    res.writeHead(404);
-    res.end();
+    res.writeHead(404, { "content-type": "application/json" });
+    res.end(JSON.stringify({
+      type: "https://coderax.dev/problems/not_found",
+      title: "not found",
+      status: 404,
+      code: "not_found",
+      detail: "no agents route",
+      retryable: false,
+    }));
   });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
   const { port } = server.address();
-  const env = await tempEnv();
+  const env = { ...(await tempEnv()), CODERAX_TOKEN: TOKEN };
   env.CODERAX_BASE_URL = `http://127.0.0.1:${port}`;
   const io = capture();
   try {
@@ -302,8 +286,8 @@ test("missing operations are reported, not guessed", async () => {
       stdout: io.stdout,
       stderr: io.stderr,
     });
-    assert.equal(code, 1);
-    assert.match(io.err(), /OPERATION_NOT_FOUND|no GET agents operation/);
+    assert.equal(code, 5);
+    assert.match(io.err(), /not_found/);
   } finally {
     server.closeAllConnections?.();
     server.close();
@@ -330,13 +314,6 @@ test("discovery applies relative server prefixes and skips templated paths", asy
       );
       const operations = JSON.parse(openapiIo.out()).operations;
       assert.equal(operations.find((operation) => operation.operationId === "listAgents").path, "/api/v1/agents");
-
-      const agentsIo = capture();
-      assert.equal(
-        await runCli(["agents", "--json"], { env, stdout: agentsIo.stdout, stderr: agentsIo.stderr }),
-        0,
-      );
-      assert.equal(JSON.parse(agentsIo.out()).path, "/api/v1/agents");
     },
     (req, res) => {
       const url = new URL(req.url, "http://localhost");
