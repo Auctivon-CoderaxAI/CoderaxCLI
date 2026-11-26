@@ -47,8 +47,25 @@ foreach ($target in $targets) {
 
 # Only remove the launcher when it came from this prefix.
 if (Test-Path -LiteralPath $launcher) {
-  $content = Get-Content -Raw -LiteralPath $launcher
-  if ($content -and $content.Contains($Prefix)) {
+  $content = Get-Content -Raw -Encoding UTF8 -LiteralPath $launcher
+  # Current launchers embed the entrypoint as base64 so the batch file stays
+  # ASCII on any code page. Decode it to prove the launcher belongs to this
+  # prefix; older launchers recorded the path literally.
+  $owned = $content -and $content.Contains($Prefix)
+  if (-not $owned -and $content) {
+    $match = [regex]::Match($content, "Buffer\.from\('([A-Za-z0-9+/=]+)'")
+    if ($match.Success) {
+      try {
+        $entrypoint = [System.Text.Encoding]::UTF8.GetString(
+          [System.Convert]::FromBase64String($match.Groups[1].Value)
+        )
+        $owned = $entrypoint.StartsWith($Prefix, [System.StringComparison]::OrdinalIgnoreCase)
+      } catch {
+        $owned = $false
+      }
+    }
+  }
+  if ($owned) {
     Remove-Item -LiteralPath $launcher -Force
   } else {
     Write-Warning "leaving $launcher (it does not reference $Prefix)"
