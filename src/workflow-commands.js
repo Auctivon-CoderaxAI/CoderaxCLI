@@ -513,10 +513,17 @@ function notifyTerminal(ctx, run) {
       .replaceAll("{id}", run.id)
       .replaceAll("{status}", run.status);
     try {
+      // Windows environment variable names are case-insensitive.
+      const env = Object.fromEntries(
+        Object.entries(process.env).filter(
+          ([key]) => (process.platform === "win32" ? key.toUpperCase() : key) !== "CODERAX_TOKEN",
+        ),
+      );
       const child = spawn(expanded, {
         shell: true,
         detached: true,
         stdio: "ignore",
+        env,
       });
       child.unref();
     } catch {

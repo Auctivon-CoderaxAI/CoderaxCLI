@@ -2,14 +2,17 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
-import { spawn } from "node:child_process";
-import { access, mkdtemp, readFile } from "node:fs/promises";
+import { execFile, spawn } from "node:child_process";
+import { access, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { setTimeout as delay } from "node:timers/promises";
+import { promisify } from "node:util";
 import { runCli } from "../src/cli.js";
 
 const CLI_PATH = fileURLToPath(new URL("../src/cli.js", import.meta.url));
+const execFileAsync = promisify(execFile);
 
 const TOKEN = "contract-token-that-must-never-leak";
 
@@ -100,6 +103,55 @@ function negotiation(handler) {
     return handler(req, res);
   };
 }
+
+test("notification commands inherit ordinary variables without the CLI bearer token", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "coderax-notify-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const resultPath = join(directory, "notification.json");
+  let authenticated = false;
+  await withStub(
+    negotiation((req, res) => {
+      if (req.url === "/api/workflows/runs/run-notify") {
+        authenticated = req.headers.authorization === `Bearer ${TOKEN}`;
+        return json(res, 200, { run: RUN("run-notify", "completed") });
+      }
+      return json(res, 404, { message: "not found" });
+    }),
+    async (baseUrl) => {
+      const command =
+        `node -e "const fs=require('node:fs'),p=process.env.CODERAX_NOTIFY_PROBE;fs.writeFileSync(p+'.tmp',JSON.stringify({tokenPresent:process.env.CODERAX_TOKEN!==undefined,run:process.argv[1],status:process.argv[2]}));fs.renameSync(p+'.tmp',p)" {id} {status}`;
+      await execFileAsync(
+        process.execPath,
+        [CLI_PATH, "run", "run-notify", "--no-follow", "--notify-command", command],
+        {
+          env: {
+            ...process.env,
+            CODERAX_CONFIG: join(directory, "config.json"),
+            CODERAX_BASE_URL: baseUrl,
+            CODERAX_TOKEN: TOKEN,
+            CODERAX_NOTIFY_PROBE: resultPath,
+          },
+          timeout: 10000,
+        },
+      );
+    },
+  );
+
+  assert.equal(authenticated, true);
+  // The notification is detached, so its result can arrive after the CLI exits.
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    try {
+      const result = JSON.parse(await readFile(resultPath, "utf8"));
+      assert.deepEqual(result, { tokenPresent: false, run: "run-notify", status: "completed" });
+      return;
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+    await delay(25);
+  }
+  assert.fail("notification did not write to the inherited probe path");
+});
 
 test("chat rejects a JSON 200 where the SSE contract requires text/event-stream", async () => {
   await withStub(
