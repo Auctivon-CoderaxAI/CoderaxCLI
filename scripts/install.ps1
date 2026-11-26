@@ -117,7 +117,8 @@ function Get-ShortPath([string]$Path) {
 
 function Set-Launcher([string]$Target) {
   New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
-  $program = Get-ShortPath (Join-Path $Target "bin\coderax.cmd")
+  $programDir = Get-ShortPath (Join-Path $Target "bin")
+  $program = Join-Path $programDir "coderax.cmd"
   $shim = "@echo off`r`ncall `"$program`" %*`r`nexit /b %ERRORLEVEL%`r`n"
   # Stage beside the launcher, then rename over it, so an interrupted install
   # leaves either the old launcher or the new one, never a half-written file.

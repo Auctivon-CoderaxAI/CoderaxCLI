@@ -298,6 +298,8 @@ try {
   });
 
   await step("the launcher is discoverable through PATH", async () => {
+    const direct = spawn(commandPath(launcher), ["--version"], { env, shell: IS_WINDOWS });
+    assert.equal(direct.status, 0, `launcher failed before PATH lookup: ${tail(direct)}`);
     const pathKey = Object.keys(env).find((key) => key.toLowerCase() === "path") ?? "PATH";
     const result = spawn("coderax", ["--version"], {
       env: { ...env, [pathKey]: `${binDir}${delimiter}${env[pathKey] ?? ""}` },
