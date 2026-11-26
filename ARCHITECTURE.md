@@ -46,7 +46,7 @@ engine ──► command-registry ──► engine-client ──► /v1/health +
 | `src/render.js` | human tables and run rendering | none |
 | `src/approval.js` | fail-closed approval policies | SDK |
 | `src/discover.js` | OpenAPI discovery for legacy `openapi`/`agents`/`models` | HTTP client |
-| `src/command-registry.js` | single command registry: top-level names, flags, WorkflowEngine 1.0.0 operations, blocked reasons, completion generator | contract |
+| `src/command-registry.js` | single command registry: top-level command table and handler keys, flags, WorkflowEngine 1.0.0 operations, blocked reasons, help renderer, completion generator | contract |
 | `src/contract.js` | pinned engine version, route catalogue, event types and OpenAPI provenance (engine workstream) | none |
 | `src/engine.js` | validated engine HTTP/SSE client with redirect refusal and response checks (engine workstream) | contract, sse |
 | `src/sse.js` | engine SSE framing and JSON frame parsing (engine workstream) | none |
@@ -81,8 +81,11 @@ before configuration or HTTP. Artifact metadata is available from `getTask`;
 file transfer is blocked separately. `engine capabilities --json` reports the
 same matrix. Shell completion is generated from the registry by
 `coderax completion <bash|zsh|fish>`, so engine completion cannot drift from
-engine dispatch. The legacy top-level commands still use PR #6's dispatch
-switch and USAGE text; they are not part of the engine registry.
+engine dispatch. Top-level dispatch and `--help` read that same registry: every
+command names a handler key in the one dispatch map, and
+`test/command-registry.test.js` fails if a command has no handler, a handler is
+unreachable, or help/completion omits a dispatchable command. PR #6's command
+behaviour is preserved without a second switch or usage list.
 
 ## Credentials
 

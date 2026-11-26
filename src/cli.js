@@ -16,8 +16,10 @@ import * as engine from "./engine-commands.js";
 import {
   BOOLEAN_GLOBAL_FLAGS,
   GLOBAL_FLAGS,
-  TOP_LEVEL_COMMANDS,
+  TOP_LEVEL_COMMAND_NAMES,
   completionScript,
+  findTopLevelCommand,
+  renderTopLevelUsage,
 } from "./command-registry.js";
 import { collectVersionInfo, formatVersionInfo } from "./diagnostics.js";
 import { SdkError } from "../packages/workflow-sdk/src/index.js";
@@ -28,42 +30,7 @@ export { VERSION };
 const USAGE = `coderax ${VERSION} - owner-only cloud client for a Coderax deployment
 
 Usage:
-  coderax login [--token-file <path>] [--json]  verify the owner role, then store the token
-  coderax logout [--json]
-  coderax whoami [--json]
-  coderax status [--json]
-  coderax chat [message] [--model <id>] [--agent <id>] [--conversation <id>] [--new] [--json]
-  coderax work [message] [--model <id>] [--agent <id>] [--json]
-  coderax work submit <prompt> --repo <owner/name> --agent <id> [--base-ref <ref>]
-                              [--mode turbo15|autonomous|verified] [--workspace <name>]
-                              [--follow] [--json]
-  coderax tasks [taskId] [--json]              durable Work conversations
-  coderax workflows [--json]
-  coderax runs --workflow <id> [--json]
-  coderax run <runId> [--no-follow] [--approval ask|allow|deny] [--notify]
-                      [--notify-command <cmd>] [--cancel-on-interrupt] [--json]
-  coderax cancel <runId|taskId> [--task] [--json]
-  coderax resume <runId> [--json]
-  coderax retry <runId> [--follow] [--json]
-  coderax approve <runId> <stepIndex> [--json]
-  coderax repos [--json]
-  coderax agents [--work] [--json]
-  coderax models [--work] [--json]
-  coderax doctor [--json] / coderax diagnostics [--json]
-  coderax version [--json]
-  coderax compat [--json]
-  coderax engine <command> [options] [--json]
-  coderax engine help            authoritative WorkflowEngine 1.0.0 command surface
-  coderax completion <bash|zsh|fish>  completion generated from the command registry
-  coderax uninstall [--yes] [--dry-run] [--purge] [--json]
-  coderax health [--json]
-  coderax openapi [--json]
-  coderax call <METHOD> <PATH> [--data <json>] [--json]
-  coderax products|cloud|projects|update [--json]
-  coderax config show|list [--json]
-  coderax config get <key>
-  coderax config set <key> <value>
-  coderax config set [--base-url <url>] [--timeout <ms>]
+${renderTopLevelUsage()}
 
 Global options:
   --base-url <url>   Override the deployment URL (HTTPS, or HTTP on loopback)
@@ -133,7 +100,7 @@ const CONFIG_KEYS = Object.freeze(Object.assign(Object.create(null), {
 }));
 const CONFIG_FLAGS = ["base-url", "timeout", "chat-path", "endpoint", "model", "agent"];
 
-const KNOWN_COMMANDS = new Set(TOP_LEVEL_COMMANDS);
+const KNOWN_COMMANDS = new Set(TOP_LEVEL_COMMAND_NAMES);
 const KNOWN_FLAGS = new Set(GLOBAL_FLAGS);
 const ALLOWED_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
 const BOOLEAN_FLAGS = new Set(BOOLEAN_GLOBAL_FLAGS);
@@ -317,31 +284,31 @@ function requireBaseUrl(context) {
   return context;
 }
 
-async function commandHealth(context, deps, write, flags) {
-  const { path, response } = await product.probeHealth({ ...context, fetchImpl: deps.fetchImpl });
+async function commandHealth(ctx, deps) {
+  const { path, response } = await product.probeHealth({ ...ctx.settings, fetchImpl: deps.fetchImpl });
   const body = responseBody(response);
   emit(
-    write,
-    flags,
+    ctx.out,
+    ctx.flags,
     `health: ok (GET ${path}) HTTP ${response.status}\n${response.json ? formatJson(response.json) : ""}`,
     { endpoint: path, status: response.status, body },
   );
 }
 
-async function commandOpenapi(context, deps, write, flags) {
-  const discovery = await discoverOpenApi({ ...context, fetchImpl: deps.fetchImpl });
+async function commandOpenapi(ctx, deps) {
+  const discovery = await discoverOpenApi({ ...ctx.settings, fetchImpl: deps.fetchImpl });
   const displayOperations = discovery.operations.map((operation) => ({
     ...operation,
-    path: redact(operation.path, context.token),
-    operationId: operation.operationId ? redact(operation.operationId, context.token) : null,
-    summary: operation.summary ? redact(operation.summary, context.token) : null,
+    path: redact(operation.path, ctx.token),
+    operationId: operation.operationId ? redact(operation.operationId, ctx.token) : null,
+    summary: operation.summary ? redact(operation.summary, ctx.token) : null,
   }));
   const lines = displayOperations
     .slice(0, 50)
     .map((operation) => `  ${operation.method.padEnd(6)} ${operation.path}${operation.operationId ? `  # ${operation.operationId}` : ""}`);
   emit(
-    write,
-    flags,
+    ctx.out,
+    ctx.flags,
     `contract: ${discovery.sourcePath} (${displayOperations.length} operations)\n${lines.join("\n")}\n`,
     {
       sourcePath: discovery.sourcePath,
@@ -351,8 +318,8 @@ async function commandOpenapi(context, deps, write, flags) {
   );
 }
 
-async function commandResource(kind, context, deps, write, flags) {
-  const discovery = await discoverOpenApi({ ...context, fetchImpl: deps.fetchImpl });
+async function commandResource(kind, ctx, deps) {
+  const discovery = await discoverOpenApi({ ...ctx.settings, fetchImpl: deps.fetchImpl });
   const matcher = kind === "agents" ? /\/agents\/?$/i : /\/models\/?$/i;
   const operation = findOperation(discovery.operations, matcher);
 
@@ -364,40 +331,43 @@ async function commandResource(kind, context, deps, write, flags) {
   }
 
   const response = await request({
-    ...context,
+    ...ctx.settings,
     path: operation.path,
     fetchImpl: deps.fetchImpl,
   });
   const payload = responseBody(response);
-  const displayPath = redact(operation.path, context.token);
+  const displayPath = redact(operation.path, ctx.token);
 
   emit(
-    write,
-    flags,
+    ctx.out,
+    ctx.flags,
     `${operation.method} ${displayPath} -> ${response.status}\n${response.json ? formatJson(response.json) : response.text}\n`,
     { method: operation.method, path: displayPath, status: response.status, body: payload },
   );
 }
 
-async function commandCall(call, context, deps, write, flags) {
-  const { method, path, body } = call;
-  const response = await request({ ...context, path, method, body, fetchImpl: deps.fetchImpl });
+async function commandCall(ctx, deps) {
+  const { method, path, body } = ctx.call;
+  const response = await request({ ...ctx.settings, path, method, body, fetchImpl: deps.fetchImpl });
   const payload = responseBody(response);
-  const displayPath = redact(path, context.token);
+  const displayPath = redact(path, ctx.token);
 
   emit(
-    write,
-    flags,
+    ctx.out,
+    ctx.flags,
     `${method} ${displayPath} -> ${response.status}\n${response.json !== null ? formatJson(response.json) : response.text}\n`,
     { method, path: displayPath, status: response.status, body: payload },
   );
 }
 
-async function commandConfig(positionals, context, deps, write, flags) {
-  const action = positionals[1] ?? "show";
+async function commandConfig(ctx, deps) {
+  const positionals = ctx.args;
+  const action = positionals[0] ?? "show";
+  const { flags } = ctx;
+  const write = ctx.out;
 
   if (action === "show" || action === "list") {
-    const described = describeConfig(context);
+    const described = describeConfig(ctx);
     emit(
       write,
       flags,
@@ -408,11 +378,11 @@ async function commandConfig(positionals, context, deps, write, flags) {
   }
 
   if (action === "get") {
-    const key = positionals[2];
+    const key = positionals[1];
     if (!key || !(key in CONFIG_KEYS)) {
       throw new UsageError(`config get requires one of: ${Object.keys(CONFIG_KEYS).join(", ")}`);
     }
-    const value = context[CONFIG_KEYS[key]];
+    const value = ctx[CONFIG_KEYS[key]];
     write(flags.has("json") ? formatJson({ [key]: value }) : String(value || "(unset)"));
     return;
   }
@@ -422,10 +392,10 @@ async function commandConfig(positionals, context, deps, write, flags) {
   }
 
   const patch = {};
-  const key = positionals[2];
+  const key = positionals[1];
   const hasFlags = CONFIG_FLAGS.some((name) => flags.has(name));
   if (key && key in CONFIG_KEYS && !hasFlags) {
-    const value = positionals.slice(3).join(" ").trim();
+    const value = positionals.slice(2).join(" ").trim();
     if (!value) throw new UsageError(`config set ${key} requires a value`);
     patch[CONFIG_KEYS[key]] = value;
   } else {
@@ -448,7 +418,7 @@ async function commandConfig(positionals, context, deps, write, flags) {
 
   const saved = await saveConfig(patch, {
     ...(deps.saveDeps ?? {}),
-    filePath: context.configPath,
+    filePath: ctx.configPath,
   });
   const described = describeConfig(
     await loadConfig({ env: deps.env, filePath: saved.path }),
@@ -456,6 +426,55 @@ async function commandConfig(positionals, context, deps, write, flags) {
 
   emit(write, flags, `wrote ${saved.path}\nbase URL: ${described.baseUrl ?? "(not set)"}\ntoken: ${described.tokenConfigured ? "configured" : "not configured"}\n`, described);
 }
+
+/**
+ * The one dispatch table. `src/command-registry.js` maps every top-level
+ * command to one of these keys; the parity test fails when a command has no
+ * handler or a handler is unreachable. Adding a command means adding one
+ * registry entry and one implementation, never a second switch or help list.
+ */
+export const TOP_LEVEL_HANDLERS = Object.freeze({
+  "product.products": (ctx) => product.products(ctx),
+  "product.cloud": (ctx) => product.cloud(ctx),
+  "product.projects": (ctx) => product.projects(ctx),
+  "product.status": (ctx) => product.status(ctx),
+  "product.login": (ctx) => product.login(ctx),
+  "product.logout": (ctx) => product.logout(ctx),
+  "product.doctor": (ctx) => product.doctor(ctx),
+  "product.update": (ctx) => product.update(ctx),
+  "product.compat": (ctx) => product.compat(ctx),
+  "workflow.whoami": (ctx) => workflow.whoamiCommand(ctx),
+  "workflow.chat": (ctx) => workflow.chatCommand(ctx, ctx.args),
+  "workflow.work": (ctx) => workflow.workCommand(ctx, ctx.args),
+  "workflow.tasks": (ctx) => workflow.tasksCommand(ctx, ctx.args),
+  "workflow.workflows": (ctx) => workflow.workflowsCommand(ctx),
+  "workflow.runs": (ctx) => workflow.runsCommand(ctx),
+  "workflow.run": (ctx) => workflow.runCommand(ctx, ctx.args),
+  "workflow.cancel": (ctx) => workflow.cancelCommand(ctx, ctx.args),
+  "workflow.resume": (ctx) => workflow.resumeCommand(ctx, ctx.args),
+  "workflow.retry": (ctx) => workflow.retryCommand(ctx, ctx.args),
+  "workflow.approve": (ctx) => workflow.approveCommand(ctx, ctx.args),
+  "workflow.repos": (ctx) => workflow.reposCommand(ctx),
+  "workflow.agents": (ctx, deps) =>
+    ctx.flags.has("work") ? workflow.workAgentsCommand(ctx) : commandResource("agents", ctx, deps),
+  "workflow.models": (ctx, deps) =>
+    ctx.flags.has("work") ? workflow.workModelsCommand(ctx) : commandResource("models", ctx, deps),
+  "maintenance.uninstall": (ctx) => maintenance.uninstall(ctx),
+  "engine.run": (ctx) => engine.runEngineCommand(ctx),
+  "cli.config": (ctx, deps) => commandConfig(ctx, deps),
+  "cli.health": (ctx, deps) => commandHealth(ctx, deps),
+  "cli.openapi": (ctx, deps) => commandOpenapi(ctx, deps),
+  "cli.call": (ctx, deps) => commandCall(ctx, deps),
+  "cli.help": (ctx, deps) => {
+    deps.stdout(USAGE);
+  },
+  "cli.version": (ctx, deps) => {
+    deps.stdout(ctx.json ? formatJson(ctx.install) : formatVersionInfo(ctx.install));
+  },
+  "cli.completion": (ctx, deps) => {
+    deps.stdout(completionScript(ctx.args[0]));
+  },
+});
 
 function exitFor(error) {
   if (error instanceof UsageError || error instanceof ConfigError || error.code === "USAGE") {
@@ -580,98 +599,21 @@ export async function runCli(argv, options = {}) {
       install: deps.install ?? collectVersionInfo({ env: deps.env }),
     };
 
-    if (command === "config") {
-      await commandConfig(positionals, settings, deps, write, flags);
-      return EXIT.ok;
+    const entry = findTopLevelCommand(command);
+    if (entry === null) {
+      throw new UsageError(`unknown command: ${command}. Run \`coderax --help\`.`);
     }
 
-    switch (command) {
-      case "products":
-        return await product.products(ctx);
-      case "cloud":
-        return await product.cloud(ctx);
-      case "projects":
-        return await product.projects(ctx);
-      case "status":
-        return await product.status(ctx);
-      case "login":
-        return await product.login(ctx);
-      case "logout":
-        return await product.logout(ctx);
-      case "whoami":
-        return await workflow.whoamiCommand(ctx);
-      case "chat":
-        return await workflow.chatCommand(ctx, ctx.args);
-      case "work":
-        return await workflow.workCommand(ctx, ctx.args);
-      case "tasks":
-        return await workflow.tasksCommand(ctx, ctx.args);
-      case "workflows":
-        return await workflow.workflowsCommand(ctx);
-      case "runs":
-        return await workflow.runsCommand(ctx);
-      case "run":
-        return await workflow.runCommand(ctx, ctx.args);
-      case "cancel":
-        return await workflow.cancelCommand(ctx, ctx.args);
-      case "resume":
-        return await workflow.resumeCommand(ctx, ctx.args);
-      case "retry":
-        return await workflow.retryCommand(ctx, ctx.args);
-      case "approve":
-        return await workflow.approveCommand(ctx, ctx.args);
-      case "repos":
-        return await workflow.reposCommand(ctx);
-      case "agents":
-        if (ctx.flags.has("work")) return await workflow.workAgentsCommand(ctx);
-        break;
-      case "models":
-        if (ctx.flags.has("work")) return await workflow.workModelsCommand(ctx);
-        break;
-      case "doctor":
-      case "diagnostics":
-        return await product.doctor(ctx);
-      case "update":
-        return await product.update(ctx);
-      case "compat":
-        return await product.compat(ctx);
-      case "engine":
-        return await engine.runEngineCommand(ctx);
-      case "uninstall":
-      case "cleanup":
-        return await maintenance.uninstall(ctx);
-      case "help":
-        deps.stdout(USAGE);
-        return EXIT.ok;
-      case "version": {
-        const info = ctx.install;
-        if (ctx.json) deps.stdout(formatJson(info));
-        else deps.stdout(formatVersionInfo(info));
-        return EXIT.ok;
-      }
-      default:
-        break;
+    ctx.call = call;
+    if (entry.requiresBaseUrl) requireBaseUrl(ctx);
+
+    const handler = TOP_LEVEL_HANDLERS[entry.handler];
+    if (typeof handler !== "function") {
+      throw new UsageError(`command ${command} has no handler (${entry.handler})`);
     }
 
-    const context = requireBaseUrl(settings);
-
-    switch (command) {
-      case "health":
-        await commandHealth(context, deps, write, flags);
-        return EXIT.ok;
-      case "openapi":
-        await commandOpenapi(context, deps, write, flags);
-        return EXIT.ok;
-      case "agents":
-      case "models":
-        await commandResource(command, context, deps, write, flags);
-        return EXIT.ok;
-      case "call":
-        await commandCall(call, context, deps, write, flags);
-        return EXIT.ok;
-      default:
-        throw new UsageError(`unknown command: ${command}. Run \`coderax --help\`.`);
-    }
+    const result = await handler(ctx, deps);
+    return typeof result === "number" ? result : EXIT.ok;
   } catch (error) {
     const known =
       error instanceof UsageError ||

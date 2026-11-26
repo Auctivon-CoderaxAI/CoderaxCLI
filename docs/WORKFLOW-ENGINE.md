@@ -24,6 +24,11 @@ in [`src/command-registry.js`](../src/command-registry.js) imports that table;
 it does not keep a second copy. The CLI does **not** discover routes at runtime,
 and therefore cannot be redirected by a document to another origin.
 
+Top-level dispatch, `coderax --help` and shell completion read the same
+registry. `src/cli.js` holds one handler map keyed by the registry's `handler`
+values, and `test/command-registry.test.js` fails if a command has no handler, a
+handler is unreachable, or help/completion omits a dispatchable command.
+
 | Operation | Method and route | Auth |
 | --- | --- | --- |
 | `getHealth` | `GET /v1/health` | public |
@@ -182,8 +187,8 @@ This branch is the integration point for two existing workstreams:
   branch's single engine command table.
 
 This branch owns the integration files `src/command-registry.js`,
-`src/engine-client.js`, `src/engine-commands.js`, the `engine`/`completion`
-dispatch hooks in `src/cli.js`, and the engine job in
+`src/engine-client.js`, `src/engine-commands.js`, the registry-driven top-level
+and `engine` dispatch in `src/cli.js`, and the engine job in
 `.github/workflows/ci.yml`. `src/engine-commands.js` is deliberately a thin
 adapter: contract/owner preflight, identifier validation, secure login/logout,
 capability reporting and output sanitization. It does not reimplement the

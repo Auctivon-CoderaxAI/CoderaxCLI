@@ -302,46 +302,248 @@ export function findEngineCommand(name) {
 }
 
 /**
- * Top-level commands owned by the consolidated CLI. PR #6's release,
- * authentication, sync and maintenance handlers remain in place; `engine`
- * and `completion` are the two added entry points.
+ * Top-level command table: the only list of CLI commands.
+ *
+ * Dispatch validation, help and shell completion read this table, and
+ * `src/cli.js` resolves each `handler` key against its single dispatch map.
+ * The parity test in `test/command-registry.test.js` fails if a command has no
+ * handler or a handler is unreachable, so the registry and the implementations
+ * cannot drift without a failing test.
+ *
+ * `usage` is the help line (or lines) rendered by `renderTopLevelUsage()`.
+ * `aliasOf` folds a dispatchable alias into a visible command's usage line;
+ * `hidden` keeps a legacy alias dispatchable without advertising it in help.
  */
 export const TOP_LEVEL_COMMANDS = Object.freeze([
-  "config",
-  "health",
-  "openapi",
-  "agents",
-  "models",
-  "call",
-  "products",
-  "chat",
-  "work",
-  "cloud",
-  "projects",
-  "login",
-  "logout",
-  "status",
-  "whoami",
-  "tasks",
-  "workflows",
-  "runs",
-  "run",
-  "cancel",
-  "resume",
-  "retry",
-  "approve",
-  "repos",
-  "doctor",
-  "diagnostics",
-  "update",
-  "compat",
-  "uninstall",
-  "cleanup",
-  "help",
-  "version",
-  "engine",
-  "completion",
+  {
+    name: "config",
+    handler: "cli.config",
+    usage: [
+      "config show|list [--json]",
+      "config get <key>",
+      "config set <key> <value>",
+      "config set [--base-url <url>] [--timeout <ms>]",
+    ],
+    summary: "Show or change stored configuration.",
+  },
+  {
+    name: "health",
+    handler: "cli.health",
+    requiresBaseUrl: true,
+    usage: "health [--json]",
+    summary: "Probe the deployment's health endpoint.",
+  },
+  {
+    name: "openapi",
+    handler: "cli.openapi",
+    requiresBaseUrl: true,
+    usage: "openapi [--json]",
+    summary: "List the deployment's OpenAPI operations.",
+  },
+  {
+    name: "agents",
+    handler: "workflow.agents",
+    requiresBaseUrl: true,
+    usage: "agents [--work] [--json]",
+    summary: "List agents, or Work-eligible agents with --work.",
+  },
+  {
+    name: "models",
+    handler: "workflow.models",
+    requiresBaseUrl: true,
+    usage: "models [--work] [--json]",
+    summary: "List models, or Work-eligible models with --work.",
+  },
+  {
+    name: "call",
+    handler: "cli.call",
+    requiresBaseUrl: true,
+    usage: "call <METHOD> <PATH> [--data <json>] [--json]",
+    summary: "Call one deployment endpoint with an arbitrary method.",
+  },
+  {
+    name: "products",
+    handler: "product.products",
+    usage: "products|cloud|projects|update [--json]",
+    summary: "Product, cloud, project and update status.",
+  },
+  { name: "cloud", handler: "product.cloud", aliasOf: "products" },
+  { name: "projects", handler: "product.projects", aliasOf: "products" },
+  { name: "update", handler: "product.update", aliasOf: "products" },
+  {
+    name: "login",
+    handler: "product.login",
+    usage: "login [--token-file <path>] [--json]",
+    summary: "Verify the owner role, then store the token.",
+  },
+  {
+    name: "logout",
+    handler: "product.logout",
+    usage: "logout [--json]",
+    summary: "Remove the stored deployment token.",
+  },
+  {
+    name: "status",
+    handler: "product.status",
+    usage: "status [--json]",
+    summary: "Show deployment, credential and product status.",
+  },
+  {
+    name: "whoami",
+    handler: "workflow.whoami",
+    usage: "whoami [--json]",
+    summary: "Show the verified owner identity.",
+  },
+  {
+    name: "chat",
+    handler: "workflow.chat",
+    usage: "chat [message] [--model <id>] [--agent <id>] [--conversation <id>] [--new] [--json]",
+    summary: "Send one chat turn to the deployment.",
+  },
+  {
+    name: "work",
+    handler: "workflow.work",
+    usage: [
+      "work [message] [--model <id>] [--agent <id>] [--json]",
+      "work submit <prompt> --repo <owner/name> --agent <id> [--base-ref <ref>] [--mode turbo15|autonomous|verified] [--workspace <name>] [--follow] [--json]",
+    ],
+    summary: "Run Work chat or submit a durable autonomous build.",
+  },
+  {
+    name: "tasks",
+    handler: "workflow.tasks",
+    usage: "tasks [taskId] [--json]",
+    summary: "Durable Work conversations.",
+  },
+  {
+    name: "workflows",
+    handler: "workflow.workflows",
+    usage: "workflows [--json]",
+    summary: "List workflow definitions.",
+  },
+  {
+    name: "runs",
+    handler: "workflow.runs",
+    usage: "runs --workflow <id> [--json]",
+    summary: "List runs for one workflow.",
+  },
+  {
+    name: "run",
+    handler: "workflow.run",
+    usage: "run <runId> [--no-follow] [--approval ask|allow|deny] [--notify] [--notify-command <cmd>] [--cancel-on-interrupt] [--json]",
+    summary: "Monitor one durable run.",
+  },
+  {
+    name: "cancel",
+    handler: "workflow.cancel",
+    usage: "cancel <runId|taskId> [--task] [--json]",
+    summary: "Cancel a run or task.",
+  },
+  {
+    name: "resume",
+    handler: "workflow.resume",
+    usage: "resume <runId> [--json]",
+    summary: "Resume a run.",
+  },
+  {
+    name: "retry",
+    handler: "workflow.retry",
+    usage: "retry <runId> [--follow] [--json]",
+    summary: "Retry a run.",
+  },
+  {
+    name: "approve",
+    handler: "workflow.approve",
+    usage: "approve <runId> <stepIndex> [--json]",
+    summary: "Approve one pending run step.",
+  },
+  {
+    name: "repos",
+    handler: "workflow.repos",
+    usage: "repos [--json]",
+    summary: "List repositories available to Work.",
+  },
+  {
+    name: "doctor",
+    handler: "product.doctor",
+    usage: "doctor|diagnostics [--json]",
+    summary: "Run local and deployment diagnostics.",
+  },
+  { name: "diagnostics", handler: "product.doctor", aliasOf: "doctor" },
+  {
+    name: "version",
+    handler: "cli.version",
+    usage: "version [--json]",
+    summary: "Show install and compatibility information.",
+  },
+  {
+    name: "compat",
+    handler: "product.compat",
+    usage: "compat [--json]",
+    summary: "Check the deployment API-version handshake.",
+  },
+  {
+    name: "engine",
+    handler: "engine.run",
+    usage: "engine <command> [options] [--json]",
+    summary: "Authoritative WorkflowEngine 1.0.0 command surface; `engine help` lists every command.",
+  },
+  {
+    name: "completion",
+    handler: "cli.completion",
+    usage: "completion <bash|zsh|fish>",
+    summary: "Print shell completion generated from this registry.",
+  },
+  {
+    name: "uninstall",
+    handler: "maintenance.uninstall",
+    usage: "uninstall [--yes] [--dry-run] [--purge] [--json]",
+    summary: "Remove local user data; the installer removes the program.",
+  },
+  { name: "cleanup", handler: "maintenance.uninstall", aliasOf: "uninstall", hidden: true },
+  {
+    name: "help",
+    handler: "cli.help",
+    usage: "help",
+    summary: "Show this help.",
+  },
 ]);
+
+/** Names in registry order, for validation and completion. */
+export const TOP_LEVEL_COMMAND_NAMES = Object.freeze(
+  TOP_LEVEL_COMMANDS.map((command) => command.name),
+);
+
+const TOP_LEVEL_BY_NAME = new Map(
+  TOP_LEVEL_COMMANDS.map((command) => [command.name, command]),
+);
+
+export function findTopLevelCommand(name) {
+  return TOP_LEVEL_BY_NAME.get(name) ?? null;
+}
+
+const HELP_SUMMARY_COLUMN = 50;
+
+/** The Usage section of `coderax --help`, generated from this table. */
+export function renderTopLevelUsage() {
+  const lines = [];
+  for (const command of TOP_LEVEL_COMMANDS) {
+    if (command.aliasOf || command.hidden) continue;
+    const usages = Array.isArray(command.usage) ? command.usage : [command.usage];
+    usages.forEach((usage, index) => {
+      const text = `  coderax ${usage}`;
+      const summary = index === 0 ? command.summary : undefined;
+      if (!summary) {
+        lines.push(text);
+      } else if (text.length + 2 > HELP_SUMMARY_COLUMN) {
+        lines.push(`${text}\n${" ".repeat(HELP_SUMMARY_COLUMN)}${summary}`);
+      } else {
+        lines.push(`${text}${" ".repeat(HELP_SUMMARY_COLUMN - text.length)}${summary}`);
+      }
+    });
+  }
+  return lines.join("\n");
+}
 
 export const GLOBAL_FLAGS = Object.freeze([
   "help",
@@ -408,7 +610,7 @@ export const BOOLEAN_GLOBAL_FLAGS = Object.freeze([
 
 /** Shell completion generated from this registry, not a second list. */
 export function completionScript(shell) {
-  const top = TOP_LEVEL_COMMANDS.join(" ");
+  const top = TOP_LEVEL_COMMAND_NAMES.join(" ");
   const engine = ENGINE_COMMANDS.filter((command) => command.status === "available")
     .map((command) => command.name)
     .join(" ");
@@ -452,7 +654,7 @@ complete -F _coderax_complete coderax
 # generated from src/command-registry.js
 _coderax() {
   local -a top engine blocked
-  top=(${TOP_LEVEL_COMMANDS.join(" ")})
+  top=(${TOP_LEVEL_COMMAND_NAMES.join(" ")})
   engine=(${ENGINE_COMMANDS.filter((c) => c.status === "available").map((c) => c.name).join(" ")})
   blocked=(${ENGINE_COMMANDS.filter((c) => c.status === "blocked").map((c) => c.name).join(" ")})
   if (( CURRENT == 2 )); then
@@ -471,7 +673,7 @@ _coderax "$@"
   }
 
   if (shell === "fish") {
-    const topLines = TOP_LEVEL_COMMANDS.map(
+    const topLines = TOP_LEVEL_COMMAND_NAMES.map(
       (command) => `complete -c coderax -n "__fish_use_subcommand" -a "${command}"`,
     ).join("\n");
     const engineLines = ENGINE_COMMANDS.map(

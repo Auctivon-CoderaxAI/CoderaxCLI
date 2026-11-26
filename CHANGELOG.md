@@ -32,6 +32,9 @@ version is `0`, a minor release may change behaviour.
 
 ### Changed
 
+- Top-level dispatch and `--help` now read `src/command-registry.js`; the
+  separate command `switch` and USAGE list are gone, and a parity test fails if
+  the registry, handler table, help or completion drift.
 - Consolidated PR #6's release, authentication, durable-sync and packaging work
   into this branch; the engine namespace is layered on the release base rather
   than a parallel CLI.
