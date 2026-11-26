@@ -10,9 +10,52 @@ import { fileURLToPath } from "node:url";
 import { stripAnsi } from "../src/terminal/sanitize.js";
 
 const CLI = fileURLToPath(new URL("../src/cli.js", import.meta.url));
-const HAS_SCRIPT = spawnSync(process.platform === "win32" ? "where" : "which", ["script"], {
-  encoding: "utf8",
-}).status === 0;
+
+/**
+ * BSD `script` (macOS) calls tcgetattr on its own stdin, so it cannot be driven
+ * through a pipe at all: it exits with "tcgetattr/ioctl: Operation not supported
+ * on socket" before running the command. util-linux `script` tolerates a pipe,
+ * so it stays the driver on Linux. The fallback below allocates a pty and pumps
+ * bytes itself, without touching the parent's terminal state.
+ */
+const PYTHON_PTY = [
+  "import os, pty, select, signal, sys",
+  "pid, fd = pty.fork()",
+  "if pid == 0:",
+  "    os.execv('/bin/sh', ['/bin/sh', '-c', sys.argv[1]])",
+  "def bye(*_):",
+  "    try:",
+  "        os.kill(pid, signal.SIGKILL)",
+  "    except OSError:",
+  "        pass",
+  "    os._exit(1)",
+  "signal.signal(signal.SIGTERM, bye)",
+  "stdin_open = True",
+  "while True:",
+  "    watch = [fd] + ([0] if stdin_open else [])",
+  "    ready, _, _ = select.select(watch, [], [])",
+  "    if 0 in ready:",
+  "        data = os.read(0, 4096)",
+  "        if not data:",
+  "            stdin_open = False",
+  "        else:",
+  "            os.write(fd, data)",
+  "    if fd in ready:",
+  "        try:",
+  "            data = os.read(fd, 65536)",
+  "        except OSError:",
+  "            break",
+  "        if not data:",
+  "            break",
+  "        os.write(1, data)",
+  "os.waitpid(pid, 0)",
+].join("\n");
+
+const DRIVER = process.env.CODERAX_PTY_DRIVER === "python" || process.platform === "darwin" ? "python" : "script";
+const HAS_DRIVER =
+  DRIVER === "python"
+    ? spawnSync("python3", ["-c", "import pty"], { encoding: "utf8" }).status === 0
+    : spawnSync(process.platform === "win32" ? "where" : "which", ["script"], { encoding: "utf8" }).status === 0;
 
 function quote(value) {
   return `'${String(value).replace(/'/g, "'\\''")}'`;
@@ -70,10 +113,11 @@ async function startServer() {
 
 function launch(port) {
   const command = `stty cols 40 rows 24 2>/dev/null; exec ${quote(process.execPath)} ${quote(CLI)} chat --interactive --base-url http://127.0.0.1:${port} --no-history --no-color`;
-  const args = process.platform === "darwin"
-    ? ["-q", "/dev/null", "/bin/sh", "-c", command]
-    : ["-qec", command, "/dev/null"];
-  const child = spawn("script", args, {
+  const [file, args] =
+    DRIVER === "python"
+      ? ["python3", ["-c", PYTHON_PTY, command]]
+      : ["script", ["-qec", command, "/dev/null"]];
+  const child = spawn(file, args, {
     stdio: ["pipe", "pipe", "pipe"],
     env: {
       ...process.env,
@@ -113,12 +157,16 @@ function launch(port) {
 }
 
 async function stop(child) {
+  if (child.killed) return;
+  // Give the driver a chance to take its terminal child down with it.
+  child.kill("SIGTERM");
+  await delay(50);
   if (!child.killed) child.kill("SIGKILL");
 }
 
 test("a real PTY session streams a response, handles Unicode editing and exits cleanly", async (t) => {
-  if (!HAS_SCRIPT || process.platform === "win32") {
-    t.skip("requires a POSIX pseudo-terminal (script)");
+  if (!HAS_DRIVER || process.platform === "win32") {
+    t.skip("requires a POSIX pseudo-terminal");
     return;
   }
   const { server, requests, port } = await startServer();
@@ -165,8 +213,8 @@ test("a real PTY session streams a response, handles Unicode editing and exits c
 });
 
 test("Ctrl+C interrupts a hanging stream and returns control to the prompt", async (t) => {
-  if (!HAS_SCRIPT || process.platform === "win32") {
-    t.skip("requires a POSIX pseudo-terminal (script)");
+  if (!HAS_DRIVER || process.platform === "win32") {
+    t.skip("requires a POSIX pseudo-terminal");
     return;
   }
   const { server, port } = await startServer();
