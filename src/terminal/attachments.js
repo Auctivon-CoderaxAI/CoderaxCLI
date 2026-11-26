@@ -140,7 +140,18 @@ export async function prepareAttachments({
 
   const allowOutside = env.CODERAX_ATTACHMENTS_OUTSIDE_CWD === "1";
   const allowSymlinks = env.CODERAX_ATTACHMENTS_FOLLOW_SYMLINKS === "1";
-  const root = resolve(cwd);
+  // A symlink target is compared in its real form, so the root has to be real
+  // too. The working directory is routinely reached through a symlink (/var is
+  // /private/var on macOS, /tmp is /private/tmp); comparing a resolved target
+  // against an unresolved root makes a legitimate link inside the workspace
+  // look like an escape.
+  let root = resolve(cwd);
+  try {
+    root = await realpathImpl(root);
+  } catch {
+    // A missing or unreadable cwd keeps the plain resolution; the per-file
+    // lstat below still reports the missing attachment.
+  }
   const files = [];
   const seen = new Set();
   let totalBytes = 0;

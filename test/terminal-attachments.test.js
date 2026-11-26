@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -47,7 +47,9 @@ test("an approved file is read, hashed and replaced by a safe reference", async 
   assert.equal(result.files[0].sha256.length, 64);
   assert.equal(result.text, "summarize [attached: notes.txt] please");
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].path, join(dir, "notes.txt"));
+  // macOS reaches its temporary directory through /var -> /private/var, so
+  // compare the real path the CLI reports with the real path on disk.
+  assert.equal(calls[0].path, await realpath(join(dir, "notes.txt")));
   assert.equal(calls[0].preview.includes("hello"), true);
 });
 
@@ -117,7 +119,7 @@ test("symlinks are not followed unless explicitly enabled and approved", async (
     env: { CODERAX_ATTACHMENTS_FOLLOW_SYMLINKS: "1" },
   });
   assert.equal(result.files[0].content, "hello attachment\n");
-  assert.equal(calls[0].symlinkTarget, join(dir, "notes.txt"));
+  assert.equal(calls[0].symlinkTarget, await realpath(join(dir, "notes.txt")));
 });
 
 test("a symlink to a credential path is refused even when symlinks are enabled", async (t) => {
