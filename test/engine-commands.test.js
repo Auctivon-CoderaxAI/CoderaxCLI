@@ -265,6 +265,8 @@ test("work streams, reports the authoritative summary and supports detach", asyn
     const payload = JSON.parse(followed.out);
     assert.equal(payload.state, "completed");
     assert.equal(payload.text, "hello world");
+    assert.equal("streamedText" in payload, false);
+    assert.equal("summary" in payload, false);
     assert.equal(payload.events, 4);
     const submitted = state.requests.find((request) => request.path === "/v1/work");
     assert.equal(submitted.body.requireApproval, true);

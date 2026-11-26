@@ -459,9 +459,10 @@ export async function work(ctx) {
         conversationId: status.conversationId,
         state: status.state,
         generation: status.generation,
+        // One authoritative text field. The stream is a rendering of the
+        // task; exposing it beside the summary invites a consumer to print
+        // the same answer twice.
         text,
-        streamedText: assembler.text,
-        summary: status.result?.summary ?? null,
         artifacts: status.result?.artifacts ?? [],
         usage: status.usage ?? assembler.usage ?? null,
         events: assembler.eventCount,
