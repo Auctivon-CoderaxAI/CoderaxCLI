@@ -158,8 +158,16 @@ test("schedules support create, inspect, modify, pause, resume and cancel", asyn
     assert.equal(created.json.data.id, "sched-1");
     assert.equal(engine.state.schedules.length, 1);
 
+    const viaData = await invocation(engine, [
+      "schedules", "create",
+      "--data", '{"cron":"0 18 * * *","prompt":"Evening triage"}',
+      "--json",
+    ]);
+    assert.equal(viaData.code, 0, viaData.stderr);
+    assert.equal(viaData.json.data.id, "sched-2");
+
     const listed = await invocation(engine, ["schedules", "--json"]);
-    assert.equal(listed.json.data.schedules.length, 1);
+    assert.equal(listed.json.data.schedules.length, 2);
 
     const shown = await invocation(engine, ["schedules", "show", "sched-1", "--json"]);
     assert.equal(shown.json.data.cron, "0 9 * * 1-5");
@@ -170,6 +178,17 @@ test("schedules support create, inspect, modify, pause, resume and cancel", asyn
     assert.equal(updated.code, 0, updated.stderr);
     assert.equal(updated.json.data.name, "renamed");
     assert.equal(updated.json.data.enabled, false);
+
+    const updatedViaData = await invocation(engine, [
+      "schedules", "update", "sched-2", "--data", '{"name":"via-data"}', "--json",
+    ]);
+    assert.equal(updatedViaData.code, 0, updatedViaData.stderr);
+    assert.equal(updatedViaData.json.data.name, "via-data");
+
+    const emptyData = await invocation(engine, [
+      "schedules", "update", "sched-2", "--data", "{}", "--json",
+    ]);
+    assert.equal(emptyData.code, 2);
 
     const emptyUpdate = await invocation(engine, ["schedules", "update", "sched-1", "--json"]);
     assert.equal(emptyUpdate.code, 2);
@@ -185,6 +204,9 @@ test("schedules support create, inspect, modify, pause, resume and cancel", asyn
     const cancelled = await invocation(engine, ["schedules", "cancel", "sched-1", "--yes", "--json"]);
     assert.equal(cancelled.code, 0, cancelled.stderr);
     assert.equal(cancelled.json.status, 204);
+
+    const cancelledSecond = await invocation(engine, ["schedules", "cancel", "sched-2", "--yes", "--json"]);
+    assert.equal(cancelledSecond.code, 0, cancelledSecond.stderr);
     assert.equal(engine.state.schedules.length, 0);
   });
 });
@@ -354,6 +376,10 @@ test("argument and option validation fails before any request", async () => {
     const unknownOption = await invocation(engine, ["schedules", "create", "--cron", "x", "--bogus", "y"]);
     assert.equal(unknownOption.code, 2);
     assert.match(unknownOption.stderr, /unknown option: --bogus/);
+
+    const extraCapabilityArg = await invocation(engine, ["capabilities", "extra", "--json"]);
+    assert.equal(extraCapabilityArg.code, 2);
+    assert.match(extraCapabilityArg.error.error.message, /no path arguments/);
 
     assert.equal(engine.requests.length, before);
   });

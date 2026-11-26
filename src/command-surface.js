@@ -189,8 +189,8 @@ function buildBody(spec, op, flags) {
     body = fromFlags;
   }
 
-  if (spec.requireAnyBody && body === undefined) {
-    throw usage(`\`${spec.path.join(" ")}\` requires at least one field flag${spec.confirm ? "" : ""}`);
+  if (spec.requireAnyBody && (body === undefined || Object.keys(body).length === 0)) {
+    throw usage(`\`${spec.path.join(" ")}\` requires at least one field flag or a non-empty --data object`);
   }
 
   validateBody(spec, op, body);
@@ -499,10 +499,10 @@ async function executeHttp(spec, op, args, ctx) {
 /** Run one catalog command through a discovered, authoritative operation. */
 export async function runSurfaceCommand(spec, args, ctx) {
   if (!spec) throw usage("no command matched");
-  if (spec.mode === "capabilities") return capabilitiesCommand(ctx);
 
   // Usage and confirmation failures must not depend on configuration or network.
   checkArgumentCount(spec, args);
+  if (spec.mode === "capabilities") return capabilitiesCommand(ctx);
   if (spec.confirm && !ctx.flags.has("yes")) {
     throw new CoderaxError(
       "CONFIRMATION_REQUIRED",

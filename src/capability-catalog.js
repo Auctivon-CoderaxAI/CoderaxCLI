@@ -262,7 +262,7 @@ export const COMMAND_SPECS = Object.freeze([
     contract: "POST /schedules",
     operationIds: ["createSchedule", "schedules.create"],
     paths: [/\/schedules\/?$/i],
-    options: Object.keys(SCHEDULE_BODY),
+    options: [...Object.keys(SCHEDULE_BODY), "data"],
     body: SCHEDULE_BODY,
     requiredBody: ["cron", "prompt"],
     examples: [
@@ -281,7 +281,7 @@ export const COMMAND_SPECS = Object.freeze([
     operationIds: ["updateSchedule", "patchSchedule"],
     paths: [/\/schedules\/\{[^/{}]+\}\/?$/i],
     pathArgs: ["id"],
-    options: Object.keys(SCHEDULE_BODY),
+    options: [...Object.keys(SCHEDULE_BODY), "data"],
     body: SCHEDULE_BODY,
     requireAnyBody: true,
     examples: ['coderax schedules update sched-1 --cron "0 18 * * *" --yes'],
