@@ -17,9 +17,15 @@ const MODULE_PATH = fileURLToPath(import.meta.url);
 
 function realpathOrSelf(path) {
   try {
-    return realpathSync(path);
+    // Native realpath expands Windows 8.3 names to the canonical long path;
+    // the portable implementation leaves them short.
+    return realpathSync.native(path);
   } catch {
-    return path;
+    try {
+      return realpathSync(path);
+    } catch {
+      return path;
+    }
   }
 }
 

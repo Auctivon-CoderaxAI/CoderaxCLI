@@ -22,7 +22,7 @@ import assert from "node:assert/strict";
 import { spawn as spawnProcess, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { once } from "node:events";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -32,6 +32,17 @@ const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const DIST = join(ROOT, "dist");
 const IS_WINDOWS = process.platform === "win32";
 const TOKEN = "install-test-token-9f3a";
+
+/** Windows may report an 8.3 short path for the same directory. Compare
+ * canonical paths where possible and fall back to filesystem identity. */
+function assertInstallDirectory(actual, expected) {
+  const left = statSync(actual);
+  const right = statSync(expected);
+  assert.ok(left.isDirectory() && right.isDirectory(), `${actual} and ${expected} must be directories`);
+  const samePath = realpathSync.native(actual) === realpathSync.native(expected);
+  const sameFile = left.ino !== 0 && left.ino === right.ino && left.dev === right.dev;
+  assert.ok(samePath || sameFile, `${actual} must be the installed ${expected} directory`);
+}
 
 const manifest = JSON.parse(await readFile(join(DIST, "release-manifest.json"), "utf8"));
 const VERSION = manifest.version;
@@ -419,7 +430,7 @@ try {
     const reported = await cli(["--version"]);
     assert.equal(reported.stdout.trim(), `coderax-cli ${NEXT_VERSION}`);
     const info = await cli(["version", "--json"]);
-    assert.equal(JSON.parse(info.stdout).installPath, realpathSync(join(prefix, NEXT_VERSION)));
+    assertInstallDirectory(JSON.parse(info.stdout).installPath, join(prefix, NEXT_VERSION));
     return `${VERSION} -> ${NEXT_VERSION}`;
   });
 
@@ -436,7 +447,7 @@ try {
     const reported = await cli(["--version"]);
     assert.equal(reported.stdout.trim(), `coderax-cli ${VERSION}`);
     const info = await cli(["version", "--json"]);
-    assert.equal(JSON.parse(info.stdout).installPath, realpathSync(join(prefix, VERSION)));
+    assertInstallDirectory(JSON.parse(info.stdout).installPath, join(prefix, VERSION));
     assert.ok(existsSync(join(prefix, NEXT_VERSION)), "rollback removed the newer version");
 
     const dryRun = installer(["--rollback", "--dry-run"], { version: VERSION });
@@ -462,7 +473,7 @@ try {
     assert.equal(info.clientApiVersion, "1");
     assert.equal(info.clientApiMajor, 1);
     assert.equal(info.sdkPackage, "@coderax/workflow-sdk");
-    assert.equal(info.installPath, realpathSync(join(prefix, VERSION)));
+    assertInstallDirectory(info.installPath, join(prefix, VERSION));
     return `${info.cliVersion} on node ${info.node} (${info.platform}-${info.arch})`;
   });
 
