@@ -614,7 +614,11 @@ console.log(version.VERSION);
   });
 
   await step("npm global install creates a working launcher", async () => {
-    const globalPrefix = join(sandbox, "npm global");
+    // Use the real Windows npm-global location (under APPDATA) so install-method
+    // diagnostics can distinguish it from a project-local install.
+    const globalPrefix = IS_WINDOWS
+      ? join(sandbox, "AppData", "Roaming", "npm")
+      : join(sandbox, "npm global");
     const npm = IS_WINDOWS ? "npm.cmd" : "npm";
     const install = spawn(
       npm,
