@@ -1,11 +1,3 @@
-import {
-  redact,
-  redactValue,
-  StreamTextRedactor,
-} from "../packages/workflow-sdk/src/redact.js";
-
-export { redact, redactValue };
-
 export class CoderaxError extends Error {
   constructor(code, message, { status } = {}) {
     super(message);
@@ -13,6 +5,97 @@ export class CoderaxError extends Error {
     this.code = code;
     this.status = status;
   }
+}
+
+function redactionMarkerFor(secrets) {
+  const combined = secrets.join("");
+  const preferred = "[REDACTED]";
+  // A marker that shares any character with a secret can form the secret
+  // across a replacement boundary, so require a disjoint alphabet. Short
+  // tokens such as "E" are the common case where `[REDACTED]` is unsafe. One
+  // marker is chosen for every secret so replacing one secret cannot create
+  // another across a marker boundary.
+  if (![...preferred].some((char) => combined.includes(char))) return preferred;
+  for (const char of "*#~^|+=%0123456789") {
+    if (!combined.includes(char)) return char.repeat(3);
+  }
+  for (let code = 0x2588; code <= 0x10ffff; code += 1) {
+    const char = String.fromCodePoint(code);
+    if (!combined.includes(char)) return char.repeat(3);
+  }
+  throw new Error("could not build a token-safe redaction marker");
+}
+
+function secretsFrom(token) {
+  const values = Array.isArray(token) ? token : [token];
+  return [...new Set(
+    values.filter((value) => typeof value === "string" && value.length > 0),
+  )];
+}
+
+/**
+ * Server content is untrusted. Remove terminal control sequences before it is
+ * written to a TTY, so a model, task title or error cannot set the clipboard,
+ * move the cursor, or inject a fake prompt. Newlines and tabs are preserved.
+ */
+export function sanitizeTerminalText(value) {
+  return String(value ?? "")
+    .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, "")
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/\u001b[@-_]/g, "")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, "");
+}
+
+export function redact(text, token) {
+  const secrets = secretsFrom(token);
+  if (typeof text !== "string" || secrets.length === 0) return text;
+  const marker = redactionMarkerFor(secrets);
+  let result = text;
+  for (const secret of secrets) result = result.split(secret).join(marker);
+  return result;
+}
+
+/**
+ * Redact a token anywhere in a parsed JSON value, preserving the shape so
+ * machine-readable output stays valid JSON.
+ */
+export function redactValue(value, token) {
+  if (!token) return value;
+  if (typeof value === "string") return redact(value, token);
+  if (Array.isArray(value)) return value.map((item) => redactValue(item, token));
+  if (value !== null && typeof value === "object") {
+    const redacted = {};
+    const keys = new Set();
+    const nextSuffix = new Map();
+    for (const [key, item] of Object.entries(value)) {
+      const base = redact(key, token);
+      let safe = base;
+      // Two keys can redact to the same name; suffix rather than drop a field.
+      // Remember where this base's search stopped so many collisions stay linear.
+      if (keys.has(base)) {
+        let n = nextSuffix.get(base) ?? 2;
+        // Redact the suffix too: a numeric token must not return through "#2".
+        let candidate = redact(`${base}#${n}`, token);
+        while (keys.has(candidate)) {
+          n += 1;
+          candidate = redact(`${base}#${n}`, token);
+        }
+        safe = candidate;
+        nextSuffix.set(base, n + 1);
+      }
+      keys.add(safe);
+      // defineProperty keeps a `__proto__` entry an own field instead of
+      // assigning the result's prototype.
+      Object.defineProperty(redacted, safe, {
+        value: redactValue(item, token),
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
+    }
+    return redacted;
+  }
+  return value;
 }
 
 /**
@@ -60,9 +143,11 @@ export async function request({
   path,
   method = "GET",
   body,
+  form,
   timeoutMs = 15000,
   accept = "application/json",
   includeRaw = false,
+  secrets,
   fetchImpl = fetch,
 } = {}) {
   if (!baseUrl) {
@@ -71,13 +156,21 @@ export async function request({
       "no base URL configured; run `coderax config set --base-url <url>` or set CODERAX_BASE_URL",
     );
   }
+  const secretList = secretsFrom([token, ...(Array.isArray(secrets) ? secrets : [secrets])]);
   const target = joinRoute(baseUrl, path);
-  const displayPath = redact(target.pathname, token);
+  const displayPath = redact(target.pathname, secretList);
   const headers = { accept };
   if (token) headers.authorization = `Bearer ${token}`;
 
   let payload;
-  if (body !== undefined) {
+  if (form !== undefined) {
+    headers["content-type"] = "application/x-www-form-urlencoded";
+    const encoded = new URLSearchParams();
+    for (const [key, value] of Object.entries(form)) {
+      if (value !== undefined && value !== null) encoded.set(key, String(value));
+    }
+    payload = encoded.toString();
+  } else if (body !== undefined) {
     headers["content-type"] = "application/json";
     payload = JSON.stringify(body);
   }
@@ -101,7 +194,7 @@ export async function request({
     }
     throw new CoderaxError(
       "REQUEST_FAILED",
-      `request to ${displayPath} failed: ${truncate(redact(String(error?.message ?? "network error"), token))}`,
+      `request to ${displayPath} failed: ${truncate(redact(String(error?.message ?? "network error"), secretList))}`,
     );
   }
 
@@ -119,7 +212,7 @@ export async function request({
     throw new CoderaxError("RESPONSE_UNREADABLE", `could not read the response from ${displayPath}`);
   }
 
-  const fullText = redact(text, token);
+  const fullText = redact(text, secretList);
   const diagnosticText = fullText.slice(0, 2000);
 
   let json = null;
@@ -130,13 +223,18 @@ export async function request({
       json = null;
     }
   }
-  const safeJson = redactValue(json, token);
+  const safeJson = redactValue(json, secretList);
 
   if (!response.ok) {
     const detail = detailText(safeJson?.message ?? safeJson?.error ?? diagnosticText);
     const message = `HTTP ${response.status} from ${displayPath}${detail ? `: ${truncate(detail)}` : ""}`;
     const failure = new CoderaxError(`HTTP_${response.status}`, message, { status: response.status });
     failure.body = safeJson;
+    // Internal callers need the unredacted OAuth error code (for example
+    // authorization_pending). This field is never printed; all user-facing
+    // text above is redacted.
+    failure.rawJson = json;
+    failure.wwwAuthenticate = response.headers.get("www-authenticate");
     throw failure;
   }
 
@@ -179,6 +277,52 @@ function extractDelta(payload) {
   return typeof candidate === "string" ? candidate : "";
 }
 
+/**
+ * Hold back a suffix that could be the beginning of a token, so a token split
+ * across SSE deltas is redacted as a whole instead of leaking in two pieces.
+ */
+class StreamTextRedactor {
+  constructor(secrets) {
+    this.secrets = secretsFrom(secrets);
+    this.pending = "";
+  }
+
+  push(text) {
+    if (this.secrets.length === 0) return text;
+    this.pending += text;
+    // Emit through the last complete secret occurrence. A suffix that could
+    // begin any secret is held back, so secrets split across deltas are caught.
+    let boundary = 0;
+    for (const secret of this.secrets) {
+      const complete = this.pending.lastIndexOf(secret);
+      if (complete !== -1) boundary = Math.max(boundary, complete + secret.length);
+    }
+    const emit = this.pending.slice(0, boundary);
+    const remainder = this.pending.slice(boundary);
+    let hold = 0;
+    for (let length = remainder.length; length > 0; length -= 1) {
+      const suffix = remainder.slice(-length);
+      if (this.secrets.some((secret) => secret.startsWith(suffix))) {
+        hold = length;
+        break;
+      }
+    }
+    const safe = emit + remainder.slice(0, remainder.length - hold);
+    this.pending = remainder.slice(remainder.length - hold);
+    return redact(safe, this.secrets);
+  }
+
+  reset() {
+    this.pending = "";
+  }
+
+  flush() {
+    const tail = redact(this.pending, this.secrets);
+    this.pending = "";
+    return tail;
+  }
+}
+
 function applySafeDelta(payload, delta, safeDelta) {
   if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return payload;
   for (const field of ["delta", "token", "content"]) {
@@ -192,21 +336,23 @@ function applySafeDelta(payload, delta, safeDelta) {
   return payload;
 }
 
-function streamFailure(status, text, token, pathname) {
+function streamFailure(status, text, secrets, pathname, headers) {
   let parsed = null;
   try {
     parsed = JSON.parse(text);
   } catch {
     parsed = null;
   }
-  const safeJson = redactValue(parsed, token);
-  const detail = detailText(safeJson?.message ?? safeJson?.error ?? redact(text, token).slice(0, 200));
+  const safeJson = redactValue(parsed, secrets);
+  const detail = detailText(safeJson?.message ?? safeJson?.error ?? redact(text, secrets).slice(0, 200));
   const failure = new CoderaxError(
     `HTTP_${status}`,
     `HTTP ${status} from ${pathname}${detail ? `: ${truncate(detail)}` : ""}`,
     { status },
   );
   failure.body = safeJson;
+  failure.rawJson = parsed;
+  failure.wwwAuthenticate = headers?.get?.("www-authenticate") ?? null;
   return failure;
 }
 
@@ -223,6 +369,7 @@ export async function streamRequest({
   timeoutMs = 15000,
   signal,
   onEvent,
+  secrets,
   fetchImpl = fetch,
 } = {}) {
   if (!baseUrl) {
@@ -231,8 +378,9 @@ export async function streamRequest({
       "no base URL configured; run `coderax config set --base-url <url>` or set CODERAX_BASE_URL",
     );
   }
+  const secretList = secretsFrom([token, ...(Array.isArray(secrets) ? secrets : [secrets])]);
   const target = joinRoute(baseUrl, path);
-  const displayPath = redact(target.pathname, token);
+  const displayPath = redact(target.pathname, secretList);
   const headers = { accept: "text/event-stream" };
   if (token) headers.authorization = `Bearer ${token}`;
 
@@ -268,7 +416,7 @@ export async function streamRequest({
     });
 
     if (!response.ok) {
-      throw streamFailure(response.status, await response.text(), token, displayPath);
+      throw streamFailure(response.status, await response.text(), secretList, displayPath, response.headers);
     }
     if (!response.body) {
       throw new CoderaxError("RESPONSE_UNREADABLE", `the response from ${displayPath} has no body`);
@@ -276,7 +424,7 @@ export async function streamRequest({
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
-    const deltaRedactor = new StreamTextRedactor(token);
+    const deltaRedactor = new StreamTextRedactor(secretList);
     let buffer = "";
     let assembled = "";
     let lastMessageSnapshot = null;
@@ -307,9 +455,9 @@ export async function streamRequest({
             } else {
               // A text_replace event rewrites the answer rather than appending.
               // The returned answer must reflect that revision, not stale text.
-              assembled = redact(snapshot, token);
+              assembled = redact(snapshot, secretList);
               deltaRedactor.reset();
-              onEvent?.({ type: "replace", text: assembled, payload: redactValue(event, token) });
+              onEvent?.({ type: "replace", text: assembled, payload: redactValue(event, secretList) });
               delta = "";
             }
             lastMessageSnapshot = snapshot;
@@ -320,27 +468,27 @@ export async function streamRequest({
               assembled += safeDelta;
               const payload = typeof event === "string"
                 ? safeDelta
-                : applySafeDelta(redactValue(event, token), delta, safeDelta);
+                : applySafeDelta(redactValue(event, secretList), delta, safeDelta);
               onEvent?.({ type: "delta", text: safeDelta, payload });
             }
           } else {
-            onEvent?.({ type: "event", payload: redactValue(event, token) });
+            onEvent?.({ type: "event", payload: redactValue(event, secretList) });
           }
           if (event?.final === true || event?.error) {
             // The final persisted response is authoritative, including if the
             // engine rewrote its answer before completion.
             const terminalText = event?.responseMessage?.text;
             if (event?.final === true && typeof terminalText === "string") {
-              const safeTerminalText = redact(terminalText, token);
+              const safeTerminalText = redact(terminalText, secretList);
               if (safeTerminalText !== assembled) {
                 assembled = safeTerminalText;
                 deltaRedactor.reset();
-                onEvent?.({ type: "replace", text: assembled, payload: redactValue(event, token) });
+                onEvent?.({ type: "replace", text: assembled, payload: redactValue(event, secretList) });
               }
             }
-            onEvent?.({ type: "final", payload: redactValue(event, token) });
+            onEvent?.({ type: "final", payload: redactValue(event, secretList) });
             if (event.error) {
-              throw new CoderaxError("STREAM_ERROR", redact(detailText(event.error) || "stream error", token));
+              throw new CoderaxError("STREAM_ERROR", redact(detailText(event.error) || "stream error", secretList));
             }
           }
         }
@@ -367,7 +515,7 @@ export async function streamRequest({
     }
     throw new CoderaxError(
       "REQUEST_FAILED",
-      `request to ${displayPath} failed: ${truncate(redact(String(error?.message ?? "network error"), token))}`,
+      `request to ${displayPath} failed: ${truncate(redact(String(error?.message ?? "network error"), secretList))}`,
     );
   } finally {
     clearTimeout(timer);

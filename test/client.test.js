@@ -2,7 +2,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
-import { CoderaxError, redact, redactValue, request, streamRequest } from "../src/client.js";
+import {
+  CoderaxError,
+  redact,
+  redactValue,
+  request,
+  sanitizeTerminalText,
+  streamRequest,
+} from "../src/client.js";
 
 const TOKEN = "token-that-must-never-leak";
 
@@ -18,6 +25,14 @@ async function withStub(handler, run) {
     server.close();
   }
 }
+
+test("server text cannot inject terminal control sequences", () => {
+  const hostile = "safe\u001b]52;c;ZXZpbA==\u0007title\u001b[2J\u001b[31mred\u001b[0m\u0007\nnext\tcell";
+  const cleaned = sanitizeTerminalText(hostile);
+  assert.equal(cleaned.includes("\u001b"), false);
+  assert.equal(cleaned.includes("\u0007"), false);
+  assert.equal(cleaned, "safetitlered\nnext\tcell");
+});
 
 test("sends a bearer token and parses JSON", async () => {
   await withStub(

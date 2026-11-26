@@ -1,155 +1,359 @@
 # CLI ↔ deployment contract
 
-Version: CLI `0.1.0`, API major `1`. Shapes were read from
-`Auctivon-CoderaxAI/Coderax` at `main` (`a5d237b0`). The client-side checks live
-in `test/contract.test.js`; backend gaps are tracked in
-[`BACKEND-DEFECTS.md`](../BACKEND-DEFECTS.md).
+Version: CLI `0.1.0`, targeting Coderax deployments that publish an OpenAPI 3.x
+document.
 
-## Authentication and ownership
+This document is the coordination point between the CLI, the API contract owners
+and the WorkflowEngine. The authentication shapes below are the approved
+standards — RFC 8628 (device authorization), RFC 6749 (token responses and
+refresh) and RFC 7009 (revocation) — not a bespoke protocol. The deployment owns
+issuance, refresh, revocation, identity and scope enforcement; the CLI only
+carries and protects the resulting session.
 
-Every request carries `Authorization: Bearer <token>`. The CLI never forwards
-cookies and adds no headers except `accept`, `authorization`,
-`content-type` on bodies, `last-event-id` on reconnects, and
-`x-coderax-api-version: 1`.
+## Authentication
 
-`login` calls `GET /api/user` and accepts the token only when the returned
-`role` is exactly `ADMIN` (`SystemRoles.ADMIN`). Nothing is persisted
-otherwise. `whoami` repeats the check; owner-only mutations (`work submit`,
-`cancel`, `resume`, `retry`, `approve`) call `requireOwner()` again so a token
-that lost the role cannot mutate.
+### Client and credential handling
 
-| Condition | Code | Exit |
-| --- | --- | --- |
-| no token | `UNAUTHENTICATED` | 3 |
-| HTTP 401/403 | `UNAUTHENTICATED` / `FORBIDDEN` | 3 |
-| role is not `ADMIN` | `FORBIDDEN` | 3 |
-| `/api/user` missing | `OWNER_UNVERIFIABLE` | 6 |
+- The CLI is a public client with `client_id` `coderax-cli`. It has no client
+  secret and never asks for a provider API key.
+- Credentials are stored in the operating-system credential store. The config
+  file contains only the deployment URL and non-secret settings.
+- Tokens are never accepted as command arguments; they arrive through device
+  authorization, stdin (`login --with-token`) or `CODERAX_TOKEN`.
+- The CLI sends `Authorization: Bearer <token>` on authenticated requests. It
+  adds no headers beyond `accept`, `authorization`, `content-type` and the
+  standard form content type on token requests, and never forwards cookies.
 
-## API version and capabilities
+### Device authorization
 
-The deployment publishes no metadata endpoint. The client therefore sends
-`x-coderax-api-version: 1`, accepts a server response header when present, and
-otherwise records `API_VERSION_UNVERIFIED`. A different major is
-`API_VERSION_UNSUPPORTED` (exit `6`). `--strict` turns either warning into a
-failure before the operation.
+Canonical routes (an OpenAPI document may advertise different paths; see below):
 
-Capabilities are declared in metadata when available; otherwise two safe GET
-probes (`/api/work/tasks`, `/api/workflows`) fill the gaps. An undeclared
-capability is never replaced by a guessed route. The CLI reports
-`CAPABILITY_INFERRED`, `CAPABILITY_DEGRADED` (503), or
-`CAPABILITY_UNAVAILABLE` (exit `6`).
+| Purpose | Method and path |
+| --- | --- |
+| Device authorization | `POST /api/auth/device/code` |
+| Device token polling | `POST /api/auth/device/token` |
+| Token refresh | `POST /api/auth/token/refresh` |
+| Token revocation | `POST /api/auth/token/revoke` |
+| UserInfo | `GET /api/user` |
 
-## Routes
+All auth routes are form-encoded and same-origin with the configured deployment.
 
-| Operation | Route | Shape |
-| --- | --- | --- |
-| identity | `GET /api/user` | `{ email, role, ... }` |
-| chat / Work | `POST /api/work/chat` | body `{text, mode, endpoint, conversationId?, parentMessageId?, agent_id?, model?, promptPrefix?}`; SSE |
-| Work models | `GET /api/work/models` | `{ models: [...] }` |
-| Work agents | `GET /api/work/agents` | `{ agents: [...] }` |
-| readiness | `GET /api/work/readiness` | JSON |
-| Work history | `GET /api/work/tasks` | `{ tasks: [...] }` |
-| Work task | `GET /api/work/tasks/:conversationId` | `{ task: {...} }` |
-| cancel Work task | `POST /api/work/tasks/:conversationId/cancel` | JSON |
-| workflows | `GET /api/workflows` | `{ workflows: [...] }` |
-| runs per workflow | `GET /api/workflows/:id/runs` | `{ runs: [...] }` |
-| start build | `POST /api/workflows/builds` | body `{request, mode, agentId, repository:{owner,name,baseRef?}, workspace}` |
-| run | `GET /api/workflows/runs/:runId` | `{ run: {...} }` |
-| run stream | `GET /api/workflows/runs/:runId/stream` | SSE `data: {"run": ...}` |
-| approve | `POST /api/workflows/runs/:runId/approve` | body `{stepIndex}` |
-| pause / resume / cancel | `POST /api/workflows/runs/:runId/{pause,resume,cancel}` | JSON |
-| repository inventory | `GET /api/repos` | absent on the reference deployment |
+**Device authorization request**
 
-There is **no global run list**. `coderax runs` therefore requires
-`--workflow <id>`; `coderax run <runId>` works with a known id.
+```http
+POST /api/auth/device/code
+Content-Type: application/x-www-form-urlencoded
 
-## Chat stream
-
-The reference deployment emits cumulative text snapshots, not deltas. The CLI
-accepts all three observed shapes:
-
-```text
-data: {"type":"text","text":"<cumulative>","index":0}
-data: {"message":true,"text":"<cumulative>"}
-data: {"final":true,"responseMessage":{"text":"...","messageId":"...","conversationId":"..."}}
-data: [DONE]
+client_id=coderax-cli&scope=coderax%3Achat+coderax%3Awork+coderax%3Aagents%3Aread+coderax%3Amodels%3Aread+coderax%3Acall
 ```
 
-The final frame is authoritative. The CLI rejects a `200 application/json`
-response because the route is a streaming contract (`CONTRACT_VIOLATION`,
-exit `7`). Response text is redacted before display and the token is never
-logged.
+**Response** (`200`, RFC 8628 §3.2):
 
-Because frames have no `id:`, the CLI emits `CURSOR_UNSUPPORTED`. It never
-retries the POST: a retry would create a second generation. An interrupted
-stream is `STREAM_INCOMPLETE` (exit `7`) and reports the conversation id so the
-turn can be followed through the durable Work API.
+```json
+{
+  "device_code": "opaque-device-code",
+  "user_code": "ABCD-EFGH",
+  "verification_uri": "https://coderax.example.com/device",
+  "verification_uri_complete": "https://coderax.example.com/device?code=ABCD-EFGH",
+  "expires_in": 600,
+  "interval": 5
+}
+```
 
-When a deployment does emit ids, `EventSequencer` de-duplicates replay,
-buffers out-of-order frames, and reports `DUPLICATE_EVENT` /
-`OUT_OF_ORDER_EVENT`.
+- `verification_uri` must be on the deployment origin and use HTTPS (loopback
+  HTTP is allowed for development). A different origin is rejected before the
+  user is sent there.
+- `user_code` is displayed to the user; `device_code` is never printed.
+- `interval` defaults to 5 seconds and is clamped to 1–60. `expires_in` defaults
+  to 600 seconds and is clamped to 1–3600.
 
-## Run stream and reconnection
+**Polling request**
 
-The reference deployment polls the run record and emits a full snapshot only
-when it changes. It has no `id:` field and ignores `Last-Event-ID`.
+```http
+POST /api/auth/device/token
+Content-Type: application/x-www-form-urlencoded
 
-The CLI therefore:
+grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code&device_code=opaque-device-code&client_id=coderax-cli
+```
 
-- reconnects with `last-event-id` when it has seen an id;
-- re-reads a full snapshot on every reconnect (idempotent);
-- reports `CURSOR_IGNORED` if the deployment replays an id already seen;
-- reports `CURSOR_UNSUPPORTED` when snapshots carry no ids;
-- retries only transport/5xx/`STREAM_INCOMPLETE` failures, with bounded
-  exponential backoff (`--max-retries`, default 3);
-- never retries `401`, `403`, `404`, `CONTRACT_VIOLATION`, `CANCELLED`, or an
-  unknown run status.
+- `authorization_pending` (`400`) keeps polling at the interval.
+- `slow_down` (`400` or `429`) increases the interval by 5 seconds, capped at 60.
+- `access_denied`, `expired_token` and `invalid_grant` are terminal.
+- A successful poll returns the token response below.
 
-A terminal run returns `0` (`completed`), `1` (`failed`), or `0`
-(`cancelled`). A run left in `waiting_approval` with no interactive approval
-returns `6`. A run in `paused` is still monitorable and returns `0` when the
-stream ends without failure.
+**Token response** (`200`, RFC 6749 §5.1):
 
-Ctrl-C aborts the local stream and leaves the server-side run alive. The
-command prints the run id and conversation id and exits `130`.
-`--cancel-on-interrupt` explicitly cancels instead. `--notify` rings the
-terminal bell; `--notify-command` spawns a detached operator command with
-`{id}` and `{status}` substituted.
+```json
+{
+  "access_token": "eyJ...",
+  "token_type": "Bearer",
+  "expires_in": 3600,
+  "refresh_token": "opaque-refresh-token",
+  "scope": "coderax:chat coderax:work coderax:agents:read coderax:models:read coderax:call"
+}
+```
 
-## Approval
+`token_type` must be `Bearer` (case-insensitive). `expires_in` is optional; when
+absent the CLI uses the JWT `exp`, or a 12-hour local limit for an opaque token.
+`refresh_token` is optional for read-only or short-lived sessions.
 
-Approval policies are `ask` (default), `allow`, and `deny`. `ask` requires an
-interactive TTY and a confirmation; non-interactive sessions fail closed
-instead of approving automatically. An approval request sends the exact
-`stepIndex` reported by the run.
+### Refresh
+
+```http
+POST /api/auth/token/refresh
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=refresh_token&refresh_token=opaque-refresh-token&client_id=coderax-cli
+```
+
+The response uses the same token-response shape. The CLI:
+
+- refreshes when the access token is within 60 seconds of expiry;
+- refreshes once and retries once after an unexpected `401`;
+- replaces a rotated `refresh_token` atomically, or keeps the old one if the
+  server does not return a new one;
+- rejects a response that grants a scope not present in the previous session
+  (`CREDENTIAL_SCOPE_ESCALATION`);
+- deletes the local credential on `invalid_grant`, `invalid_token`,
+  `expired_token`, `access_denied`, or a `401` from the refresh endpoint.
+
+A refresh must not be required in the middle of an active Work stream; see
+WorkflowEngine integration below.
+
+### Revocation
+
+```http
+POST /api/auth/token/revoke
+Content-Type: application/x-www-form-urlencoded
+
+token=opaque-token&token_type_hint=refresh_token&client_id=coderax-cli
+```
+
+The CLI revokes the refresh token first, then the access token, and sends the
+access token as the bearer credential when available. RFC 7009 permits `200` for
+unknown or already-revoked tokens. `404`/`405` is recorded as unsupported. A
+failed revocation does not prevent local credential deletion, but the CLI warns
+that the server token may remain valid until expiry.
+
+### UserInfo
+
+```http
+GET /api/user
+Authorization: Bearer <access_token>
+```
+
+A JSON object with any of `email`, `username`, `preferred_username`, `name`,
+`sub` or `id` (optionally under `user`). `404` means the route is not exposed;
+the CLI falls back to JWT claims. `401`/`403` is an authentication failure.
+`whoami` rejects a response whose `sub` differs from the stored session subject.
+
+### Discovery overrides
+
+The CLI reads the OpenAPI document and matches operations by `operationId` or
+path before falling back to the canonical routes above. Only relative,
+same-origin paths without query strings, fragments, backslashes or `..` segments
+are accepted; anything else is ignored.
+
+Recognised operation IDs and suffixes:
+
+| Purpose | Operation IDs (case-insensitive) | Path suffixes |
+| --- | --- | --- |
+| device authorization | `deviceAuthorization`, `startDeviceAuthorization`, `deviceCode` | `/device/code`, `/device/authorization`, `/device_authorization` |
+| device token | `deviceToken`, `pollDeviceToken`, `deviceAccessToken` | `/device/token`, `/device/access_token` |
+| refresh | `refreshToken`, `refreshAccessToken` | `/token/refresh`, `/refresh` |
+| revoke | `revokeToken`, `revokeAccessToken` | `/token/revoke`, `/revoke` |
+| userinfo | `userinfo`, `currentUser`, `getUser` | `/user`, `/userinfo` |
+
+### Endpoint identity
+
+Before starting device authorization or storing a token, the CLI requires the
+deployment to identify itself as Coderax. Either:
+
+- a health route (`/health`, `/api/health`, `/healthz`) returns a JSON
+  `service`, `name`, `product` or `application` containing “Coderax”; or
+- the OpenAPI `info.title` or `info.description` contains “Coderax”.
+
+If neither is available, login fails with `ENDPOINT_UNVERIFIED` and nothing is
+stored. Deployments that require authentication on every route must expose at
+least one of these identity markers before login.
+
+### Scopes
+
+The CLI requests these scopes and enforces them when the issued token reports
+scopes (`scope` in the token response, or `scope`/`scp` in the JWT):
+
+| Command | Required scope |
+| --- | --- |
+| `chat` | `coderax:chat` |
+| `work` | `coderax:work` |
+| `agents` | `coderax:agents:read` |
+| `models` | `coderax:models:read` |
+| `call` | `coderax:call` |
+
+`coderax:*` is a wildcard. `coderax:admin` is not requested by the CLI and must
+never be required for the commands above. A token without scope information is
+treated as legacy/unscoped and relies entirely on server enforcement; the CLI
+reports `scopesKnown: false` in `auth status`.
+
+**The deployment must enforce the bearer token and required scope on every
+request.** The CLI check is defense in depth, not the authorization boundary.
+
+### Errors
+
+OAuth errors use the RFC 6749 shape:
+
+```json
+{ "error": "authorization_pending", "error_description": "..." }
+```
+
+`error_description` is diagnostic only and is redacted before display. HTTP
+authentication failures should use RFC 6750 `WWW-Authenticate` challenges:
+
+```http
+HTTP/1.1 401 Unauthorized
+WWW-Authenticate: Bearer error="invalid_token", error_description="expired"
+
+HTTP/1.1 403 Forbidden
+WWW-Authenticate: Bearer error="insufficient_scope", scope="coderax:work"
+```
+
+The CLI maps `401` to `SESSION_EXPIRED` (after one refresh attempt) and
+`insufficient_scope` to `INSUFFICIENT_SCOPE`. Other `403` responses map to
+`FORBIDDEN`.
+
+### WorkflowEngine integration
+
+Work mode (`POST /api/work/chat`) shares the Chat SSE contract and the session
+layer. The WorkflowEngine must:
+
+1. Validate the bearer token and `coderax:work` before the first SSE byte. A
+   pre-stream `401` lets the CLI refresh and retry once; a `403` with
+   `insufficient_scope` is terminal.
+2. Never require a token refresh during an active stream. A refresh issued
+   mid-stream must not invalidate the token already accepted for that stream.
+3. Report an authentication failure during a stream as an SSE `error` event and a
+   terminal `final`, not as an HTML login page. The CLI surfaces it as
+   `STREAM_ERROR`.
+4. Treat the `final` event as authoritative, including `responseMessage.text`
+   when the engine rewrote the answer. The CLI uses that text as the answer.
+5. Revocation terminates refresh ability. An already-running stream may finish
+   under the accepted token, but new Work calls must fail with `401`.
+
+The CLI resolves and refreshes the session before opening the stream. A stream
+that already emitted events is never silently restarted.
+
+### Coordination checklist
+
+For API contract owners:
+
+- [ ] Confirm or implement the device, token, refresh, revoke and userinfo routes.
+- [ ] Return RFC 8628/6749/7009 shapes and `WWW-Authenticate` challenges.
+- [ ] Issue tokens whose `iss` matches the deployment origin; include `exp` and
+      `scope`/`scp` where possible.
+- [ ] Enforce scopes server-side; never rely on the CLI check.
+- [ ] Keep identity markers available before login.
+- [ ] Revoke refresh and access tokens independently and idempotently.
+
+For WorkflowEngine owners:
+
+- [ ] Reject unauthenticated and under-scoped Work requests before streaming.
+- [ ] Emit SSE `error` + `final` for auth failures, never HTML.
+- [ ] Honour in-flight streams during token refresh.
+- [ ] Apply the `final`/`responseMessage.text` precedence and cumulative snapshot
+      semantics the CLI already consumes.
+
+For CLI owners:
+
+- [ ] Keep credentials in the OS store, never in config or argv.
+- [ ] Keep origin/issuer binding and endpoint verification before storage.
+- [ ] Keep the 60-second refresh window and one-retry rule.
+- [ ] Keep revocation best-effort with guaranteed local deletion.
+
+
+### Shared WorkflowEngine SDK
+
+`packages/workflow-sdk` is the authoritative client contract for Work/chat,
+durable runs, approvals, cancellation and SSE. CLI command modules import that
+package directly; they do not maintain a second workflow transport. The OAuth
+authentication endpoints above are a separate protocol layer because they issue
+the session that the SDK transport consumes. The SDK sends the same
+`Authorization: Bearer` header and rejects redirects and cross-origin routes.
+
+Coordination with the gateway and WorkflowEngine owners must confirm:
+
+- the exact auth routes and RFC 8628/6749/7009 response shapes;
+- server-side signature, issuer, audience, expiry, subject and owner checks;
+- scope enforcement on every Work, chat, task, run, approval, repository and
+  cloud-execution route;
+- device-code single use, bounded lifetime and polling/replay behaviour;
+- SSE auth-failure and revocation semantics without restarting a write.
+
+Until confirmed, the routes in this document are proposed and are not evidence
+of a deployed backend.
+
+## Discovery
+
+Candidates, tried in order:
+
+1. `/openapi.json`
+2. `/api/openapi.json`
+3. `/.well-known/openapi.json`
+
+A candidate is accepted only when it is a JSON object with an `openapi` version
+starting `3.`, a `paths` object, and at least one operation. The first accepted
+document wins; failures from every candidate are reported when none is usable.
+An `HTTP_401`, `HTTP_403`, or `REQUEST_TIMEOUT` is surfaced immediately instead
+of being hidden behind `OPENAPI_NOT_FOUND`, so authentication and timeout
+exit codes remain meaningful.
+
+## Health
+
+Candidates, tried in order: `/health`, `/api/health`, `/healthz`. A `404` or `405`
+moves to the next candidate; any other failure is surfaced immediately, so an
+authentication problem is not mistaken for a missing endpoint.
+
+## Convenience routes
+
+| Command | Match rule |
+| --- | --- |
+| `agents` | first `GET` operation whose path ends in `/agents` |
+| `models` | first `GET` operation whose path ends in `/models` |
+
+No path is hardcoded. When the match is absent the CLI exits `1` with
+`OPERATION_NOT_FOUND` and suggests `coderax openapi`.
+
+## Requests
+
+- Route paths are appended beneath the configured deployment prefix, so
+  `--base-url https://example.com/coderax` requests
+  `https://example.com/coderax/health`, not `https://example.com/health`.
+- `call <METHOD> <PATH> [--data <json>]` — `--data` is rejected on `GET`/`HEAD`.
+- Bodies are serialized as JSON; responses are parsed as JSON when possible and
+  shown verbatim otherwise.
+- Timeout: 15s default, `--timeout` or `CODERAX_TIMEOUT_MS` to override.
+- Redirects are refused.
+- Tokens are never accepted in a query string or command argument.
 
 ## Exit codes
 
-| Code | Meaning |
-| --- | --- |
-| `0` | success, including completed and paused runs |
-| `1` | failed run or other operational failure |
-| `2` | usage or configuration error |
-| `3` | unauthenticated, forbidden, or not the owner |
-| `4` | network failure or timeout |
-| `5` | not found |
-| `6` | capability or API version unavailable (fail closed) |
-| `7` | contract violation, including an incomplete stream |
-| `130` | cancelled or detached locally |
+- `0` success
+- `1` other operational failure (missing operation, unavailable health check,
+  unverified endpoint, other non-2xx HTTP status)
+- `2` usage error or invalid configuration (bad URL, insecure transport,
+  credential store unavailable, disabled TLS verification, token argument)
+- `3` authentication or authorization failure (no session, expired session,
+  insufficient scope, HTTP 401/403)
+- `4` network failure or timeout
+- `5` HTTP 404 not found
+- `6` Cloud/projects unavailable
+- `130` cancelled
 
-## Tests that pin this contract
+## Compatibility
 
-`test/contract.test.js` stubs the deployment and asserts, among others:
-
-- JSON `200` where SSE is required is rejected;
-- a `2.0` API header is rejected;
-- duplicate/out-of-order frames render once and in order;
-- chat without ids reports `CURSOR_UNSUPPORTED`;
-- reconnect sends `Last-Event-ID`, deduplicates replay, and reports
-  `CURSOR_IGNORED`;
-- a server restart with a snapshot-only stream converges;
-- an interrupted chat POST is never retried;
-- failed runs exit `1`, suspended runs are reported distinctly, and
-  `waiting_approval` fails closed;
-- expired credentials exit `3` without retrying;
-- an unadvertised capability exits `6` without calling the guessed route.
+The CLI depends only on the OpenAPI document shape, bearer auth and the
+standards-based auth routes above. Adding routes to a deployment does not
+require a CLI release; removing a route degrades the matching command to
+`OPERATION_NOT_FOUND` while `coderax call` keeps working. A deployment without
+device authorization can still be used with `login --with-token` or
+`CODERAX_TOKEN`; the CLI reports `DEVICE_AUTH_UNSUPPORTED` rather than inventing
+an insecure login path.

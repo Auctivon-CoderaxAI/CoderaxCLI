@@ -34,23 +34,77 @@ prefix.
 
 ```sh
 coderax config set --base-url https://coderax.example.com
-coderax login                 # prompts for the token on stdin
-coderax whoami                # verifies role === ADMIN
+coderax login                 # device authorization; opens the deployment page
+coderax whoami                # re-checks the authenticated role === ADMIN
 ```
 
-`login` calls `/api/user` and **stores nothing** unless the deployment reports
-`role: "ADMIN"`. The token is written to `~/.coderax/config.json` with mode
-`0600` (directory `0700`), through a fresh temporary file and an atomic rename.
-A symlinked config path is refused. Environment variables override the file:
+`login` starts an RFC 8628 device authorization, prints a verification URL and
+one-time code, and waits for approval. It calls `/api/user` and **stores nothing**
+unless the deployment authenticates the session and reports `role: "ADMIN"`
+(the instance owner). The CLI never accepts a token as a command argument.
+
+Credentials live only in an OS facility:
+
+| Platform | Store |
+| --- | --- |
+| macOS | Keychain via `/usr/bin/security` (secret on stdin) |
+| Linux | Secret Service via `secret-tool` (secret on stdin) |
+| Windows | DPAPI, `CurrentUser` scope |
+
+There is **no plaintext fallback**. If no store is available, login fails with
+`CREDENTIAL_STORE_UNAVAILABLE`; `auth status` and `doctor` explain how to fix it.
+The config file contains deployment settings only and is written atomically with
+mode `0600`. `saveConfig` rejects token, refresh-token, password, client-secret
+and API-key fields.
+
+For headless deployments and CI, pipe a deployment-issued session token:
+
+```sh
+printf '%s' "$CODERAX_SESSION_TOKEN" | coderax login --with-token
+```
+
+`--with-token` still requires an OS credential store and still verifies the
+owner role before storing anything. On a keyring-less runner, use
+`CODERAX_TOKEN` directly instead; it is read from the environment for that
+process and never written to disk. A token with an `aud` claim can be pinned
+with `CODERAX_AUDIENCE`.
+
+Environment variables override the file:
 
 ```sh
 export CODERAX_BASE_URL=https://coderax.example.com
-export CODERAX_TOKEN=...      # useful in CI; never written to disk
+export CODERAX_TOKEN=...      # short-lived CI token; never written to disk
+export CODERAX_AUDIENCE=coderax-cli   # optional expected audience
 ```
 
 Remote deployments must use HTTPS. Plain HTTP is accepted only for loopback
 (`localhost`, `127.0.0.1`, `::1`). Redirects are refused so a token cannot be
-forwarded to another origin.
+forwarded to another origin. `NODE_TLS_REJECT_UNAUTHORIZED=0` is refused while
+credentials are in use.
+
+### Migrating from an older build
+
+Older builds wrote `token` or `accessToken` into `~/.coderax/config.json`. The
+CLI never loads those fields as a session. It reports `legacyPlaintextToken` and
+migrates the value into the OS store on the next authenticated use, then removes
+the plaintext field. If migration cannot complete, it fails closed and leaves the
+token in place so the owner is not locked out. Remove `coderax config set
+--token` and `coderax login --token` from old runbooks; both are rejected.
+
+## Session behavior
+
+- An expiring credential is refreshed once before use; refresh tokens rotate and
+  concurrent commands share one rotation. A response that grants new scopes is
+  rejected until the owner signs in again.
+- Revocation is attempted for the refresh and access token on logout, then the
+  local OS item is deleted. If revocation fails, the local copy is still removed
+  and the warning explains that the server token may remain valid until expiry.
+- A session is bound to its deployment origin. The first login records the
+  issuer; `CODERAX_ISSUER` can pin it and `CODERAX_AUDIENCE` can pin the token
+  audience. A token is never sent to a different origin.
+- Auth expiry during Chat/Work is surfaced with exit `3`; a started write is never
+  retried. Reauthenticate and use the preserved task/run id with `coderax run` or
+  `coderax tasks` to recover durable progress.
 
 ## Commands
 

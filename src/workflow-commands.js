@@ -7,6 +7,7 @@ import {
   isTerminalStatus,
 } from "../packages/workflow-sdk/src/index.js";
 import { saveConfig } from "./config.js";
+import { resolveSession } from "./auth.js";
 import { getSession, withSession, clearSession } from "./session.js";
 import {
   diagnosticsForJson,
@@ -88,7 +89,16 @@ export function makeClient(ctx) {
 
 async function clientFor(ctx) {
   requireBase(ctx);
-  requireAuth(ctx);
+  // All workflow traffic resolves the same owner session as login/whoami.
+  // This refreshes an expiring credential once and pins it to the configured
+  // deployment; a 401 later is surfaced, never retried as a new Work submit.
+  if (ctx.credentialStore) {
+    const session = await resolveSession(ctx);
+    ctx.settings.token = session.accessToken;
+    ctx.token = session.accessToken;
+  } else {
+    requireAuth(ctx);
+  }
   return makeClient(ctx);
 }
 

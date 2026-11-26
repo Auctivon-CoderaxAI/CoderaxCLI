@@ -131,6 +131,33 @@ The client requires `role === "ADMIN"` (`SystemRoles.ADMIN`).
 owner identity in metadata. Document that `ADMIN` is the instance-owner role,
 not a tenant-scoped role.
 
+## B8 — Authentication routes are a proposed contract *(critical)*
+
+**Observed.** The CLI implements RFC 8628 device authorization, RFC 6749
+refresh and RFC 7009 revocation against the routes in `docs/CONTRACT.md` and
+discovers alternatives from OpenAPI. No authorized deployment is available to
+this work, so none of those routes is confirmed live. The proposed contract is
+not evidence that the gateway implements it.
+
+**Required backend change.** The Coderax gateway must implement and document the
+auth routes, and must verify the access token's signature, issuer, audience,
+expiry and subject on every authenticated operation. It must enforce the owner
+role (`ADMIN`) server-side on Chat/Work, conversations, projects, memory,
+files/artifacts, scheduled tasks, notifications, agent selection, permission
+decisions, repository operations and cloud execution. Device authorization must
+not create accounts or grant owner privileges; codes must be bounded, single-use
+and replay-protected. Scope checks in the CLI are defence in depth only.
+
+**Client behaviour.** Login stores nothing until authenticated `/api/user`
+reports `ADMIN`. Unsigned JWTs, issuer/audience mismatches, expired tokens,
+scope escalation, refresh replay and cross-origin redirects fail closed. The
+client cannot verify token signatures without deployment keys and does not
+pretend to; live authentication remains unverified here.
+
+**Acceptance test.** A live owner and non-owner account exercise device login,
+refresh rotation, revocation, expiry and every owner-only route; a non-owner is
+rejected by the backend even if a client-supplied role claims otherwise.
+
 ## Dependency summary
 
 | CLI capability | Backend dependency | Without it |
@@ -144,3 +171,5 @@ not a tenant-scoped role.
 | `repos` | `/api/repos` | exit `6` |
 | API version | metadata/header | `API_VERSION_UNVERIFIED`; `--strict` exit `6` |
 | event replay | SSE ids + `Last-Event-ID` | `CURSOR_UNSUPPORTED`; reconnect re-reads snapshots |
+| login / refresh / logout | RFC 8628/6749/7009 routes and server-side token verification | `DEVICE_AUTH_UNSUPPORTED` / `REFRESH_UNSUPPORTED`; no invented fallback |
+| owner authorization | backend role and scope checks on every route | client stops at login, but only the backend can protect data |

@@ -5,19 +5,19 @@ argv ──► parseArgv ──► preflight ──► resolveSettings ──►
                           │              │                 │
                     usage errors    config.js        product commands
                     (exit 2)     (env + 0600 file)   (login, status, doctor)
-                                                          │
-                                          ┌───────────────┴───────────────┐
-                                          ▼                               ▼
-                                  workflow-commands.js              discover.js
-                                  (chat, work, runs,                (OpenAPI)
-                                   approvals, notifications)
-                                          │
-                                          ▼
-                                  packages/workflow-sdk
-                                  contract · http · sse · client
-                                          │
-                                          ▼
-                                  fetch (HTTPS, no redirects)
+                                          │                 │
+                                          ▼                 ▼
+                                   auth.js          workflow-commands.js
+                                   credentials.js   (chat, work, runs,
+                                   (device, refresh, approvals, notifications)
+                                    revoke, scopes)         │
+                                          │                 ▼
+                                          │       packages/workflow-sdk
+                                          │       contract · http · sse · client
+                                          └───────────────┬─┘
+                                                          ▼
+                                          fetch (HTTPS, no redirects,
+                                                 OS credential store)
 ```
 
 ## Layers
@@ -25,9 +25,11 @@ argv ──► parseArgv ──► preflight ──► resolveSettings ──►
 | Module | Responsibility | Knows about |
 | --- | --- | --- |
 | `src/cli.js` | parsing, preflight, dispatch, exit-code mapping, top-level errors | every command module |
-| `src/config.js` | resolve, validate, atomically persist settings; 0600/0700; symlink refusal; sessions; role | filesystem, environment |
-| `src/product-commands.js` | owner login/logout/whoami/status, doctor, legacy discovery commands | SDK, config, discovery |
-| `src/workflow-commands.js` | chat, Work, autonomous submit, tasks, runs, approvals, cancel/resume/retry, notifications | SDK, session, render, approval |
+| `src/config.js` | resolve, validate, atomically persist non-secret settings; 0600/0700; symlink refusal; sessions; issuer pin | filesystem, environment |
+| `src/auth.js` | device authorization, token/refresh/revoke, owner gate, scope and expiry checks, origin/issuer binding, trusted session resolution | config, credentials, client, discovery |
+| `src/credentials.js` | macOS Keychain, Linux libsecret, Windows DPAPI; no plaintext fallback; helper stdin and environment hygiene | OS helpers, filesystem |
+| `src/product-commands.js` | owner login/logout/whoami/status, doctor, legacy discovery commands | auth, config, discovery |
+| `src/workflow-commands.js` | chat, Work, autonomous submit, tasks, runs, approvals, cancel/resume/retry, notifications | SDK, auth, session, render, approval |
 | `src/session.js` | per-deployment conversation continuity, bounded and normalized | none |
 | `src/render.js` | human tables and run rendering | none |
 | `src/approval.js` | fail-closed approval policies | SDK |
@@ -40,6 +42,27 @@ argv ──► parseArgv ──► preflight ──► resolveSettings ──►
 
 The SDK is imported by relative path. There is no workspace install step, no
 npm dependency and no duplicate backend implementation inside the CLI.
+
+## Authentication and ownership
+
+`src/auth.js` owns the session lifecycle: RFC 8628 device authorization (or a
+headless token on stdin), RFC 6749 refresh with rotation, RFC 7009 revocation,
+expiry/issuer/audience/subject checks, optional scope checks, and a single-flight
+refresh so concurrent commands cannot replay a rotated token. Credentials are
+stored only by `src/credentials.js` in Keychain, libsecret or DPAPI, keyed by a
+SHA-256 of the normalized deployment URL. There is no plaintext fallback.
+
+Login stores nothing until an authenticated `GET /api/user` reports the instance
+owner (`ADMIN`). `whoami`, `doctor`, and every workflow command resolve the same
+session and present its access token to the shared SDK. The SDK and every backend
+route must still verify the token and authorize the owner server-side; the client
+check is defence in depth, not authentication.
+
+The config records the issuer on first login and `CODERAX_ISSUER` can pin it.
+`CODERAX_AUDIENCE` can pin the expected audience. Remote URLs require HTTPS and
+redirects are refused, so a token cannot be forwarded to another origin. A `401`
+on a started Chat/Work request is surfaced; a write is never restarted after
+reauthentication. Durable task/run identifiers remain available for recovery.
 
 ## Streams
 
@@ -85,5 +108,6 @@ exits `130` without cancelling.
 - No local execution, inference, database, Docker or agent process.
 - No automatic POST retries for Chat; no hidden write probes during negotiation.
 - No redirects; no cookie jar; no telemetry.
-- No token in output, diagnostics, sessions or error text.
+- No token in output, diagnostics, sessions, argv or error text.
+- No automatic restart of a side-effecting Work submission after auth expiry.
 - Unknown backend capabilities fail closed rather than guessing paths.

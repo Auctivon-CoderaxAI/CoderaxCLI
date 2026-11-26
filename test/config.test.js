@@ -8,7 +8,9 @@ import {
   describeConfig,
   loadConfig,
   normalizeBaseUrl,
+  readLegacyToken,
   saveConfig,
+  stripLegacyToken,
 } from "../src/config.js";
 
 async function tempConfigPath() {
@@ -57,12 +59,9 @@ test("explicit overrides bypass invalid lower-priority settings", async () => {
   assert.equal(loaded.timeoutMs, 1000);
 });
 
-test("environment overrides the stored file", async () => {
+test("environment overrides the stored file and is the only token source", async () => {
   const path = await tempConfigPath();
-  await saveConfig(
-    { baseUrl: "https://stored.example.com", token: "stored-token" },
-    { filePath: path },
-  );
+  await saveConfig({ baseUrl: "https://stored.example.com" }, { filePath: path });
 
   const loaded = await loadConfig({
     env: { CODERAX_BASE_URL: "https://env.example.com", CODERAX_TOKEN: "env-token" },
@@ -71,6 +70,7 @@ test("environment overrides the stored file", async () => {
 
   assert.equal(loaded.baseUrl, "https://env.example.com");
   assert.equal(loaded.token, "env-token");
+  assert.equal(loaded.hasLegacyPlaintextToken, false);
 });
 
 test("empty environment values do not mask stored settings", async () => {
@@ -93,21 +93,71 @@ test("a missing config file is not an error", async () => {
   assert.equal(loaded.timeoutMs, 15000);
 });
 
-test("saved config is written as JSON and describeConfig never exposes the token", async () => {
+test("saveConfig refuses to write credentials into the plaintext config", async () => {
   const path = await tempConfigPath();
-  await saveConfig(
-    { baseUrl: "https://coderax.example.com", token: "super-secret-token" },
-    { filePath: path },
-  );
+  for (const patch of [
+    { token: "super-secret-token" },
+    { accessToken: "super-secret-token" },
+    { refreshToken: "super-secret-token" },
+    { apiKey: "super-secret-token" },
+  ]) {
+    await assert.rejects(
+      () => saveConfig(patch, { filePath: path }),
+      (error) => error instanceof ConfigError && error.code === "CONFIG_SECRET_REJECTED",
+    );
+  }
+});
 
-  const raw = await readFile(path, "utf8");
-  assert.match(raw, /super-secret-token/);
+test("a legacy plaintext token is detected, never loaded, and can be stripped", async () => {
+  const path = await tempConfigPath();
+  await writeFile(path, JSON.stringify({ baseUrl: "https://coderax.example.com", token: "legacy-secret" }), "utf8");
 
   const loaded = await loadConfig({ env: {}, filePath: path });
   const described = describeConfig(loaded);
-  assert.equal(described.tokenConfigured, true);
-  assert.equal(JSON.stringify(described).includes("super-secret-token"), false);
-  assert.equal(JSON.stringify(described).includes("secret"), false);
+  assert.equal(loaded.token, null);
+  assert.equal(described.tokenConfigured, false);
+  assert.equal(described.legacyPlaintextToken, true);
+  assert.equal(JSON.stringify(described).includes("legacy-secret"), false);
+
+  assert.equal(await readLegacyToken({ filePath: path }), "legacy-secret");
+  assert.equal(await stripLegacyToken({ filePath: path }), true);
+  const stored = JSON.parse(await readFile(path, "utf8"));
+  assert.equal(Object.hasOwn(stored, "token"), false);
+  assert.equal(await readLegacyToken({ filePath: path }), null);
+});
+
+test("a legacy accessToken is detected as a plaintext credential and migrated as a token", async () => {
+  const path = await tempConfigPath();
+  await writeFile(path, JSON.stringify({ baseUrl: "https://coderax.example.com", accessToken: "legacy-access" }), "utf8");
+
+  const loaded = await loadConfig({ env: {}, filePath: path });
+  assert.equal(loaded.token, null);
+  assert.equal(loaded.hasLegacyPlaintextToken, true);
+  assert.equal(await readLegacyToken({ filePath: path }), "legacy-access");
+  assert.equal(await stripLegacyToken({ filePath: path }), true);
+  const stored = JSON.parse(await readFile(path, "utf8"));
+  assert.equal(Object.hasOwn(stored, "accessToken"), false);
+});
+
+test("an unrelated write removes every legacy secret field", async () => {
+  const path = await tempConfigPath();
+  await writeFile(
+    path,
+    JSON.stringify({
+      baseUrl: "https://coderax.example.com",
+      accessToken: "old-access",
+      refreshToken: "old-refresh",
+      clientSecret: "old-client-secret",
+    }),
+    "utf8",
+  );
+
+  await saveConfig({ model: "next-model" }, { filePath: path });
+  const stored = JSON.parse(await readFile(path, "utf8"));
+  assert.equal(stored.model, "next-model");
+  for (const field of ["token", "accessToken", "refreshToken", "clientSecret"]) {
+    assert.equal(Object.hasOwn(stored, field), false);
+  }
 });
 
 test("invalid stored timeout is rejected", async () => {
@@ -132,12 +182,13 @@ test("rewriting an existing config replaces it atomically and leaves no temp fil
   const directory = await mkdtemp(join(tmpdir(), "coderax-config-"));
   const path = join(directory, "config.json");
 
-  await saveConfig({ baseUrl: "https://one.example.com", token: "first-token" }, { filePath: path });
-  await saveConfig({ token: "second-token" }, { filePath: path });
+  await saveConfig({ baseUrl: "https://one.example.com", model: "first-model" }, { filePath: path });
+  await saveConfig({ model: "second-model" }, { filePath: path });
 
   const parsed = JSON.parse(await readFile(path, "utf8"));
-  assert.equal(parsed.token, "second-token");
+  assert.equal(parsed.model, "second-model");
   assert.equal(parsed.baseUrl, "https://one.example.com");
+  assert.equal(Object.hasOwn(parsed, "token"), false);
   assert.deepEqual(await readdir(directory), ["config.json"]);
 });
 
@@ -147,7 +198,7 @@ test("creates the config directory with mode 0700", async () => {
   let received;
 
   await saveConfig(
-    { token: "x" },
+    { baseUrl: "https://coderax.example.com" },
     {
       filePath: path,
       mkdirImpl: async (target, options) => {
@@ -166,7 +217,7 @@ test("a failed atomic replace does not report success", async () => {
   await assert.rejects(
     () =>
       saveConfig(
-        { token: "x" },
+        { baseUrl: "https://coderax.example.com" },
         {
           filePath: path,
           renameImpl: async () => {

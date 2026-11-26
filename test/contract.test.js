@@ -66,13 +66,38 @@ async function envFor(baseUrl) {
   };
 }
 
-async function cli(args, env, { stdinIsTTY = false } = {}) {
+
+function memoryStore() {
+  const map = new Map();
+  return {
+    name: "memory-contract",
+    available: true,
+    secure: true,
+    detail: "in-memory test store",
+    async get(account) {
+      return map.has(account) ? map.get(account) : null;
+    },
+    async set(account, secret) {
+      map.set(account, secret);
+    },
+    async delete(account) {
+      return map.delete(account);
+    },
+    async describe() {
+      return { name: "memory-contract", available: true, secure: true, detail: "in-memory test store" };
+    },
+    map,
+  };
+}
+
+async function cli(args, env, { stdinIsTTY = false, credentialStore = memoryStore() } = {}) {
   const io = capture();
   const code = await runCli(args, {
     env,
     stdout: io.stdout,
     stderr: io.stderr,
     stdinIsTTY,
+    credentialStore,
     confirm: async () => null,
   });
   return { code, out: io.out(), err: io.err() };
@@ -584,22 +609,23 @@ test("repositories fail closed when the deployment advertises no inventory", asy
 
 test("login refuses a non-owner token and stores nothing", async () => {
   const config = await tempConfig();
+  const store = memoryStore();
   await withStub(
     (req, res) => {
-      if (req.url === "/api/user") {
-        return json(res, 200, { email: "member@coderax.test", role: "USER" });
-      }
+      if (req.url === "/health") return json(res, 200, { status: "ok", service: "coderax" });
+      if (req.url === "/api/user") return json(res, 200, { email: "member@coderax.test", role: "USER" });
       return json(res, 404, { message: "not found" });
     },
     async (baseUrl) => {
       const result = await cli(
-        ["login", "--base-url", baseUrl, "--token", TOKEN, "--json"],
-        { CODERAX_CONFIG: config },
-        { stdinIsTTY: true },
+        ["login", "--with-token", "--json"],
+        { CODERAX_CONFIG: config, CODERAX_BASE_URL: baseUrl, CODERAX_TOKEN: TOKEN },
+        { credentialStore: store },
       );
       assert.equal(result.code, 3);
       assert.match(result.err, /owner|ADMIN/i);
       assert.equal(result.out.includes(TOKEN), false);
+      assert.equal(store.map.size, 0);
       await assert.rejects(() => access(config));
     },
   );
@@ -607,28 +633,33 @@ test("login refuses a non-owner token and stores nothing", async () => {
 
 test("login fails closed when the deployment cannot report a role", async () => {
   const config = await tempConfig();
+  const store = memoryStore();
   await withStub(
     (req, res) => {
+      if (req.url === "/health") return json(res, 200, { status: "ok", service: "coderax" });
       if (req.url === "/api/user") return json(res, 200, { email: "who@coderax.test" });
       return json(res, 404, { message: "not found" });
     },
     async (baseUrl) => {
       const result = await cli(
-        ["login", "--base-url", baseUrl, "--token", TOKEN],
-        { CODERAX_CONFIG: config },
-        { stdinIsTTY: true },
+        ["login", "--with-token"],
+        { CODERAX_CONFIG: config, CODERAX_BASE_URL: baseUrl, CODERAX_TOKEN: TOKEN },
+        { credentialStore: store },
       );
       assert.equal(result.code, 6);
       assert.match(result.err, /OWNER_UNVERIFIABLE|did not report a role/);
+      assert.equal(store.map.size, 0);
       await assert.rejects(() => access(config));
     },
   );
 });
 
-test("login stores an owner token with 0600 permissions", async () => {
+test("login stores an owner session in the OS store, never the config", async () => {
   const config = await tempConfig();
+  const store = memoryStore();
   await withStub(
     (req, res) => {
+      if (req.url === "/health") return json(res, 200, { status: "ok", service: "coderax" });
       if (req.url === "/api/user") {
         return json(res, 200, { email: "owner@coderax.test", role: "ADMIN" });
       }
@@ -636,15 +667,17 @@ test("login stores an owner token with 0600 permissions", async () => {
     },
     async (baseUrl) => {
       const result = await cli(
-        ["login", "--base-url", baseUrl, "--token", TOKEN, "--json"],
-        { CODERAX_CONFIG: config },
-        { stdinIsTTY: true },
+        ["login", "--with-token", "--json"],
+        { CODERAX_CONFIG: config, CODERAX_BASE_URL: baseUrl, CODERAX_TOKEN: TOKEN },
+        { credentialStore: store },
       );
       assert.equal(result.code, 0);
       assert.equal(result.out.includes(TOKEN), false);
+      assert.equal(store.map.size, 1);
+      const credential = JSON.parse([...store.map.values()][0]);
+      assert.equal(credential.accessToken, TOKEN);
       const stored = JSON.parse(await readFile(config, "utf8"));
-      assert.equal(stored.token, TOKEN);
-      assert.equal(stored.role, "ADMIN");
+      assert.equal(Object.hasOwn(stored, "token"), false);
     },
   );
 });

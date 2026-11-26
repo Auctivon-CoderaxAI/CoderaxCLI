@@ -1,4 +1,4 @@
-import { chmod, lstat, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -11,6 +11,15 @@ export class ConfigError extends Error {
 }
 
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
+const SECRET_FIELDS = Object.freeze([
+  "token",
+  "accessToken",
+  "refreshToken",
+  "idToken",
+  "password",
+  "clientSecret",
+  "apiKey",
+]);
 export const DEFAULT_TIMEOUT_MS = 15000;
 export const DEFAULT_CHAT_PATH = "/api/ask/agents";
 export const DEFAULT_ENDPOINT = "agents";
@@ -46,7 +55,7 @@ export function normalizeBaseUrl(raw) {
     throw new ConfigError("BASE_URL_INVALID", "base URL must be an absolute URL, for example https://coderax.example.com");
   }
   if (url.username !== "" || url.password !== "") {
-    throw new ConfigError("BASE_URL_CREDENTIALS", "base URL must not embed credentials; use --token or CODERAX_TOKEN");
+    throw new ConfigError("BASE_URL_CREDENTIALS", "base URL must not embed credentials; use `coderax login` or CODERAX_TOKEN");
   }
   const host = url.hostname.replace(/^\[|\]$/g, "");
   const loopback = LOOPBACK_HOSTS.has(host);
@@ -63,14 +72,13 @@ export function normalizeBaseUrl(raw) {
   return { baseUrl: `${url.origin}${path}`, loopback };
 }
 
-async function readStoredConfig(path, readFileImpl) {
+async function assertRegularFile(path) {
   try {
     const info = await lstat(path);
     if (info.isSymbolicLink()) {
       throw new ConfigError(
         "CONFIG_SYMLINK",
-        `${path} is a symbolic link; refusing to read credentials through it. ` +
-          "Replace it with a regular file owned by you.",
+        `${path} is a symbolic link; refusing to read or write credentials through it`,
       );
     }
     if (!info.isFile()) {
@@ -82,7 +90,10 @@ async function readStoredConfig(path, readFileImpl) {
       throw new ConfigError("CONFIG_UNREADABLE", `could not inspect ${path}`);
     }
   }
+}
 
+async function readStoredConfig(path, readFileImpl) {
+  await assertRegularFile(path);
   try {
     const raw = await readFileImpl(path, "utf8");
     const parsed = JSON.parse(raw);
@@ -98,32 +109,16 @@ async function readStoredConfig(path, readFileImpl) {
 }
 
 /**
- * Precedence: environment over stored file. A token is never required at load
- * time so that `coderax config show` works before the first login.
+ * Precedence: environment over stored file. No token is ever loaded from the
+ * config file. A legacy token is surfaced only so it can be migrated and
+ * removed; credentials belong in the OS credential store.
  */
 export async function loadConfig({ env = process.env, filePath, readFileImpl = readFile, overrides = {} } = {}) {
   const path = filePath ?? configPath(env);
   const stored = await readStoredConfig(path, readFileImpl);
 
-  // A credential file readable by another account is refused rather than used.
-  // Windows has no POSIX mode bits; ACL inheritance is the platform control.
-  if (stored.token && process.platform !== "win32") {
-    try {
-      const info = await stat(path);
-      if ((info.mode & 0o077) !== 0) {
-        throw new ConfigError(
-          "CONFIG_INSECURE_PERMISSIONS",
-          `${path} is readable by group or others (mode ${(info.mode & 0o777).toString(8)}); run \`chmod 600 ${path}\``,
-        );
-      }
-    } catch (error) {
-      if (error instanceof ConfigError) throw error;
-      throw new ConfigError("CONFIG_UNREADABLE", `could not check permissions on ${path}`);
-    }
-  }
-
   const baseUrlRaw = overrides.baseUrl ?? envText(env.CODERAX_BASE_URL) ?? stored.baseUrl;
-  const token = env.CODERAX_TOKEN?.trim() || stored.token || null;
+  const token = envText(env.CODERAX_TOKEN) ?? null;
   const timeoutRaw = overrides.timeoutMs ?? envText(env.CODERAX_TIMEOUT_MS) ?? stored.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const timeoutMs = Number(timeoutRaw);
 
@@ -141,20 +136,38 @@ export async function loadConfig({ env = process.env, filePath, readFileImpl = r
     model: env.CODERAX_MODEL?.trim() || stored.model || "",
     agent: env.CODERAX_AGENT?.trim() || stored.agent || "",
     output: stored.output || "text",
+    // A non-secret trust anchor recorded on first login. It pins future logins
+    // and token issuers to the deployment the owner originally approved.
+    trustedIssuer: envText(env.CODERAX_ISSUER) ?? (typeof stored.issuer === "string" ? stored.issuer : null),
+    // Display-only hints from older builds. Never use these for authorization;
+    // every owner check is made against the authenticated deployment.
     account: typeof stored.account === "string" ? stored.account : null,
     role: typeof stored.role === "string" ? stored.role : null,
     sessions:
       stored.sessions !== null && typeof stored.sessions === "object" && !Array.isArray(stored.sessions)
         ? stored.sessions
         : {},
+    hasLegacyPlaintextToken: SECRET_FIELDS.some(
+      (field) => typeof stored[field] === "string" && stored[field] !== "",
+    ),
   };
 }
 
-export async function saveConfig(
-  patch,
+/** Read a legacy plaintext token only so it can be migrated and removed. */
+export async function readLegacyToken({ filePath, readFileImpl = readFile } = {}) {
+  const path = filePath ?? configPath();
+  const stored = await readStoredConfig(path, readFileImpl);
+  // Older builds used `accessToken`; both are migrated as an access token. A
+  // lone refresh token is not usable as a session and is only reported/removed.
+  const token = [stored.token, stored.accessToken]
+    .find((value) => typeof value === "string" && value.trim() !== "");
+  return typeof token === "string" ? token.trim() : null;
+}
+
+async function writeStoredConfig(
+  path,
+  next,
   {
-    filePath,
-    readFileImpl = readFile,
     writeFileImpl = writeFile,
     renameImpl = rename,
     unlinkImpl = unlink,
@@ -162,48 +175,10 @@ export async function saveConfig(
     chmodImpl = chmod,
   } = {},
 ) {
-  const path = filePath ?? configPath();
-  const stored = await readStoredConfig(path, readFileImpl);
-  const next = { ...stored };
-
-  // Never write credentials through a symlink an attacker could have planted.
-  try {
-    const info = await lstat(path);
-    if (info.isSymbolicLink()) {
-      throw new ConfigError("CONFIG_SYMLINK", `${path} is a symbolic link; refusing to write credentials through it`);
-    }
-  } catch (error) {
-    if (error instanceof ConfigError) throw error;
-    if (error?.code !== "ENOENT") {
-      throw new ConfigError("CONFIG_UNREADABLE", `could not inspect ${path}`);
-    }
-  }
-
-  if (patch.baseUrl !== undefined) next.baseUrl = normalizeBaseUrl(patch.baseUrl).baseUrl;
-  if (patch.token !== undefined) next.token = patch.token === null ? null : String(patch.token);
-  if (patch.timeoutMs !== undefined) next.timeoutMs = Number(patch.timeoutMs);
-  if (patch.chatPath !== undefined) next.chatPath = String(patch.chatPath);
-  if (patch.endpoint !== undefined) next.endpoint = String(patch.endpoint);
-  if (patch.model !== undefined) next.model = String(patch.model);
-  if (patch.agent !== undefined) next.agent = String(patch.agent);
-  if (patch.output !== undefined) next.output = String(patch.output);
-  if (patch.account !== undefined) next.account = patch.account === null ? null : String(patch.account);
-  if (patch.role !== undefined) next.role = patch.role === null ? null : String(patch.role);
-  if (patch.sessions !== undefined) {
-    next.sessions =
-      patch.sessions === null
-        ? {}
-        : Object.fromEntries(
-            Object.entries(patch.sessions).filter(
-              ([, entry]) => entry !== null && typeof entry === "object" && !Array.isArray(entry),
-            ),
-          );
-  }
-
   await mkdirImpl(dirname(path), { recursive: true, mode: 0o700 });
 
   // Write a fresh 0600 file and atomically replace the config, so an existing
-  // world-readable file never receives the token even for an instant.
+  // world-readable file never receives secret material even for an instant.
   const tempPath = `${path}.${process.pid}.${Date.now().toString(36)}.tmp`;
   try {
     await writeFileImpl(tempPath, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600, flag: "wx" });
@@ -224,8 +199,86 @@ export async function saveConfig(
     if (error instanceof ConfigError) throw error;
     throw new ConfigError("CONFIG_WRITE_FAILED", `could not write ${path} atomically`);
   }
+}
 
+export async function saveConfig(
+  patch,
+  {
+    filePath,
+    readFileImpl = readFile,
+    writeFileImpl = writeFile,
+    renameImpl = rename,
+    unlinkImpl = unlink,
+    mkdirImpl = mkdir,
+    chmodImpl = chmod,
+  } = {},
+) {
+  const path = filePath ?? configPath();
+
+  for (const field of SECRET_FIELDS) {
+    if (Object.hasOwn(patch, field) && patch[field] !== undefined) {
+      throw new ConfigError(
+        "CONFIG_SECRET_REJECTED",
+        `refusing to write ${field} to the plaintext config; credentials belong in the OS credential store`,
+      );
+    }
+  }
+
+  await assertRegularFile(path);
+  const stored = await readStoredConfig(path, readFileImpl);
+  const next = { ...stored };
+  // No credential field may survive an unrelated config write, including
+  // fields written by an older CLI that kept tokens in this file.
+  for (const field of SECRET_FIELDS) delete next[field];
+
+  if (patch.baseUrl !== undefined) next.baseUrl = normalizeBaseUrl(patch.baseUrl).baseUrl;
+  if (patch.issuer !== undefined) {
+    const issuer = new URL(String(patch.issuer));
+    next.issuer = issuer.origin;
+  }
+  if (patch.timeoutMs !== undefined) next.timeoutMs = Number(patch.timeoutMs);
+  if (patch.chatPath !== undefined) next.chatPath = String(patch.chatPath);
+  if (patch.endpoint !== undefined) next.endpoint = String(patch.endpoint);
+  if (patch.model !== undefined) next.model = String(patch.model);
+  if (patch.agent !== undefined) next.agent = String(patch.agent);
+  if (patch.output !== undefined) next.output = String(patch.output);
+  if (patch.account !== undefined) next.account = patch.account === null ? null : String(patch.account);
+  if (patch.role !== undefined) next.role = patch.role === null ? null : String(patch.role);
+  if (patch.sessions !== undefined) {
+    next.sessions =
+      patch.sessions === null
+        ? {}
+        : Object.fromEntries(
+            Object.entries(patch.sessions).filter(
+              ([, entry]) => entry !== null && typeof entry === "object" && !Array.isArray(entry),
+            ),
+          );
+  }
+
+  await writeStoredConfig(path, next, { writeFileImpl, renameImpl, unlinkImpl, mkdirImpl, chmodImpl });
   return { path, config: next };
+}
+
+/** Remove a legacy plaintext token in place, without ever rewriting it. */
+export async function stripLegacyToken({
+  filePath,
+  readFileImpl = readFile,
+  writeFileImpl = writeFile,
+  renameImpl = rename,
+  unlinkImpl = unlink,
+  mkdirImpl = mkdir,
+  chmodImpl = chmod,
+} = {}) {
+  const path = filePath ?? configPath();
+  const stored = await readStoredConfig(path, readFileImpl);
+  const hadSecret = SECRET_FIELDS.some(
+    (field) => typeof stored[field] === "string" && stored[field] !== "",
+  );
+  if (!SECRET_FIELDS.some((field) => Object.hasOwn(stored, field))) return false;
+  const next = { ...stored };
+  for (const field of SECRET_FIELDS) delete next[field];
+  await writeStoredConfig(path, next, { writeFileImpl, renameImpl, unlinkImpl, mkdirImpl, chmodImpl });
+  return hadSecret;
 }
 
 export function describeConfig(config) {
@@ -233,6 +286,7 @@ export function describeConfig(config) {
     configPath: config.configPath,
     baseUrl: config.baseUrl ?? null,
     tokenConfigured: Boolean(config.token),
+    legacyPlaintextToken: Boolean(config.hasLegacyPlaintextToken),
     timeoutMs: config.timeoutMs,
     chatPath: config.chatPath,
     endpoint: config.endpoint,

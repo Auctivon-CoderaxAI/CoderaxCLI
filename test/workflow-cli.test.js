@@ -96,16 +96,19 @@ test("session normalization drops malformed entries without throwing", () => {
   );
 });
 
-test("saving a session writes 0600 config and never stores the token in sessions", async () => {
+test("saving a session writes 0600 config and refuses plaintext credentials", async () => {
   const directory = await mkdtemp(join(tmpdir(), "coderax-session-"));
   const file = join(directory, "config.json");
   const { saveConfig } = await import("../src/config.js");
   await saveConfig(
-    { baseUrl: "https://coderax.test", token: "secret-token", sessions: withSession({}, "https://coderax.test", { conversationId: "c1" }) },
+    { baseUrl: "https://coderax.test", sessions: withSession({}, "https://coderax.test", { conversationId: "c1" }) },
     { filePath: file },
   );
   const stored = JSON.parse(await readFile(file, "utf8"));
-  assert.equal(stored.token, "secret-token");
+  assert.equal(Object.hasOwn(stored, "token"), false);
   assert.equal(stored.sessions["https://coderax.test"].conversationId, "c1");
-  assert.equal(JSON.stringify(stored.sessions).includes("secret-token"), false);
+  await assert.rejects(
+    () => saveConfig({ token: "secret-token" }, { filePath: file }),
+    (error) => error.code === "CONFIG_SECRET_REJECTED",
+  );
 });
