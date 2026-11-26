@@ -1,267 +1,130 @@
-# Capability and artifact contract
+# Capabilities
 
-Version: CLI `0.2.0`, consuming WorkflowEngine contract `1.0.0` and the shared
-`@coderax/sdk` `1.0.0` semantics.
+A capability command is a typed, owner-authorized request for the engine to do
+work in the cloud. The CLI validates the request, submits it, reports progress
+and hands back the artifacts. It never performs the work itself and never claims
+a capability the engine is not currently serving.
 
-## Source of truth
+## Where availability comes from
 
-`Auctivon-CoderaxAI/Coderax-WorkflowEngine` owns the capability registry, the
-execution contract, upload handling, artifact generation and artifact storage.
-This CLI owns none of that. It discovers what the engine publishes, displays the
-engine's availability verdict, submits a request when the engine says the
-capability is available, and renders or downloads the result.
-
-`packages/contracts/src/routes.ts` in WorkflowEngine is the authoritative HTTP
-surface for the operations that exist today. The capability routes below are the
-client-side contract this CLI implements; the engine must publish them before a
-capability can become operational. The CLI never substitutes a local adapter, a
-model call, a document parser or a generator for a missing engine route.
-
-### Inspected baseline (26 November 2026)
-
-| Surface | State |
-| --- | --- |
-| HTTP contract version | `1.0.0` — `packages/contracts/src/primitives.ts` |
-| Execution event schema | `1` — `packages/contracts/src/events.ts` |
-| Shared SDK | `@coderax/sdk@1.0.0` — `packages/sdk/package.json` |
-| Published operations | health, readiness, agents, models, chat, work, task, cancel, resume, retry, events, conversations, memory, permissions, notifications |
-| Multimodal / upload / artifact operations | **not published on `main`** |
-| Active integration PRs | #2 intelligence core, #3 native reasoning, #4 zero-cost router; none publishes these routes |
-| CLI migration onto the engine API | **not done** — stated by the engine README |
-
-Therefore, against an engine at that baseline, `coderax capabilities` reports
-every capability as `blocked` with `reason: capability_registry_missing`. That is
-the truthful result, not a failure of the CLI. No capability is advertised as
-operational until the engine publishes it as `available`.
-
-## Statuses
-
-Every capability and the artifact surface carry exactly one status. Only
-`available` executes.
-
-| Status | Meaning | CLI behaviour |
-| --- | --- | --- |
-| `available` | The engine verified the capability for this deployment. | May upload inputs and execute. |
-| `unavailable` | Supported by the engine but not reachable or temporarily disabled. | Refuses with `CAPABILITY_NOT_AVAILABLE` (exit 6). |
-| `unconfigured` | The owner must configure a prerequisite. | Refuses and shows the engine's reason. |
-| `unverified` | No verification evidence exists. | Refuses; never presented as operational. |
-| `blocked` | A known prerequisite prevents safe operation. | Refuses with the blocker detail. |
-
-An unknown status from a newer engine is downgraded to `unverified`, never to
-`available`. A capability omitted from the registry is `blocked`
-(`reason: not_published`). An `available` capability whose execution route is
-missing still fails at the engine and is reported as such; the CLI does not
-simulate it.
-
-## Registry
-
-`GET /v1/capabilities` (owner bearer auth)
+`GET /v1/handshake` publishes, for each capability the engine knows:
 
 ```json
 {
-  "contractVersion": "1.0.0",
-  "registryVersion": "2026-11-26T12:00:00.000Z",
-  "capabilities": [
-    {
-      "id": "pdf.analyze",
-      "command": "analyze-pdf",
-      "title": "PDF analysis",
-      "summary": "Analyze a PDF in the cloud.",
-      "status": "available",
-      "reason": "ready",
-      "detail": "",
-      "inputs": [
-        {
-          "name": "file",
-          "type": "file",
-          "required": true,
-          "description": "PDF to analyze",
-          "mimeTypes": ["application/pdf"],
-          "maxBytes": 52428800
-        },
-        {
-          "name": "question",
-          "type": "text",
-          "required": false,
-          "description": "Question to answer"
-        }
-      ]
-    }
-  ],
-  "artifacts": {
-    "status": "available",
-    "reason": "ready",
-    "detail": "",
-    "digestRequired": true
-  }
-}
-```
-
-Input `type` is one of `file`, `text`, `string`, `number`, `boolean`, `enum`.
-`enum` requires `values`; `number` may declare `min`, `max` and `integer`.
-`file` may declare `mimeTypes` and `maxBytes`; the CLI caps the effective upload
-limit at 50 MiB. Input names are lower-case kebab-case and may not reuse a
-transport option (`--project`, `--out`, `--stream`, `--json`, and so on).
-
-The CLI's static catalog (`src/capability-catalog.js`) supplies stable command
-aliases and offline help. It is not an availability claim. The registry decides
-which aliases exist, which options they take and whether they run. A
-registry-only capability is listed and executable through:
-
-```sh
-coderax capabilities --json
-coderax capability run <id|command> [options]
-```
-
-The contract major version must be `1.x`. A different major version fails with
-`CAPABILITY_CONTRACT_INCOMPATIBLE` rather than being parsed optimistically.
-
-## Execution
-
-`POST /v1/capabilities/{capabilityId}/execute` (owner bearer auth)
-
-```json
-{
-  "capabilityId": "pdf.analyze",
-  "inputs": {
-    "file": {
-      "uploadId": "upl_...",
-      "name": "report.pdf",
-      "bytes": 184320,
-      "sha256": "...",
-      "mimeType": "application/pdf"
-    },
-    "question": "What changed?"
+  "capabilities": {
+    "work":        { "state": "available",     "detail": "durable Work tasks" },
+    "artifacts":   { "state": "available",     "detail": "task-scoped artifact storage" },
+    "multimodal":  { "state": "unsupported",   "detail": "contract 1.1.0 publishes no media operation" },
+    "scheduling":  { "state": "available",     "detail": "durable schedules" }
   },
-  "projectId": "proj_...",
-  "conversationId": "conv_...",
-  "wait": true
+  "operations": [
+    { "operationId": "submitWork", "method": "POST", "path": "/v1/work", "tags": ["work"], "auth": "owner", "stream": false }
+  ]
 }
 ```
 
-The response is WorkflowEngine's `TaskAccepted` shape:
+Every family in [`src/capability-catalog.js`](../src/capability-catalog.js)
+declares the capability keys and operations it needs. The resolver applies a
+fixed precedence:
 
-```json
-{
-  "taskId": "task_...",
-  "conversationId": "conv_...",
-  "state": "queued",
-  "generation": 1,
-  "eventsPath": "/v1/work/task_.../events"
-}
+1. an incompatible contract → `unverified`;
+2. no published operation for a dedicated backend → `not_implemented`;
+3. a required operation missing from the handshake or unknown to the SDK →
+   `unverified`;
+4. the family's own capability `unsupported` → `unavailable`;
+5. the family's own capability `unconfigured` → `unconfigured`;
+6. a prerequisite `unsupported` or `unconfigured` → `blocked`, naming the key;
+7. any other non-`available` state → `unverified`;
+8. otherwise → `available`.
+
+Only `available` executes. The refusal is `CAPABILITY_NOT_AVAILABLE` (exit `6`)
+and includes the exact prerequisite, for example:
+
+```
+create-document is blocked: requires multimodal: contract 1.1.0 publishes no media operation.
+The CLI does not fall back to local execution or simulate the result.
 ```
 
-The task is durable. `--no-wait` returns immediately; closing the terminal never
-cancels authorized cloud work. While waiting, the CLI tails
-`GET /v1/work/{taskId}/events` and falls back to
-`GET /v1/work/{taskId}` if the stream is absent or interrupted. Terminal events
-are followed by a task snapshot, which is authoritative for the result.
+## Families
 
-Task states: `queued`, `running`, `awaiting_approval`, `completed`, `failed`,
-`cancelled`, `interrupted`. `failed`, `cancelled` and `interrupted` are reported
-as failures with the engine's code and detail; they are never rendered as an
-empty success.
+`W` = executed as a Work objective (`POST /v1/work`); `O` = requires dedicated
+engine operations discovered from the handshake.
 
-## Uploads
+| Command | Kind | Requires | Notes |
+| --- | --- | --- | --- |
+| `upload <file> --task <id>` | artifact | work, artifacts | stores bytes on an existing owner task |
+| `create-document <prompt>` | W | work, artifacts | `--format md\|txt\|docx\|pdf`, `--name` |
+| `analyze-document <file>` | W + attachment | work, artifacts, multimodal | `--question` |
+| `create-pdf <prompt>` | W | work, artifacts | `--name` |
+| `analyze-pdf <file>` | W + attachment | work, artifacts, multimodal | `--question` |
+| `create-spreadsheet <prompt>` | W | work, artifacts | `--format xlsx\|csv` |
+| `analyze-spreadsheet <file>` | W + attachment | work, artifacts, multimodal | `--question` |
+| `create-presentation <prompt>` | W | work, artifacts | `--format pptx\|pdf`, `--file` optional |
+| `analyze-data <prompt>` | W | work, artifacts | `--file`, `--question` |
+| `visualize-data <prompt>` | W | work, artifacts | `--file`, `--chart` |
+| `understand-image <file>` | W + attachment | work, artifacts, multimodal | `--question` |
+| `generate-image <prompt>` | W | work, artifacts | `--size`, `--count` |
+| `edit-image <file>` | W + attachment | work, artifacts, multimodal | `--instruction` |
+| `transcribe <file>` | W + attachment | work, artifacts, multimodal | `--language`, `--format` |
+| `speak <text>` | W | work, artifacts | `--voice`, `--format` |
+| `understand-video <file>` | W + attachment | work, artifacts, multimodal | `--question` |
+| `create-software <prompt>` | W | work, artifacts | `--name` |
+| `create-game <prompt>` | O | work + `/v1/games` operations | Native Game Studio |
+| `gaming-agent <objective>` | O | work + `/v1/games` operations | Native Gaming Agent |
+| `orchestrate <prompt>` | W | work, multiAgent | `--agent` |
 
-`POST /v1/files` (owner bearer auth, `multipart/form-data`)
+Dedicated families are not assumed absent because a branch is unmerged. The
+resolver looks at the live handshake for an operation tagged `games` /
+`game-studio` / `gaming-agent` or under `/v1/games`. Until a deployment publishes
+one, the status is `not_implemented`; the moment it does, the status becomes
+`available` with no CLI change.
 
-Fields: `file` (required), `sha256`, `bytes`, `mimeType`, optional `projectId`
-and `conversationId`. The request also carries `x-content-sha256`. The engine
-must echo `uploadId`, `name`, `bytes`, `sha256` and `mimeType`; a byte-count or
-digest mismatch aborts the command with `UPLOAD_INTEGRITY_FAILED` before any
-execution request is sent.
+## Options are validated locally
 
-Local validation happens before the request:
+Unknown options are rejected before any request. Values are constrained by the
+catalogue (`--format`, `--size`, `--count`, `--chart`) and reserved transport
+options cannot be redefined by a capability. `--force` without `--out` on a
+capability request is a usage error: the operator must name the file they are
+authorizing to replace.
 
-- regular file only; symbolic links and directories are refused;
-- non-empty and within the registry limit (hard cap 50 MiB);
-- extension and magic bytes must agree (PDF, PNG/JPEG/GIF/WebP, MP3/M4A/WAV/OGG/FLAC/WebM,
-  ZIP-based office formats, OLE office formats, RTF and UTF-8 text);
-- type must be in the registry's `mimeTypes`;
-- SHA-256 is computed from the exact bytes sent.
+## File validation
 
-## Artifacts
+Before a byte leaves the machine:
 
-Artifacts are owner-scoped engine records, not CLI-local files. Coderax Web and
-CoderaxCLI use the same catalog, so an artifact generated by either client is
-visible to the other under the same owner, project and conversation.
+- the path must be a regular file, not a symlink or directory;
+- it must be non-empty and within the family's limit (8 MiB hard bound);
+- the contents must be a supported type identified from magic bytes;
+- the extension and the magic bytes must agree;
+- the MIME type must be in the family's accepted set;
+- the exact bytes are hashed with SHA-256.
 
-| Operation | Route |
-| --- | --- |
-| list | `GET /v1/artifacts?projectId=&conversationId=&taskId=&limit=` |
-| inspect | `GET /v1/artifacts/{artifactId}` |
-| download | `GET /v1/artifacts/{artifactId}/content` |
-| associate project | `POST /v1/artifacts/{artifactId}/project` with `{ "projectId": "..." }` |
+The engine must echo the same digest and byte count. A mismatch cancels the task
+and exits `1`.
 
-Artifact metadata must include `artifactId`, `name`, `bytes` and a SHA-256
-`digest`. A download is written to a temporary file (or an exclusively created
-destination), hashed while streaming, checked against the published digest and
-byte count, and only then moved into place. A mismatch deletes the downloaded
-data and exits with `ARTIFACT_INTEGRITY_FAILED`.
+## Waiting, progress and cancellation
 
-The CLI never overwrites an existing destination unless `--force` is supplied.
-It refuses directories, missing parents and symbolic-link destinations. `--out`
-defaults to the artifact's basename in the current directory; because existing
-files are never replaced, an explicit `--out` or `--force` is required to
-replace one.
+- Default: wait for the terminal state.
+- `--no-wait`: print the accepted task id and return; the task continues.
+- `--wait-timeout <ms>`: local deadline (1 s–1 h, default 10 min). Reaching it
+  exits `4` with the authoritative state and does not cancel the task.
+- `--stream`: write each execution event to stderr as JSON; stdout stays one
+  JSON document with `--json`.
+- `awaiting_approval`: the CLI prints the request id and the exact
+  `coderax permissions approve` command, then keeps waiting.
+- Ctrl-C stops local waiting and reports `130`; the durable task continues.
 
-## Authentication, memory, conversations, permissions and projects
+## Structured output
 
-The CLI adds no identity of its own. Every request carries the owner's bearer
-token from the existing Coderax configuration (`CODERAX_TOKEN` or the `0600`
-config file). The engine decides ownership, project and conversation access,
-permission requests and memory scope. `--project` and `--conversation` are
-forwarded as references, never as a substitute for authorization.
+`--json` returns one document. Capability execution includes
+`{accepted, capability, attachment, task, artifacts, downloaded, events, waited}`.
+Failures use the CLI error contract and still exit with the documented code. No
+human progress is written to stdout in JSON mode.
 
-A `409 permission_required` is surfaced with the engine's stable code and
-detail. The CLI does not auto-approve, retry around a denial, or substitute a
-different agent.
+## What is never done
 
-## CLI command map
-
-| Command | Capability id |
-| --- | --- |
-| `upload` | `file.upload` |
-| `analyze-document` | `document.analyze` |
-| `analyze-pdf` | `pdf.analyze` |
-| `analyze-spreadsheet` | `spreadsheet.analyze` |
-| `create-presentation` | `presentation.create` |
-| `understand-image` | `image.understand` |
-| `generate-image` | `image.generate` |
-| `transcribe` | `audio.transcribe` |
-| `speak` | `audio.speech` |
-| `create-software` | `software.create` |
-| `create-game` | `game.create` |
-| `artifacts list/inspect/download/associate` | registry `artifacts` surface |
-
-Aliases: `caps` = `capabilities`, `stt` = `transcribe`, `tts` = `speak`.
-
-## Output and progress
-
-- Human output: results on stdout, progress on stderr.
-- `--json`: one structured object on stdout; errors remain on stderr.
-- `--stream --json`: NDJSON events first, then one `{"type":"result",...}` line.
-- `--no-wait`: one `TaskAccepted`-shaped object; no polling.
-- `--wait-timeout <ms>`: local wait limit (1000–3600000, default 600000). On
-  timeout the task keeps running in the cloud and the CLI reports
-  `WAIT_TIMEOUT` with the task id.
-
-Exit codes follow the existing contract; capability-specific additions:
-
-| Code | Condition |
-| --- | --- |
-| `2` | local input validation (`CAPABILITY_INPUT_INVALID`, `UPLOAD_*`, destination errors) |
-| `6` | capability not available or registry missing |
-| `130` | local wait cancelled (the remote task continues) |
-| `1` | engine task failure, integrity failure, contract incompatibility |
-
-## What this CLI deliberately does not do
-
-- No provider SDK, OCR, document parser, image/audio model, code generator or
-  game runtime.
-- No local execution, sandbox or artifact synthesis.
-- No retries that could duplicate a billable or side-effecting run.
-- No authorization decision; no permission auto-approval.
-- No second copy of the engine data model or a hand-written capability payload
-  beyond the documented wire fields above.
+- No provider adapter, model call, OCR, transcription, rendering or code
+  execution in the CLI.
+- No local artifact generation and no local artifact catalog.
+- No capability claim from documentation, a branch name or a test count; only
+  the live handshake.
+- No silent fallback from `unavailable` to another agent or another route.

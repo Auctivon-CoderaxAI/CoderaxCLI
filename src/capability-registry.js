@@ -1,318 +1,300 @@
+import { checkCompatibility, SDK_CONTRACT_VERSION, SDK_COVERAGE, SDK_VERSION } from "@coderax/sdk";
 import {
-  CAPABILITY_CATALOG,
-  CAPABILITY_STATUSES,
-  MAX_UPLOAD_BYTES,
-  RESERVED_OPTIONS,
+  CAPABILITY_FAMILIES,
+  CAPABILITY_STATES,
+  EXECUTABLE_STATE,
 } from "./capability-catalog.js";
 import { CoderaxError } from "./client.js";
-import { singleLine } from "./format.js";
 
 /**
- * The engine contract this CLI speaks. It mirrors WorkflowEngine's
- * `CONTRACT_VERSION` (`packages/contracts/src/primitives.ts`). A registry from
- * another major version is refused instead of being interpreted optimistically.
+ * Resolve capability families against the authoritative engine handshake.
+ *
+ * There is no capability registry route and no client-side registry of backend
+ * features: `/v1/handshake` publishes the contract version, the state of every
+ * capability the engine knows about and the exact operations it implements. A
+ * family is executable only when its own capability is available, every
+ * prerequisite is available and every operation it needs is published.
+ *
+ * The mapping from a family to handshake keys is deliberate client metadata.
+ * What the keys say is the engine's claim, and it is never upgraded here: an
+ * `unsupported` capability is never presented as available because the client
+ * has a command for it.
  */
-export const CAPABILITY_CONTRACT_VERSION = "1.0.0";
 
-const INPUT_TYPES = new Set(["file", "text", "string", "number", "boolean", "enum"]);
-const ID_PATTERN = /^[a-z][a-z0-9._-]{0,79}$/;
-const COMMAND_PATTERN = /^[a-z][a-z0-9-]{0,39}$/;
-const OPTION_PATTERN = /^[a-z][a-z0-9-]{0,39}$/;
+export const EXPECTED_CONTRACT_VERSION = SDK_CONTRACT_VERSION;
+export const CLIENT_SDK_VERSION = SDK_VERSION;
 
-const MAX_DETAIL = 1000;
-
-function registryError(message) {
-  return new CoderaxError("CAPABILITY_REGISTRY_INVALID", message);
+function states(handshake) {
+  const map = new Map();
+  const capabilities = handshake?.capabilities;
+  if (capabilities === null || typeof capabilities !== "object") return map;
+  for (const [key, value] of Object.entries(capabilities)) {
+    if (value === null || typeof value !== "object") continue;
+    map.set(key, {
+      state: typeof value.state === "string" ? value.state : "unverified",
+      detail: typeof value.detail === "string" ? value.detail : "",
+    });
+  }
+  return map;
 }
 
-function cleanText(value, limit = MAX_DETAIL) {
-  return singleLine(value, limit);
+function operationIndex(handshake) {
+  const map = new Map();
+  const list = Array.isArray(handshake?.operations) ? handshake.operations : [];
+  for (const operation of list) {
+    if (operation === null || typeof operation !== "object") continue;
+    if (typeof operation.operationId !== "string") continue;
+    map.set(operation.operationId, {
+      operationId: operation.operationId,
+      method: operation.method,
+      path: operation.path,
+      tags: Array.isArray(operation.tags) ? operation.tags : [],
+      auth: operation.auth,
+      stream: operation.stream === true,
+    });
+  }
+  return map;
 }
 
-function cleanArray(value, limit = 64) {
-  if (!Array.isArray(value)) return [];
-  return value
-    .filter((item) => typeof item === "string" && item.trim() !== "")
-    .map((item) => item.trim())
-    .slice(0, limit);
+function matchesDiscovery(discover, operations) {
+  const tags = Array.isArray(discover?.tags) ? discover.tags : [];
+  const prefix = typeof discover?.pathPrefix === "string" ? discover.pathPrefix : null;
+  for (const operation of operations.values()) {
+    const byTag = tags.some((tag) => operation.tags.includes(tag));
+    const byPath = prefix !== null && operation.path.startsWith(prefix);
+    if (byTag || byPath) return operation;
+  }
+  return null;
 }
 
-function normalizeStatus(value) {
-  return CAPABILITY_STATUSES.includes(value) ? value : "unverified";
+function capabilityOf(handshakeState, key) {
+  return handshakeState.get(key) ?? null;
 }
 
-function normalizeInput(raw, capabilityId) {
-  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
-    throw registryError(`capability ${capabilityId} declares an input that is not an object`);
-  }
-  const name = typeof raw.name === "string" ? raw.name.trim() : "";
-  if (!OPTION_PATTERN.test(name) || RESERVED_OPTIONS.includes(name)) {
-    throw registryError(`capability ${capabilityId} declares an invalid or reserved input name: ${name || "(empty)"}`);
-  }
-  const type = INPUT_TYPES.has(raw.type) ? raw.type : null;
-  if (type === null) {
-    throw registryError(`capability ${capabilityId} input ${name} has an unsupported type`);
-  }
-  const normalized = {
-    name,
-    type,
-    required: raw.required === true,
-    description: cleanText(raw.description, 300),
-  };
-  if (type === "enum") {
-    const values = cleanArray(raw.values);
-    if (values.length === 0) {
-      throw registryError(`capability ${capabilityId} input ${name} is an enum without values`);
-    }
-    normalized.values = values;
-  }
-  if (type === "number") {
-    if (Number.isFinite(raw.min)) normalized.min = Number(raw.min);
-    if (Number.isFinite(raw.max)) normalized.max = Number(raw.max);
-    if (raw.integer === true) normalized.integer = true;
-  }
-  if (type === "file") {
-    const mimeTypes = cleanArray(raw.mimeTypes);
-    if (mimeTypes.length > 0) normalized.mimeTypes = mimeTypes;
-    const maxBytes = Number(raw.maxBytes);
-    normalized.maxBytes =
-      Number.isSafeInteger(maxBytes) && maxBytes > 0 ? Math.min(maxBytes, MAX_UPLOAD_BYTES) : MAX_UPLOAD_BYTES;
-  }
-  if (raw.default !== undefined) {
-    const fallback = raw.default;
-    if (typeof fallback === "string" || typeof fallback === "number" || typeof fallback === "boolean") {
-      normalized.default = fallback;
-    }
-  }
-  return normalized;
-}
-
-function normalizeInputs(raw, capabilityId) {
-  if (raw === undefined) return null;
-  if (!Array.isArray(raw)) {
-    throw registryError(`capability ${capabilityId} must declare inputs as an array`);
-  }
-  const seen = new Set();
-  return raw.map((item) => {
-    const normalized = normalizeInput(item, capabilityId);
-    if (seen.has(normalized.name)) {
-      throw registryError(`capability ${capabilityId} declares input ${normalized.name} twice`);
-    }
-    seen.add(normalized.name);
-    return normalized;
-  });
-}
-
-function syntheticEntry(capability, detail, reason) {
-  return {
-    ...capability,
-    status: "blocked",
-    reason,
-    detail: cleanText(detail),
-    inputs: capability.inputs.map((item) => ({ ...item, mimeTypes: item.mimeTypes ? [...item.mimeTypes] : undefined })),
-    source: "catalog",
-  };
+function describeRequirement(key, status) {
+  const detail = status.detail.trim();
+  return detail === "" ? key : `${key}: ${detail}`;
 }
 
 /**
- * An engine that publishes no capability registry at all is still reported
- * truthfully: every proposed command exists in the CLI but is blocked.
+ * One family's truthful state. Precedence is fixed and documented so a client
+ * can explain exactly why something cannot run:
+ *   incompatible contract -> unverified
+ *   no published operation for a dedicated backend -> not_implemented
+ *   missing required operation -> unverified (the deployment drifted)
+ *   own capability unsupported -> unavailable
+ *   own capability unconfigured -> unconfigured
+ *   prerequisite unsupported/unconfigured -> blocked (with the key named)
+ *   anything not explicitly available -> unverified
+ *   otherwise -> available
  */
-export function unpublishedRegistry(detail, reason = "capability_registry_missing") {
-  const registry = {
-    contractVersion: CAPABILITY_CONTRACT_VERSION,
-    registryVersion: null,
-    source: "unpublished",
-    published: false,
-    capabilities: CAPABILITY_CATALOG.map((capability) =>
-      syntheticEntry(capability, detail, reason),
-    ),
-    artifacts: {
-      status: "blocked",
-      reason,
-      detail: cleanText(detail),
-      digestRequired: true,
-    },
-  };
-  return indexRegistry(registry);
-}
+export function resolveFamily(entry, context) {
+  const { handshake, operations, compatible, problems } = context;
 
-function normalizeCapability(raw) {
-  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
-    throw registryError("a capability entry is not an object");
-  }
-  const id = typeof raw.id === "string" ? raw.id.trim() : "";
-  if (!ID_PATTERN.test(id)) {
-    throw registryError(`invalid capability id: ${id || "(empty)"}`);
-  }
-  const command = typeof raw.command === "string" ? raw.command.trim() : "";
-  if (!COMMAND_PATTERN.test(command)) {
-    throw registryError(`capability ${id} has an invalid command name`);
-  }
-  const status = normalizeStatus(raw.status);
-  const inputs = normalizeInputs(raw.inputs, id);
-  return {
-    id,
-    command,
-    title: cleanText(raw.title, 120) || command,
-    summary: cleanText(raw.summary ?? raw.description, 500),
-    status,
-    reason: cleanText(raw.reason, 120) || (status === "available" ? "ready" : "not_ready"),
-    detail: cleanText(raw.detail),
-    inputs,
-    source: "registry",
-  };
-}
-
-function normalizeArtifacts(raw) {
-  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+  if (!compatible) {
     return {
-      status: "blocked",
-      reason: "artifacts_not_published",
-      detail: "the capability registry does not publish artifact operations",
-      digestRequired: true,
+      ...entry,
+      status: CAPABILITY_STATES.unverified,
+      detail: `the engine contract is not compatible with SDK ${CLIENT_SDK_VERSION}: ${problems.join("; ")}`,
+      blockedBy: null,
+      published: [],
     };
   }
-  const status = normalizeStatus(raw.status);
+
+  let discovered = null;
+  if (entry.discover) {
+    const found = matchesDiscovery(entry.discover, operations);
+    discovered = found;
+    if (found === null) {
+      return {
+        ...entry,
+        status: CAPABILITY_STATES.notImplemented,
+        detail:
+          `this engine publishes no ${entry.title} operation ` +
+          `(${entry.discover.pathPrefix} or tag ${entry.discover.tags.join("/")}); ` +
+          "the implementation is not part of this deployment's handshake",
+        blockedBy: entry.discover.pathPrefix,
+        published: [],
+      };
+    }
+  }
+
+  const missing = entry.operations.filter(
+    (id) => !operations.has(id) || !Object.hasOwn(SDK_COVERAGE, id),
+  );
+  if (missing.length > 0) {
+    return {
+      ...entry,
+      status: CAPABILITY_STATES.unverified,
+      detail: `required operation${missing.length > 1 ? "s" : ""} ${missing.join(", ")} ` +
+        "is not both published by the engine and covered by the canonical SDK",
+      blockedBy: missing[0],
+      published: [],
+    };
+  }
+
+  const own = entry.requires[0];
+  const ownStatus = capabilityOf(context.capabilities, own);
+  if (ownStatus === null) {
+    return {
+      ...entry,
+      status: CAPABILITY_STATES.unverified,
+      detail: `the handshake does not report the ${own} capability`,
+      blockedBy: own,
+      published: [],
+    };
+  }
+  if (ownStatus.state === "unsupported") {
+    return {
+      ...entry,
+      status: CAPABILITY_STATES.unavailable,
+      detail: describeRequirement(own, ownStatus),
+      blockedBy: own,
+      published: [],
+    };
+  }
+  if (ownStatus.state === "unconfigured") {
+    return {
+      ...entry,
+      status: CAPABILITY_STATES.unconfigured,
+      detail: describeRequirement(own, ownStatus),
+      blockedBy: own,
+      published: [],
+    };
+  }
+  if (ownStatus.state !== "available") {
+    return {
+      ...entry,
+      status: CAPABILITY_STATES.unverified,
+      detail: `the engine reports ${own} as ${ownStatus.state}`,
+      blockedBy: own,
+      published: [],
+    };
+  }
+
+  for (const key of entry.requires.slice(1)) {
+    const status = capabilityOf(context.capabilities, key);
+    if (status === null) {
+      return {
+        ...entry,
+        status: CAPABILITY_STATES.unverified,
+        detail: `the handshake does not report the required ${key} capability`,
+        blockedBy: key,
+        published: [],
+      };
+    }
+    if (status.state === "unsupported" || status.state === "unconfigured") {
+      return {
+        ...entry,
+        status: CAPABILITY_STATES.blocked,
+        detail: `requires ${describeRequirement(key, status)}`,
+        blockedBy: key,
+        published: [],
+      };
+    }
+    if (status.state !== "available") {
+      return {
+        ...entry,
+        status: CAPABILITY_STATES.unverified,
+        detail: `the engine reports ${key} as ${status.state}`,
+        blockedBy: key,
+        published: [],
+      };
+    }
+  }
+
   return {
-    status,
-    reason: cleanText(raw.reason, 120) || (status === "available" ? "ready" : "not_ready"),
-    detail: cleanText(raw.detail),
-    digestRequired: raw.digestRequired !== false,
+    ...entry,
+    status: CAPABILITY_STATES.available,
+    detail:
+      discovered === null
+        ? "the engine reports every required capability and operation as available"
+        : `the engine publishes ${discovered.operationId}; requests run as Work objectives the engine executes`,
+    blockedBy: null,
+    published: discovered === null ? [...entry.operations] : [...entry.operations, discovered.operationId],
   };
 }
 
-function indexRegistry(registry) {
-  const byCommand = new Map();
-  const byId = new Map();
-  for (const capability of registry.capabilities) {
-    byCommand.set(capability.command, capability);
-    byId.set(capability.id, capability);
-  }
-  return { ...registry, byCommand, byId };
-}
-
 /**
- * Merge the authoritative registry with the static catalog. A catalog command
- * the registry omits is blocked; a registry capability the catalog does not know
- * is kept and is still executable through `coderax capability run`.
+ * Build the resolved registry once per invocation. Agents are optional: a
+ * deployment may report `agents` unconfigured, which is not a failure.
  */
-export function decodeRegistry(payload) {
-  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
-    throw registryError("the capability registry response is not a JSON object");
-  }
-  const contractVersion = typeof payload.contractVersion === "string" ? payload.contractVersion.trim() : "";
-  if (!/^1\./.test(contractVersion)) {
-    throw new CoderaxError(
-      "CAPABILITY_CONTRACT_INCOMPATIBLE",
-      `the engine capability contract is ${contractVersion || "missing"}; this CLI requires 1.x (${CAPABILITY_CONTRACT_VERSION})`,
-    );
-  }
-  if (!Array.isArray(payload.capabilities)) {
-    throw registryError("the capability registry has no capabilities array");
-  }
-
-  const published = payload.capabilities.map(normalizeCapability);
-  const publishedById = new Map(published.map((capability) => [capability.id, capability]));
-  const publishedByCommand = new Map(published.map((capability) => [capability.command, capability]));
-  const used = new Set();
-  const capabilities = [];
-
-  for (const catalogEntry of CAPABILITY_CATALOG) {
-    const match = publishedById.get(catalogEntry.id) ?? publishedByCommand.get(catalogEntry.command);
-    if (match === undefined) {
-      capabilities.push(
-        syntheticEntry(
-          catalogEntry,
-          "the engine capability registry does not publish this capability",
-          "not_published",
-        ),
-      );
-      continue;
-    }
-    used.add(match.id);
-    const inputs =
-      match.inputs === null
-        ? catalogEntry.inputs.map((item) => ({ ...item, mimeTypes: item.mimeTypes ? [...item.mimeTypes] : undefined }))
-        : match.inputs;
-    // A registry command keeps the catalog's positional binding only when the
-    // registry uses the catalog's command and still declares that input.
-    const primary =
-      match.command === catalogEntry.command && inputs.some((item) => item.name === catalogEntry.primary)
-        ? catalogEntry.primary
-        : null;
-    capabilities.push({ ...match, title: match.title || catalogEntry.title, summary: match.summary || catalogEntry.summary, inputs, primary });
-  }
-
-  for (const capability of published) {
-    if (used.has(capability.id)) continue;
-    if (capabilities.some((item) => item.command === capability.command)) {
-      throw registryError(`two capabilities publish the command ${capability.command}`);
-    }
-    // A registry-only capability has no catalog binding. Bind one positional to
-    // its first required text input so `coderax capability run <id> "prompt"`
-    // works without inventing a per-capability command.
-    const positional = (capability.inputs ?? []).find(
-      (item) => item.required && (item.type === "text" || item.type === "string"),
-    );
-    capabilities.push({ ...capability, primary: positional?.name ?? null });
-  }
-
-  const commandSet = new Set();
-  for (const capability of capabilities) {
-    if (commandSet.has(capability.command)) {
-      throw registryError(`two capabilities publish the command ${capability.command}`);
-    }
-    commandSet.add(capability.command);
-  }
-
-  return indexRegistry({
-    contractVersion,
-    registryVersion:
-      typeof payload.registryVersion === "string" ? cleanText(payload.registryVersion, 120) : null,
-    source: "engine",
-    published: true,
-    capabilities,
-    artifacts: normalizeArtifacts(payload.artifacts),
-  });
+export function resolveRegistry(handshake, { agents = null } = {}) {
+  const report = checkCompatibility(handshake);
+  const context = {
+    handshake,
+    operations: operationIndex(handshake),
+    capabilities: states(handshake),
+    compatible: report.compatible,
+    problems: report.problems,
+    agents,
+  };
+  const families = CAPABILITY_FAMILIES.map((entry) => resolveFamily(entry, context));
+  const counts = Object.fromEntries(
+    Object.values(CAPABILITY_STATES).map((state) => [
+      state,
+      families.filter((entry) => entry.status === state).length,
+    ]),
+  );
+  return {
+    contract: {
+      engineName: handshake.engineName,
+      engineVersion: handshake.engineVersion,
+      contractVersion: handshake.contractVersion,
+      eventSchemaVersion: handshake.eventSchemaVersion,
+      minSdkVersion: handshake.minSdkVersion,
+      sdkVersion: handshake.sdkVersion,
+      apiPrefix: handshake.apiPrefix,
+      compatible: report.compatible,
+      problems: report.problems,
+      expectedContract: EXPECTED_CONTRACT_VERSION,
+      clientSdk: CLIENT_SDK_VERSION,
+    },
+    capabilities: Object.fromEntries(context.capabilities),
+    operations: [...context.operations.values()],
+    agents,
+    families,
+    counts,
+  };
 }
 
-export function findCapability(registry, commandOrId) {
-  return registry.byCommand.get(commandOrId) ?? registry.byId.get(commandOrId) ?? null;
+export function findFamily(registry, commandOrId) {
+  return registry.families.find(
+    (entry) => entry.command === commandOrId || entry.id === commandOrId,
+  ) ?? null;
 }
 
-/**
- * A capability may only run when the engine says it is available. Every other
- * state carries the engine's reason so the CLI never has to guess.
- */
-export function assertExecutable(capability) {
-  if (capability.status === "available") return;
-  const detail = capability.detail ? `: ${capability.detail}` : "";
+export function assertExecutable(entry) {
+  if (entry === null) {
+    throw new CoderaxError("USAGE", "unknown capability; run `coderax capabilities`");
+  }
+  if (entry.status === EXECUTABLE_STATE) return entry;
   throw new CoderaxError(
     "CAPABILITY_NOT_AVAILABLE",
-    `${capability.command} is ${capability.status} (${capability.reason})${detail}. Run \`coderax readiness\` for the current state.`,
+    `${entry.command} is ${entry.status}: ${entry.detail}. ` +
+      "The CLI does not fall back to local execution or simulate the result.",
+    { details: { capability: entry.id, status: entry.status, blockedBy: entry.blockedBy } },
   );
 }
 
-export function publicCapability(capability) {
+export function publicFamily(entry) {
   return {
-    id: capability.id,
-    command: capability.command,
-    title: capability.title,
-    summary: capability.summary,
-    status: capability.status,
-    reason: capability.reason,
-    detail: capability.detail,
-    primary: capability.primary,
-    options: capability.inputs.map((item) => ({
-      name: item.name,
-      type: item.type,
-      required: item.required,
-      description: item.description,
-      ...(item.values ? { values: item.values } : {}),
-      ...(item.default !== undefined ? { default: item.default } : {}),
-      ...(item.mimeTypes ? { mimeTypes: item.mimeTypes } : {}),
-      ...(item.maxBytes ? { maxBytes: item.maxBytes } : {}),
-    })),
+    id: entry.id,
+    command: entry.command,
+    title: entry.title,
+    summary: entry.summary,
+    mode: entry.mode,
+    status: entry.status,
+    available: entry.status === EXECUTABLE_STATE,
+    detail: entry.detail,
+    blockedBy: entry.blockedBy,
+    requires: entry.requires,
+    operations: entry.published,
+    attachment: entry.attachment === null ? null : {
+      required: entry.attachment.required,
+      mimeTypes: entry.attachment.mimeTypes,
+      maxBytes: entry.attachment.maxBytes,
+    },
+    options: entry.options ?? [],
   };
 }

@@ -1,9 +1,12 @@
 export class CoderaxError extends Error {
-  constructor(code, message, { status } = {}) {
+  constructor(code, message, { status, details, retryable, requestId } = {}) {
     super(message);
     this.name = "CoderaxError";
     this.code = code;
     this.status = status;
+    this.details = details;
+    this.retryable = retryable;
+    this.requestId = requestId;
   }
 }
 
@@ -109,7 +112,7 @@ export function detailText(value) {
 /**
  * Map a failed HTTP response to the CLI's typed error, including a
  * WorkflowEngine `Problem` body (title/detail/code/requestId/retryable).
- * This is shared by JSON requests, multipart uploads and downloads so every
+ * This is shared by the legacy `/api/*` requests and the raw `call` command so every
  * failure path redacts the token and preserves the stable server code.
  */
 export function errorFromResponse({ response, text, token, path }) {

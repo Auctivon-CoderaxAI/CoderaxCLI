@@ -1,8 +1,8 @@
 {
   "name": "coderax-cli",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
-  "description": "Canonical Coderax CLI: chat, Work mode, capabilities, artifacts, products, login, health, OpenAPI discovery, and authenticated calls",
+  "description": "Owner-only Coderax cloud client: chat, Work, handshake-resolved capabilities, artifacts, schedules, permissions and durable task control through the canonical WorkflowEngine SDK",
   "type": "module",
   "bin": {
     "coderax": "src/cli.js"
@@ -13,6 +13,12 @@
   "scripts": {
     "start": "node src/cli.js --help",
     "test": "node --test",
-    "check": "node --check src/capability-catalog.js && node --check src/capability-commands.js && node --check src/capability-registry.js && node --check src/cli.js && node --check src/client.js && node --check src/config.js && node --check src/discover.js && node --check src/exit.js && node --check src/file-transfer.js && node --check src/format.js && node --check src/product-commands.js && node --check src/product-registry.js && node --check src/sdk.js && node --check src/version.js"
+    "check": "node scripts/verify-vendor.mjs && node --check scripts/verify-vendor.mjs && node --check src/capability-catalog.js && node --check src/capability-commands.js && node --check src/capability-registry.js && node --check src/cli.js && node --check src/client.js && node --check src/completion.js && node --check src/config.js && node --check src/discover.js && node --check src/engine.js && node --check src/exit.js && node --check src/file-transfer.js && node --check src/format.js && node --check src/product-commands.js && node --check src/product-registry.js && node --check src/version.js",
+    "verify:vendor": "node scripts/verify-vendor.mjs"
+  },
+  "dependencies": {
+    "@coderax/contracts": "file:vendor/coderax-contracts-1.1.0.tgz",
+    "@coderax/sdk": "file:vendor/coderax-sdk-1.1.0.tgz",
+    "zod": "^3.25.67"
   }
 }

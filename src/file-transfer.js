@@ -1,18 +1,22 @@
 import { createHash, randomBytes } from "node:crypto";
-import { lstat, open, readFile, rename, rm, stat } from "node:fs/promises";
+import { lstat, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, isAbsolute, resolve, sep } from "node:path";
 import { CoderaxError } from "./client.js";
+import { MAX_ARTIFACT_BYTES } from "./capability-catalog.js";
 
 /**
- * Local file validation and transfer primitives.
+ * Local file validation and transfer primitives for the authoritative artifact
+ * service.
  *
- * Files are validated before they leave the owner's machine, uploaded with a
- * SHA-256 that the engine must echo, and downloaded into a destination that is
- * never overwritten without explicit authorization. No document, inference or
- * artifact work happens here.
+ * Contract 1.1.0 transfers artifact bytes as base64 inside JSON, scoped to one
+ * owner task, with the engine computing and publishing `sha256:<hex>`. Files
+ * are therefore validated and hashed before they leave the owner's machine,
+ * uploaded only to the task the owner just created, and downloaded into a
+ * destination that is never overwritten without explicit authorization. No
+ * document, inference or artifact work happens here.
  */
 
-export const MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024;
+export const MAX_DOWNLOAD_BYTES = MAX_ARTIFACT_BYTES;
 
 const MIME_BY_EXTENSION = Object.freeze({
   ".pdf": "application/pdf",
@@ -24,6 +28,7 @@ const MIME_BY_EXTENSION = Object.freeze({
   ".mp3": "audio/mpeg",
   ".m4a": "audio/mp4",
   ".mp4": "video/mp4",
+  ".mov": "video/quicktime",
   ".wav": "audio/wav",
   ".ogg": "audio/ogg",
   ".flac": "audio/flac",
@@ -40,17 +45,31 @@ const MIME_BY_EXTENSION = Object.freeze({
   ".xls": "application/vnd.ms-excel",
   ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   ".ods": "application/vnd.oasis.opendocument.spreadsheet",
+  ".ppt": "application/vnd.ms-powerpoint",
+  ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ".odp": "application/vnd.oasis.opendocument.presentation",
   ".zip": "application/zip",
 });
 
 const ZIP_EXTENSIONS = new Set([".docx", ".odt", ".xlsx", ".ods", ".pptx", ".odp", ".zip"]);
-const OLE_MIMES = new Set(["application/msword", "application/vnd.ms-excel", "application/vnd.ms-powerpoint"]);
-const TEXT_MIMES = new Set(["text/plain", "text/markdown", "text/csv", "text/tab-separated-values", "application/json"]);
+const OLE_MIMES = new Set([
+  "application/msword",
+  "application/vnd.ms-excel",
+  "application/vnd.ms-powerpoint",
+]);
+const TEXT_MIMES = new Set([
+  "text/plain",
+  "text/markdown",
+  "text/csv",
+  "text/tab-separated-values",
+  "application/json",
+]);
 
 export function sha256Hex(buffer) {
   return createHash("sha256").update(buffer).digest("hex");
 }
 
+/** Accept only the published `sha256:<64 hex>` or a bare 64-hex digest. */
 export function normalizeDigest(value) {
   if (typeof value !== "string") return null;
   const match = /^(?:sha256:)?([a-f0-9]{64})$/i.exec(value.trim());
@@ -112,7 +131,10 @@ export function detectFile(buffer) {
     return { family: "audio", mime: "audio/mpeg" };
   }
   if (ascii(buffer, 4, 4) === "ftyp") {
-    return { family: "audio", mime: "audio/mp4" };
+    const brand = ascii(buffer, 8, 4);
+    return ["qt  ", "qt"].includes(brand)
+      ? { family: "video", mime: "video/quicktime" }
+      : { family: "audio", mime: "audio/mp4" };
   }
   if (startsWith(buffer, [0x1a, 0x45, 0xdf, 0xa3])) {
     return { family: "audio", mime: "audio/webm" };
@@ -154,7 +176,10 @@ function describeAccepted(mimeTypes) {
  * held in memory only up to the published limit; larger files are refused
  * before they are read.
  */
-export async function inspectFile(filePath, { mimeTypes = [], maxBytes = 50 * 1024 * 1024, cwd = process.cwd() } = {}) {
+export async function inspectFile(
+  filePath,
+  { mimeTypes = [], maxBytes = MAX_ARTIFACT_BYTES, cwd = process.cwd() } = {},
+) {
   if (typeof filePath !== "string" || filePath.trim() === "") {
     throw new CoderaxError("UPLOAD_PATH_REQUIRED", "a file path is required");
   }
@@ -174,7 +199,7 @@ export async function inspectFile(filePath, { mimeTypes = [], maxBytes = 50 * 10
   if (metadata.size === 0) {
     throw new CoderaxError("UPLOAD_EMPTY", `${basename(filePath)} is empty`);
   }
-  const limit = Math.min(maxBytes, 50 * 1024 * 1024);
+  const limit = Math.min(maxBytes, MAX_ARTIFACT_BYTES);
   if (metadata.size > limit) {
     throw new CoderaxError(
       "UPLOAD_TOO_LARGE",
@@ -236,46 +261,22 @@ export async function inspectFile(filePath, { mimeTypes = [], maxBytes = 50 * 10
   };
 }
 
-function safeFieldName(name) {
-  if (typeof name !== "string" || !/^[A-Za-z0-9._-]{1,64}$/.test(name)) {
-    throw new CoderaxError("UPLOAD_FIELD_INVALID", `invalid multipart field name: ${String(name)}`);
+/**
+ * Contract 1.1.0 `ArtifactPath`: relative, no directory traversal, no absolute
+ * path and no Windows drive letter. The engine validates this again; the client
+ * refuses to construct an invalid one.
+ */
+export function artifactPath(name) {
+  const safe = safeArtifactName(name);
+  const normalized = safe.replace(/\\/g, "/");
+  if (
+    normalized.startsWith("/") ||
+    /^[A-Za-z]:[\\/]/.test(normalized) ||
+    normalized.split("/").some((segment) => segment === "..")
+  ) {
+    throw new CoderaxError("ARTIFACT_PATH_INVALID", "the artifact path must be relative and may not traverse");
   }
-  return name;
-}
-
-function safeHeaderValue(value) {
-  const text = String(value);
-  if (/[\r\n]/.test(text)) {
-    throw new CoderaxError("UPLOAD_FIELD_INVALID", "multipart values must not contain newlines");
-  }
-  return text;
-}
-
-/** Build a deterministic multipart body with an unguessable boundary. */
-export function buildMultipart({ file, fields = {} }) {
-  const boundary = `----coderax-${randomBytes(16).toString("hex")}`;
-  const parts = [];
-  const filename = file.name.replace(/["\\\r\n]/g, "_").slice(0, 180) || "file";
-  parts.push(
-    Buffer.from(
-      `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\n` +
-        `Content-Type: ${canonicalMime(file.mimeType)}\r\n\r\n`,
-      "utf8",
-    ),
-  );
-  parts.push(file.buffer);
-  parts.push(Buffer.from("\r\n", "utf8"));
-  for (const [name, value] of Object.entries(fields)) {
-    if (value === undefined || value === null) continue;
-    parts.push(
-      Buffer.from(
-        `--${boundary}\r\nContent-Disposition: form-data; name="${safeFieldName(name)}"\r\n\r\n${safeHeaderValue(value)}\r\n`,
-        "utf8",
-      ),
-    );
-  }
-  parts.push(Buffer.from(`--${boundary}--\r\n`, "utf8"));
-  return { body: Buffer.concat(parts), contentType: `multipart/form-data; boundary=${boundary}` };
+  return normalized.slice(0, 1024);
 }
 
 export function safeArtifactName(value, fallback = "artifact.bin") {
@@ -350,91 +351,85 @@ async function replaceFile(tempPath, destination) {
   }
 }
 
+/** Encode validated bytes for the published base64 artifact request. */
+export function encodeBase64(buffer) {
+  return Buffer.from(buffer).toString("base64");
+}
+
+/** Decode a published base64 body under an explicit byte bound. */
+export function decodeBase64(text, { maxBytes = MAX_DOWNLOAD_BYTES } = {}) {
+  if (typeof text !== "string" || text.length === 0) {
+    throw new CoderaxError("ARTIFACT_CONTENT_INVALID", "the engine returned no artifact content");
+  }
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(text)) {
+    throw new CoderaxError("ARTIFACT_CONTENT_INVALID", "the artifact content is not standard base64");
+  }
+  const buffer = Buffer.from(text, "base64");
+  if (buffer.length === 0) {
+    throw new CoderaxError("ARTIFACT_CONTENT_INVALID", "the artifact content decoded to zero bytes");
+  }
+  if (buffer.length > maxBytes) {
+    throw new CoderaxError("ARTIFACT_TOO_LARGE", `the artifact is ${buffer.length} bytes; the limit is ${maxBytes}`);
+  }
+  return buffer;
+}
+
 /**
- * Stream a response body into a file while hashing it. A partial, oversized or
- * mismatched download is deleted instead of being left behind.
+ * Write published artifact bytes after proving the digest and byte count the
+ * engine reported. A mismatch is never written: the temporary file is removed
+ * and the destination is left untouched.
  */
-export async function writeDownload({
+export async function writeArtifactBytes({
   destination,
   force = false,
   expectedSha256,
   expectedBytes,
+  contentBase64,
   maxBytes = MAX_DOWNLOAD_BYTES,
-  body,
-  signal,
 }) {
-  const expected = expectedSha256 ? normalizeDigest(expectedSha256) : null;
-  if (expectedSha256 && expected === null) {
-    throw new CoderaxError("ARTIFACT_DIGEST_INVALID", "the artifact metadata does not carry a SHA-256 digest");
+  const expected = normalizeDigest(expectedSha256);
+  if (expected === null) {
+    throw new CoderaxError(
+      "ARTIFACT_DIGEST_INVALID",
+      "the artifact metadata does not carry a published sha256 digest",
+    );
   }
+  const buffer = decodeBase64(contentBase64, { maxBytes });
+  const actual = sha256Hex(buffer);
+  if (actual !== expected) {
+    throw new CoderaxError(
+      "ARTIFACT_INTEGRITY_FAILED",
+      "the downloaded artifact did not match its published SHA-256 digest",
+    );
+  }
+  if (Number.isSafeInteger(expectedBytes) && expectedBytes >= 0 && buffer.length !== expectedBytes) {
+    throw new CoderaxError(
+      "ARTIFACT_INTEGRITY_FAILED",
+      `the downloaded artifact is ${buffer.length} bytes; the engine reported ${expectedBytes}`,
+    );
+  }
+
   const tempPath = force
     ? `${destination}.${process.pid}.${randomBytes(6).toString("hex")}.part`
     : destination;
-  let handle;
   try {
-    handle = await open(tempPath, "wx", 0o600);
-  } catch (error) {
-    if (error?.code === "EEXIST") {
-      throw new CoderaxError(
-        "ARTIFACT_DESTINATION_EXISTS",
-        `${destination} already exists; pass --force to replace it or --out with another path`,
-      );
-    }
-    throw new CoderaxError("ARTIFACT_DESTINATION_UNWRITABLE", `cannot create ${destination}`);
-  }
-  const hash = createHash("sha256");
-  let bytes = 0;
-  try {
-    const reader = body.getReader();
-    for (;;) {
-      if (signal?.aborted) throw new CoderaxError("CANCELLED", "download cancelled");
-      const { value, done } = await reader.read();
-      if (done) break;
-      const buffer = Buffer.isBuffer(value) ? value : Buffer.from(value);
-      bytes += buffer.length;
-      if (bytes > maxBytes) {
-        throw new CoderaxError("ARTIFACT_TOO_LARGE", `the download exceeded the ${maxBytes}-byte limit`);
-      }
-      hash.update(buffer);
-      await handle.write(buffer);
-    }
-    await handle.sync();
-    await handle.close();
-
-    const actual = hash.digest("hex");
-    if (expected !== null && actual !== expected) {
-      throw new CoderaxError(
-        "ARTIFACT_INTEGRITY_FAILED",
-        "the downloaded artifact did not match its published SHA-256 digest",
-      );
-    }
-    if (Number.isSafeInteger(expectedBytes) && expectedBytes >= 0 && bytes !== expectedBytes) {
-      throw new CoderaxError(
-        "ARTIFACT_INTEGRITY_FAILED",
-        `the downloaded artifact is ${bytes} bytes; the engine reported ${expectedBytes}`,
-      );
-    }
+    await writeFile(tempPath, buffer, { flag: "wx", mode: 0o600 });
     if (force) await replaceFile(tempPath, destination);
-    return { path: destination, bytes, sha256: actual };
+    return { path: destination, bytes: buffer.length, sha256: actual };
   } catch (error) {
-    try {
-      await handle.close();
-    } catch {
-      // Already closed.
-    }
     try {
       await rm(tempPath, { force: true });
     } catch {
       // Nothing to clean up.
     }
     if (error instanceof CoderaxError) throw error;
-    if (signal?.aborted) throw new CoderaxError("CANCELLED", "artifact download cancelled");
-    if (error?.name === "AbortError" || error?.name === "TimeoutError") {
-      throw new CoderaxError("REQUEST_TIMEOUT", "the artifact download was interrupted");
+    if (error?.code === "EEXIST") {
+      throw new CoderaxError(
+        "ARTIFACT_DESTINATION_EXISTS",
+        `${destination} already exists; pass --force to replace it or --out with another path`,
+      );
     }
-    throw new CoderaxError(
-      "ARTIFACT_DOWNLOAD_FAILED",
-      "the artifact download could not be completed",
-    );
+    throw new CoderaxError("ARTIFACT_DESTINATION_UNWRITABLE", `cannot write ${destination}`);
   }
 }
+

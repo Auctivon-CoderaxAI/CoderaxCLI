@@ -12,12 +12,13 @@ import { discoverOpenApi, findOperation } from "./discover.js";
 import * as capabilities from "./capability-commands.js";
 import {
   ARTIFACT_ACTIONS,
-  CAPABILITY_CATALOG,
   CAPABILITY_COMMANDS,
-  capabilityForCommand,
+  SCHEDULE_ACTIONS,
+  capabilityFamilyFor,
   isCapabilityCommand,
   isExtendedCommand,
 } from "./capability-catalog.js";
+import { SHELLS, completionScript } from "./completion.js";
 import * as product from "./product-commands.js";
 import { VERSION } from "./version.js";
 
@@ -46,31 +47,49 @@ Usage:
   coderax openapi [--json]
   coderax call <METHOD> <PATH> [--data <json>] [--json]
 
-Capability commands (availability, options and readiness come from the engine
-capability registry; only an available capability executes):
+Capabilities (availability comes from the engine handshake; only an available
+capability executes, and nothing is simulated locally):
   coderax capabilities [--status <state>] [--json]
   coderax readiness [--json]
   coderax capability run <id|command> [options] [--json]
-  coderax upload <file> [--project <id>] [--json]
+  coderax upload <file> --task <taskId> [--json]
   coderax analyze-document <file> [--question <text>] [--json]
+  coderax create-document <prompt> [--format md|txt|docx|pdf] [--json]
   coderax analyze-pdf <file> [--question <text>] [--json]
+  coderax create-pdf <prompt> [--name <name>] [--json]
   coderax analyze-spreadsheet <file> [--question <text>] [--json]
-  coderax create-presentation <prompt> [--format pptx|pdf] [--json]
+  coderax create-spreadsheet <prompt> [--format xlsx|csv] [--json]
+  coderax create-presentation <prompt> [--format pptx|pdf] [--file <path>] [--json]
+  coderax analyze-data <prompt> [--file <path>] [--question <text>] [--json]
+  coderax visualize-data <prompt> [--file <path>] [--chart bar|line|area|scatter|pie] [--json]
   coderax understand-image <file> [--question <text>] [--json]
   coderax generate-image <prompt> [--size <size>] [--count <n>] [--json]
+  coderax edit-image <file> [--instruction <text>] [--json]
   coderax transcribe <file> [--language <code>] [--format txt|srt|vtt] [--json]
-  coderax speak <text> [--voice <id>] [--format mp3|wav|opus] [--out <path>] [--json]
-  coderax create-software <prompt> [--name <name>] [--project <id>] [--json]
-  coderax create-game <prompt> [--name <name>] [--project <id>] [--json]
-  coderax artifacts list|inspect|download|associate ... [--json]
+  coderax speak <text> [--voice <id>] [--format mp3|wav|opus] [--json]
+  coderax understand-video <file> [--question <text>] [--json]
+  coderax create-software <prompt> [--name <name>] [--json]
+  coderax create-game <prompt> [--name <name>] [--json]
+  coderax gaming-agent <objective> [--session <id>] [--json]
+  coderax orchestrate <prompt> [--agent <id>] [--json]
+  coderax artifacts list --task <id> [--json]
+  coderax artifacts inspect <artifactId> [--json]
+  coderax artifacts download <artifactId> [--out <path>] [--force] [--json]
+  coderax schedules list|create|get|cancel ... [--json]
+  coderax permissions list|approve|deny ... [--json]
+  coderax task <taskId> [--json]
+  coderax completion bash|zsh|fish
 
 Capability execution options:
-  --project <id>        Associate the upload, task or artifact with a project
+  --task <taskId>       Owner task that owns an uploaded or listed artifact
+  --file <path>         Optional source file for a capability
+  --question <text>     Question to answer about an attached file
   --conversation <id>   Run in an existing conversation
+  --agent <id>          coderax, opencode or freebuff
   --wait / --no-wait    Wait for the durable task (default) or return its id
-  --stream              Stream execution events (JSON mode emits NDJSON)
+  --stream              Write each execution event to stderr as JSON
   --wait-timeout <ms>   Wait limit, 1000-3600000 (default 600000)
-  --out <path>          Explicit download destination
+  --out <path>          Explicit download destination for the first artifact
   --force               Authorize replacing an existing download destination
 
 Global options:
@@ -104,6 +123,7 @@ const EXIT = Object.freeze({
   network: 4,
   notFound: 5,
   unavailable: 6,
+  contract: 7,
   cancelled: 130,
 });
 
@@ -138,6 +158,10 @@ const KNOWN_COMMANDS = new Set([
   "readiness",
   "capability",
   "artifacts",
+  "schedules",
+  "permissions",
+  "task",
+  "completion",
   ...CAPABILITY_COMMANDS,
 ]);
 
@@ -274,14 +298,48 @@ function preflight(positionals, flags, dynamic) {
     if (!ARTIFACT_ACTIONS.includes(action)) {
       throw new UsageError(`unknown artifacts action: ${action}. Use ${ARTIFACT_ACTIONS.join(", ")}`);
     }
-    if ((action === "inspect" || action === "download" || action === "associate") && !positionals[2]) {
+    if (action === "list" && !positionals[2] && !dynamic.has("task")) {
+      throw new UsageError("artifacts list requires --task <taskId>");
+    }
+    if ((action === "inspect" || action === "download") && !positionals[2]) {
       throw new UsageError(`artifacts ${action} requires an artifact id`);
     }
-    if (action === "associate" && !positionals[2]) {
-      throw new UsageError("artifacts associate requires an artifact id and --project <id>");
+  }
+
+  if (command === "schedules") {
+    const action = positionals[1] ?? "list";
+    if (!SCHEDULE_ACTIONS.includes(action)) {
+      throw new UsageError(`unknown schedules action: ${action}. Use ${SCHEDULE_ACTIONS.join(", ")}`);
     }
-    if (action === "associate" && !dynamic.has("project")) {
-      throw new UsageError("artifacts associate requires --project <id>");
+    if (action === "create" && !positionals[2]) {
+      throw new UsageError("schedules create requires an objective");
+    }
+    if ((action === "get" || action === "cancel") && !positionals[2]) {
+      throw new UsageError(`schedules ${action} requires a schedule id`);
+    }
+  }
+
+  if (command === "permissions") {
+    const action = positionals[1] ?? "list";
+    if (!["list", "approve", "deny"].includes(action)) {
+      throw new UsageError("permissions requires list, approve or deny");
+    }
+    if (action !== "list" && (!positionals[2] || !positionals[3])) {
+      throw new UsageError(`permissions ${action} requires <taskId> <requestId>`);
+    }
+  }
+
+  if (command === "task" && !positionals[1]) {
+    throw new UsageError("task requires a task id");
+  }
+
+  if (command === "completion") {
+    const shell = positionals[1];
+    if (shell === undefined) {
+      throw new UsageError(`completion requires a shell: ${SHELLS.join(", ")}`);
+    }
+    if (!SHELLS.includes(shell)) {
+      throw new UsageError(`unsupported shell: ${shell}. Use ${SHELLS.join(", ")}`);
     }
   }
 
@@ -344,19 +402,30 @@ function preflight(positionals, flags, dynamic) {
 
 function commandHelp(command) {
   if (command === "artifacts") {
-    return `coderax artifacts <action>\n\nUsage:\n  coderax artifacts list [--project <id>] [--conversation <id>] [--task <id>] [--json]\n  coderax artifacts inspect <artifactId> [--json]\n  coderax artifacts download <artifactId> [--out <path>] [--force] [--json]\n  coderax artifacts associate <artifactId> --project <id> [--json]\n\nArtifacts are owner-scoped engine records shared with Coderax Web. A download\nis verified against its published SHA-256 and never replaces an existing file\nwithout --force.`;
+    return `coderax artifacts <action>\n\nUsage:\n  coderax artifacts list --task <taskId> [--json]\n  coderax artifacts inspect <artifactId> [--json]\n  coderax artifacts download <artifactId> [--out <path>] [--force] [--json]\n\nArtifacts are owner-scoped records of the authoritative engine artifact\nservice (GET /v1/work/{taskId}/artifacts, GET /v1/artifacts/{id}[/content]).\nA download is verified against the published sha256 digest and is never\nwritten over an existing file without --force.`;
+  }
+  if (command === "schedules") {
+    return `coderax schedules <action>\n\nUsage:\n  coderax schedules list [--json]\n  coderax schedules create <objective> --at <ISO-8601> [--every <ms>] [--agent <id>] [--json]\n  coderax schedules get <scheduleId> [--json]\n  coderax schedules cancel <scheduleId> [--json]\n\nSchedules are durable on the engine (POST /v1/schedules); closing the terminal\ndoes not cancel them. The engine reports whether scheduling is available.`;
+  }
+  if (command === "permissions") {
+    return `coderax permissions <action>\n\nUsage:\n  coderax permissions list [--json]\n  coderax permissions approve <taskId> <requestId> [--reason <text>] [--json]\n  coderax permissions deny <taskId> <requestId> [--reason <text>] [--json]\n\nOnly the engine can approve a scoped request; the CLI forwards the owner's\ndecision and never widens a grant.`;
+  }
+  if (command === "task") {
+    return `coderax task <taskId> [--json]\n\nReattaches to a durable task through GET /v1/work/{taskId} and lists the\nartifacts it produced. It does not resubmit anything.`;
   }
   if (command === "capabilities" || command === "readiness") {
-    return `coderax ${command}\n\nReads the engine capability registry and reports each capability as available,\nunavailable, unconfigured, unverified or blocked. Only an available capability\nexecutes; the CLI never presents an unverified capability as operational.`;
+    return `coderax ${command}\n\nReads GET /v1/handshake, the authoritative list of contract version,\ncapability states and implemented operations, and reports each command as\navailable, unconfigured, unverified, unavailable, blocked or not_implemented.\nOnly an available capability executes; nothing is simulated locally.`;
   }
-  const capability = capabilityForCommand(command);
-  if (capability === null) return null;
-  const positional = capability.primary ? ` <${capability.primary}>` : "";
-  const options = capability.inputs
-    .filter((item) => item.name !== capability.primary)
-    .map((item) => `[--${item.name} <${item.type}${item.values ? `: ${item.values.join("|")}` : ""}>]`)
+  const entry = capabilityFamilyFor(command);
+  if (entry === null) return null;
+  const attachment = entry.attachment
+    ? (entry.attachment.required ? " <file>" : " [--file <path>]")
+    : "";
+  const prompt = entry.mode === "upload" ? "" : (entry.attachment?.required ? " [<request>]" : " <request>");
+  const options = (entry.options ?? [])
+    .map((option) => `[--${option.flag} <${option.values ? option.values.join("|") : option.label}>]`)
     .join(" ");
-  return `coderax ${capability.command}${positional} ${options}\n\n${capability.summary}\n\nThe engine capability registry is authoritative for the options, accepted file\ntypes and availability of this command. It runs in an authorized cloud\nexecution environment; no document, inference or artifact work happens locally.`;
+  return `coderax ${entry.command}${attachment}${prompt}${options ? ` ${options}` : ""} [--out <path>] [--json]\n\n${entry.summary}\n\nAvailability comes from the engine handshake (requires ${entry.requires.join(", ")});\nrun \`coderax capabilities\` for the live status. The request runs as an\nauthorized cloud Work task (POST /v1/work); no document, inference, generation\nor execution happens on this machine.`;
 }
 
 async function resolveSettings(flags, deps) {
@@ -558,6 +627,10 @@ const LOCAL_INPUT_CODES = new Set([
   "UPLOAD_TYPE_MISMATCH",
   "UPLOAD_TYPE_NOT_ACCEPTED",
   "UPLOAD_TYPE_UNSUPPORTED",
+  "UPLOAD_UNREADABLE",
+  "ARTIFACT_PATH_INVALID",
+  "ARTIFACT_DESTINATION_UNWRITABLE",
+  "ARTIFACT_CONTENT_INVALID",
 ]);
 
 function exitFor(error) {
@@ -569,10 +642,23 @@ function exitFor(error) {
   if (error.code === "UNAVAILABLE" || error.code === "CAPABILITY_NOT_AVAILABLE") {
     return EXIT.unavailable;
   }
+  if (error.code === "CONTRACT_INCOMPATIBLE" || error.code === "CONTRACT_VIOLATION") {
+    return EXIT.contract;
+  }
   if (error.code === "CANCELLED") return EXIT.cancelled;
+  if (error.code === "NOT_FOUND") return EXIT.notFound;
+  if (
+    error.code === "REQUEST_TIMEOUT" ||
+    error.code === "NETWORK" ||
+    error.code === "SERVER_ERROR" ||
+    error.code === "RATE_LIMITED" ||
+    error.code === "WAIT_TIMEOUT"
+  ) {
+    return EXIT.network;
+  }
   if (error.code === "HTTP_401" || error.code === "HTTP_403") return EXIT.unauthenticated;
   if (error.code === "HTTP_404") return EXIT.notFound;
-  if (error.code === "REQUEST_TIMEOUT" || error.code === "REQUEST_FAILED") return EXIT.network;
+  if (error.code === "REQUEST_FAILED") return EXIT.network;
   return EXIT.failure;
 }
 
@@ -668,6 +754,15 @@ export async function runCli(argv, options = {}) {
         return await capabilities.readiness(ctx);
       case "artifacts":
         return await capabilities.artifacts(ctx);
+      case "schedules":
+        return await capabilities.schedules(ctx);
+      case "permissions":
+        return await capabilities.permissions(ctx);
+      case "task":
+        return await capabilities.task(ctx);
+      case "completion":
+        deps.stdout(completionScript(positionals[1], KNOWN_COMMANDS));
+        return EXIT.ok;
       case "capability":
         return await capabilities.runCapabilityGeneric({ ...ctx, args: positionals.slice(2) });
       case "help":

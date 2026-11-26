@@ -16,7 +16,7 @@ jobs:
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -30,7 +30,11 @@ jobs:
         uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b # v4.0.3
         with:
           node-version: "24"
+      - name: Install pinned dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Verify the vendored canonical SDK
+        run: npm run verify:vendor
       - name: Syntax check
         run: npm run check
-      - name: Unit, CLI and real HTTP tests
+      - name: Unit, CLI and real HTTP contract tests
         run: npm test

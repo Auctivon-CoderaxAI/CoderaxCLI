@@ -39,29 +39,50 @@ redacts both keys and values.
 
 ## File transfer
 
+Contract 1.1.0 transfers artifact bytes as base64 inside JSON, scoped to one
+owner task. The CLI's rules are:
+
 - Uploads are limited to regular files, are non-empty, and are checked against
-  both the extension and the file's magic bytes before any bytes leave the
-  machine. Symbolic links and directories are refused. The accepted MIME types,
-  upload limit and every capability option come from the engine registry.
-- The exact multipart file bytes are hashed with SHA-256 and sent with
-  `x-content-sha256`. The engine must echo the same digest and byte count; a
-  mismatch aborts before capability execution.
-- Downloads require a published SHA-256 digest. The body is hashed while being
-  written to a fresh file or a `0600` temporary file, then verified against the
-  digest and byte count. On mismatch or cancellation the partial data is deleted.
+  both the extension and the file's magic bytes before any byte leaves the
+  machine. Symbolic links and directories are refused. Accepted MIME types and
+  per-family limits come from the capability catalogue; the hard bound is 8 MiB,
+  below the contract's 12M-character base64 limit.
+- The exact bytes are hashed with SHA-256 locally. The engine returns
+  `sha256:<64 hex>` and a byte count for the stored artifact; both must equal the
+  local values. Otherwise the task is cancelled and the command fails with
+  `ARTIFACT_INTEGRITY_FAILED`.
+- Artifact paths are reduced to a safe basename, must be relative, and may not
+  contain `..` or a drive letter. A server-supplied name is never used as a
+  directory.
+- Downloads require a published digest. The base64 body is decoded, bounded,
+  hashed, and compared with the artifact metadata (including its byte count)
+  before the file is created. A mismatch writes nothing.
 - A destination is never overwritten implicitly. Existing files require
   `--force`; directories, missing parents and symbolic-link destinations are
   refused. Downloads default to the artifact basename in the current directory.
-- Artifact ids and project ids are validated and percent-encoded; a path segment
-  cannot escape the `/v1` route.
+- A `--force` without an explicit `--out` is refused for capability execution,
+  so the operator names the file they are authorizing to replace.
+- Artifact and task ids are validated and percent-encoded by the SDK; a path
+  segment cannot escape the `/v1` route.
 
 ## Capability truthfulness
 
-Only a capability the engine registry reports as `available` executes. A missing
-registry blocks every proposed capability. `unavailable`, `unconfigured`,
-`unverified` and `blocked` are displayed with the engine's reason and are never
-presented as operational. The CLI contains no provider adapter, model call,
-document parser, generator or execution engine to fall back on.
+Only a family the live handshake reports as `available`, with every prerequisite
+and required operation available, executes. `unavailable`, `unconfigured`,
+`unverified`, `blocked` and `not_implemented` are displayed with the engine's
+reason and are never presented as operational. The CLI contains no provider
+adapter, model call, document parser, generator or execution engine to fall back
+on, and it does not infer a capability from documentation, a branch name or a
+test count.
+
+## Supply chain
+
+- The WorkflowEngine client and contract schemas are vendored from the engine's
+  published `dist-artifacts` and verified against the published `SHA256SUMS`;
+  see `vendor/PROVENANCE.md` and `vendor/SHA256SUMS`.
+- `zod` is the only npm dependency; `package-lock.json` pins the tree.
+- No install script, postinstall hook, telemetry or remote configuration is
+  added by the CLI.
 
 ## Timeouts
 

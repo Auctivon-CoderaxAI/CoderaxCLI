@@ -1,145 +1,116 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { access, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  buildMultipart,
-  detectFile,
+  artifactPath,
+  decodeBase64,
+  encodeBase64,
   inspectFile,
-  normalizeDigest,
-  prepareDestination,
-  safeArtifactName,
+  sha256Hex,
+  writeArtifactBytes,
 } from "../src/file-transfer.js";
 
-async function workdir() {
+const PDF = Buffer.from("%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF\n", "utf8");
+
+async function workspace() {
   return mkdtemp(join(tmpdir(), "coderax-transfer-"));
 }
 
-test("detectFile recognises supported signatures and refuses unknown content", () => {
-  assert.equal(detectFile(Buffer.from("%PDF-1.7\n")).mime, "application/pdf");
-  assert.equal(detectFile(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])).mime, "image/png");
-  assert.equal(detectFile(Buffer.from([0xff, 0xd8, 0xff, 0xe0])).mime, "image/jpeg");
-  assert.equal(detectFile(Buffer.from("GIF89a...")).mime, "image/gif");
-  assert.equal(detectFile(Buffer.from("ID3audio")).mime, "audio/mpeg");
-  assert.equal(
-    detectFile(Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3]), Buffer.from("webm")])).mime,
-    "audio/webm",
-  );
-  assert.equal(detectFile(Buffer.from([0x00, 0x01, 0x02, 0x03])), null);
-});
-
-test("inspectFile enforces size, type and extension consistency before upload", async () => {
-  const cwd = await workdir();
-  const pdf = join(cwd, "sample.pdf");
-  await writeFile(pdf, "%PDF-1.4\nhello\n");
-  const inspected = await inspectFile(pdf, { mimeTypes: ["application/pdf"], cwd });
+test("inspectFile accepts a real PDF and rejects a mismatched extension", async () => {
+  const cwd = await workspace();
+  await writeFile(join(cwd, "document.pdf"), PDF);
+  const inspected = await inspectFile("document.pdf", { cwd, mimeTypes: ["application/pdf"] });
   assert.equal(inspected.mimeType, "application/pdf");
-  assert.equal(inspected.name, "sample.pdf");
-  assert.match(inspected.sha256, /^[a-f0-9]{64}$/);
+  assert.equal(inspected.sha256, createHash("sha256").update(PDF).digest("hex"));
+  assert.equal(inspected.bytes, PDF.length);
 
-  const tooLarge = join(cwd, "large.pdf");
-  await writeFile(tooLarge, `%PDF-1.4\n${"x".repeat(100)}\n`);
+  await writeFile(join(cwd, "fake.png"), PDF);
   await assert.rejects(
-    () => inspectFile(tooLarge, { maxBytes: 20, cwd }),
-    (error) => error.code === "UPLOAD_TOO_LARGE",
-  );
-
-  const empty = join(cwd, "empty.pdf");
-  await writeFile(empty, "");
-  await assert.rejects(
-    () => inspectFile(empty, { cwd }),
-    (error) => error.code === "UPLOAD_EMPTY",
-  );
-
-  const disguised = join(cwd, "image.pdf");
-  await writeFile(disguised, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
-  await assert.rejects(
-    () => inspectFile(disguised, { cwd }),
-    (error) => error.code === "UPLOAD_TYPE_MISMATCH",
-  );
-
-  const unsupported = join(cwd, "music.wav");
-  await writeFile(unsupported, Buffer.from([0x00, 0x01, 0x02, 0x03]));
-  await assert.rejects(
-    () => inspectFile(unsupported, { cwd }),
-    (error) => error.code === "UPLOAD_TYPE_MISMATCH" || error.code === "UPLOAD_TYPE_UNSUPPORTED",
-  );
-
-  const text = join(cwd, "notes.txt");
-  await writeFile(text, "plain text\n");
-  await assert.rejects(
-    () => inspectFile(text, { mimeTypes: ["application/pdf"], cwd }),
-    (error) => error.code === "UPLOAD_TYPE_NOT_ACCEPTED",
+    () => inspectFile("fake.png", { cwd, mimeTypes: ["image/png"] }),
+    { code: "UPLOAD_TYPE_MISMATCH" },
   );
 });
 
-test("audio containers are not accepted just because they share an ftyp box", async () => {
-  const cwd = await workdir();
-  const ftyp = Buffer.concat([
-    Buffer.from([0x00, 0x00, 0x00, 0x18]),
-    Buffer.from("ftypM4A ", "latin1"),
-    Buffer.from("isommp42", "latin1"),
-  ]);
-  const m4a = join(cwd, "clip.m4a");
-  await writeFile(m4a, ftyp);
-  const inspected = await inspectFile(m4a, { mimeTypes: ["audio/mp4"], cwd });
-  assert.equal(inspected.mimeType, "audio/mp4");
+test("inspectFile refuses empty and oversized files", async () => {
+  const cwd = await workspace();
+  await writeFile(join(cwd, "empty.pdf"), "");
+  await assert.rejects(() => inspectFile("empty.pdf", { cwd }), { code: "UPLOAD_EMPTY" });
 
-  const mp4 = join(cwd, "clip.mp4");
-  await writeFile(mp4, ftyp);
-  await assert.rejects(
-    () => inspectFile(mp4, { mimeTypes: ["audio/mp4"], cwd }),
-    (error) => error.code === "UPLOAD_TYPE_MISMATCH",
-  );
-});
-
-test("buildMultipart carries the exact bytes and does not allow header injection", async () => {
-  const cwd = await workdir();
-  const pdf = join(cwd, "sample.pdf");
-  await writeFile(pdf, "%PDF-1.4\npayload\n");
-  const inspected = await inspectFile(pdf, { cwd });
-  const { body, contentType } = buildMultipart({
-    file: inspected,
-    fields: { sha256: inspected.sha256, projectId: "proj_alpha" },
+  await writeFile(join(cwd, "big.pdf"), PDF);
+  await assert.rejects(() => inspectFile("big.pdf", { cwd, maxBytes: 8 }), {
+    code: "UPLOAD_TOO_LARGE",
   });
-  assert.match(contentType, /^multipart\/form-data; boundary=----coderax-[a-f0-9]{32}$/);
-  assert.equal(body.includes(inspected.buffer), true);
-  assert.equal(body.toString("utf8").includes(`name="sha256"`), true);
-  assert.equal(body.toString("utf8").includes("proj_alpha"), true);
-  assert.throws(
-    () => buildMultipart({ file: inspected, fields: { "bad\r\nname": "x" } }),
-    (error) => error.code === "UPLOAD_FIELD_INVALID",
+});
+
+test("inspectFile refuses a symbolic link", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("symlink creation needs a privileged account on Windows");
+    return;
+  }
+  const cwd = await workspace();
+  await writeFile(join(cwd, "real.pdf"), PDF);
+  await symlink(join(cwd, "real.pdf"), join(cwd, "link.pdf"));
+  await assert.rejects(() => inspectFile("link.pdf", { cwd }), { code: "UPLOAD_SYMLINK_REFUSED" });
+});
+
+test("base64 encode and decode round-trip and reject malformed input", () => {
+  const encoded = encodeBase64(PDF);
+  assert.deepEqual(decodeBase64(encoded), PDF);
+  assert.throws(() => decodeBase64("not base64!!!"), { code: "ARTIFACT_CONTENT_INVALID" });
+  assert.throws(() => decodeBase64(""), { code: "ARTIFACT_CONTENT_INVALID" });
+  assert.throws(() => decodeBase64(encoded, { maxBytes: 4 }), { code: "ARTIFACT_TOO_LARGE" });
+});
+
+test("writeArtifactBytes refuses a digest mismatch and leaves no file", async () => {
+  const cwd = await workspace();
+  const destination = join(cwd, "artifact.bin");
+  await assert.rejects(
+    () =>
+      writeArtifactBytes({
+        destination,
+        expectedSha256: `sha256:${"0".repeat(64)}`,
+        expectedBytes: PDF.length,
+        contentBase64: encodeBase64(PDF),
+      }),
+    { code: "ARTIFACT_INTEGRITY_FAILED" },
+  );
+  await assert.rejects(() => access(destination));
+});
+
+test("writeArtifactBytes writes verified bytes and honors force", async () => {
+  const cwd = await workspace();
+  const destination = join(cwd, "artifact.bin");
+  await writeFile(destination, "old\n");
+
+  const written = await writeArtifactBytes({
+    destination,
+    force: true,
+    expectedSha256: `sha256:${sha256Hex(PDF)}`,
+    expectedBytes: PDF.length,
+    contentBase64: encodeBase64(PDF),
+  });
+  assert.equal(written.sha256, sha256Hex(PDF));
+  assert.equal(written.bytes, PDF.length);
+
+  await assert.rejects(
+    () =>
+      writeArtifactBytes({
+        destination,
+        expectedSha256: `sha256:${sha256Hex(PDF)}`,
+        expectedBytes: PDF.length,
+        contentBase64: encodeBase64(PDF),
+      }),
+    { code: "ARTIFACT_DESTINATION_EXISTS" },
   );
 });
 
-test("digest parsing accepts the published forms and rejects anything else", () => {
-  const digest = "a".repeat(64);
-  assert.equal(normalizeDigest(digest), digest);
-  assert.equal(normalizeDigest(`sha256:${digest.toUpperCase()}`), digest);
-  assert.equal(normalizeDigest("sha512:abc"), null);
-  assert.equal(normalizeDigest(undefined), null);
-});
-
-test("download destinations never default to overwriting and reject symlinks", async () => {
-  const cwd = await workdir();
-  const first = await prepareDestination({ defaultName: "../secret.pdf", cwd });
-  assert.equal(first.destination, join(cwd, "secret.pdf"));
-  assert.equal(first.existing, false);
-
-  await writeFile(join(cwd, "report.pdf"), "keep");
-  await assert.rejects(
-    () => prepareDestination({ defaultName: "report.pdf", cwd }),
-    (error) => error.code === "ARTIFACT_DESTINATION_EXISTS",
-  );
-  const forced = await prepareDestination({ defaultName: "report.pdf", cwd, force: true });
-  assert.equal(forced.existing, true);
-
-  await assert.rejects(
-    () => prepareDestination({ out: "-", cwd }),
-    (error) => error.code === "ARTIFACT_DESTINATION_INVALID",
-  );
-
-  assert.equal(safeArtifactName("../../etc/passwd"), "passwd");
-  assert.equal(safeArtifactName(".."), "artifact.bin");
+test("artifactPath never produces an absolute or traversing path", () => {
+  assert.equal(artifactPath("report.pdf"), "report.pdf");
+  assert.equal(artifactPath("../../etc/passwd"), "passwd");
+  assert.equal(artifactPath("/tmp/escape.txt"), "escape.txt");
+  assert.equal(artifactPath("nested/dir/report.pdf"), "report.pdf");
+  assert.ok(!artifactPath("C:\\Windows\\evil.txt").includes(":"));
 });

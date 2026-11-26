@@ -1,117 +1,158 @@
-# CLI ↔ deployment contract
+# CLI ↔ WorkflowEngine contract
 
-Version: CLI `0.2.0`, targeting Coderax deployments that publish an OpenAPI 3.x
-document and a WorkflowEngine capability registry (`docs/CAPABILITIES.md`).
+The CLI consumes contract **1.1.0** through the canonical `@coderax/sdk` 1.1.0
+package. It does not invent a route, a payload or a capability registry. Every
+path below is a published operation in the engine's route catalogue
+(`packages/contracts/src/routes.ts` on `contract/authoritative-v1.1`).
 
-## Authentication
+## Negotiation
 
-The CLI sends `Authorization: Bearer <token>` on every request. The deployment is
-responsible for issuing and revoking tokens, including the machine-client
-identities described in the Coderax repository's Agent Management API surface.
+`GET /v1/handshake` is fetched once per invocation, before any capability runs.
+The SDK validates the document against `EngineHandshake` and then checks:
 
-The CLI adds no headers beyond `accept`, `authorization`, and `content-type` on
-bodies, and it never forwards cookies.
+- the engine's contract major equals this SDK's major;
+- the engine's contract is not older than 1.1.0;
+- `eventSchemaVersion` matches the SDK's event schema;
+- `chatStreamSchemaVersion` matches when present;
+- this SDK satisfies `minSdkVersion`.
 
-## Discovery
+Any mismatch is `CONTRACT_INCOMPATIBLE` (exit `7`) and no capability request is
+sent. `handshake.operations` is used as the authoritative operation set: a
+family whose required operation is absent is `unverified`, never executed.
 
-Candidates, tried in order:
+## Owner authentication
 
-1. `/openapi.json`
-2. `/api/openapi.json`
-3. `/.well-known/openapi.json`
+Every non-public operation requires `Authorization: Bearer <token>`. Public
+operations are `getHealth`, `getReadiness` and `getHandshake`.
 
-A candidate is accepted only when it is a JSON object with an `openapi` version
-starting `3.`, a `paths` object, and at least one operation. The first accepted
-document wins; failures from every candidate are reported when none is usable.
-An `HTTP_401`, `HTTP_403`, or `REQUEST_TIMEOUT` is surfaced immediately instead
-of being hidden behind `OPENAPI_NOT_FOUND`, so authentication and timeout
-exit codes remain meaningful.
+Owner authorization is enforced by the engine: a 401/403 becomes
+`UNAUTHENTICATED` (exit `3`). The CLI additionally performs one owner-only read
+(`GET /v1/agents`) during `readiness` so an operator can prove the token is
+accepted for owner operations before submitting work.
 
-## Health
+## Operations used
 
-Candidates, tried in order: `/health`, `/api/health`, `/healthz`. A `404` or `405`
-moves to the next candidate; any other failure is surfaced immediately, so an
-authentication problem is not mistaken for a missing endpoint.
+| Operation | Method and path | Used for |
+| --- | --- | --- |
+| `getHealth` | `GET /v1/health` | readiness output |
+| `getReadiness` | `GET /v1/ready` | readiness output |
+| `getHandshake` | `GET /v1/handshake` | capability resolution, compatibility |
+| `listAgents` | `GET /v1/agents` | owner proof, multi-agent discovery |
+| `listModels` | `GET /v1/models` | model discovery |
+| `submitWork` | `POST /v1/work` | every capability request |
+| `getTask` | `GET /v1/work/{taskId}` | authoritative state, result, failure |
+| `streamTaskEvents` | `GET /v1/work/{taskId}/events?after=N` | progress and replay |
+| `cancelTask` | `POST /v1/work/{taskId}/cancel` | explicit cancellation and upload cleanup |
+| `listTaskArtifacts` | `GET /v1/work/{taskId}/artifacts` | result listing |
+| `uploadTaskArtifact` | `POST /v1/work/{taskId}/artifacts` | validated attachment storage |
+| `getArtifact` | `GET /v1/artifacts/{artifactId}` | artifact metadata |
+| `getArtifactContent` | `GET /v1/artifacts/{artifactId}/content` | digest-verified download |
+| `listSchedules` | `GET /v1/schedules` | `schedules list` |
+| `createSchedule` | `POST /v1/schedules` | `schedules create` |
+| `getSchedule` | `GET /v1/schedules/{scheduleId}` | `schedules get` |
+| `cancelSchedule` | `POST /v1/schedules/{scheduleId}/cancel` | `schedules cancel` |
+| `listPendingPermissions` | `GET /v1/permissions` | `permissions list` |
+| `decidePermission` | `POST /v1/work/{taskId}/permissions` | `permissions approve/deny` |
 
-## Capability registry and execution
+Routes that do **not** exist in contract 1.1.0 and are therefore not used:
+`GET /v1/capabilities`, `POST /v1/capabilities/{id}/execute`, `POST /v1/files`,
+`GET /v1/artifacts`, `POST /v1/artifacts/{id}/project`.
 
-The capability surface is versioned separately from the deployment OpenAPI
-document and follows WorkflowEngine contract `1.0.0`:
+## Work submission
 
-- `GET /v1/capabilities` — authoritative commands, options, statuses and artifact
-  availability. Only `status: "available"` may execute.
-- `POST /v1/capabilities/{capabilityId}/execute` — accepts
-  `{capabilityId, inputs, projectId?, conversationId?, wait}` and returns the
-  WorkflowEngine `TaskAccepted` shape.
-- `GET /v1/work/{taskId}` — authoritative terminal state and result artifacts.
-- `GET /v1/work/{taskId}/events?after=N` — sequenced SSE progress; duplicate
-  event ids and `seq <= after` are ignored.
-- `POST /v1/files` — multipart upload (`file`, `sha256`, `bytes`, `mimeType`,
-  optional project/conversation), with `x-content-sha256`; the response must echo
-  the byte count and digest.
-- `GET /v1/artifacts`, `GET /v1/artifacts/{id}`,
-  `GET /v1/artifacts/{id}/content`, `POST /v1/artifacts/{id}/project` — the same
-  owner-scoped catalog Coderax Web uses.
+`POST /v1/work` accepts a strict `WorkSubmitRequest`:
 
-A registry that is absent, malformed or from another major version does not
-degrade to a local implementation: every proposed capability is reported
-`blocked` (missing) or the command fails (`CAPABILITY_REGISTRY_INVALID`,
-`CAPABILITY_CONTRACT_INCOMPATIBLE`). Unknown statuses become `unverified`.
+```json
+{
+  "objective": "Create a markdown document ...",
+  "mode": "cloud",
+  "requireApproval": true,
+  "idempotencyKey": "cli:1730000000000:<uuid>",
+  "agent": "coderax",
+  "model": { "providerId": "local", "modelId": "zero" },
+  "conversationId": "conv-..."
+}
+```
 
-Execution is never retried by the CLI. `--no-wait` leaves the durable task
-running; closing the terminal does not cancel it. `--wait-timeout` only stops
-local waiting.
+- `objective` is the capability request; the engine's agent decides how to
+  satisfy it. The CLI never plans or executes steps.
+- `agent` is sent only when the operator supplies `--agent` and must be one of
+  `coderax`, `opencode`, `freebuff`.
+- `model` is sent only for `--model <providerId>/<modelId>`.
+- `idempotencyKey` is generated per invocation so an ambiguous network failure
+  can be reconciled with the owner-scoped task instead of silently duplicated.
+  The CLI does not retry a submission.
+- A `202 TaskAccepted` returns `taskId` and `eventsPath`.
 
-## Uploads and downloads
+## Attachments
 
-Uploads are regular files only, non-empty, within the registry limit (50 MiB hard
-cap), with extension and magic bytes in agreement and a MIME type the registry
-accepts. The exact sent bytes are hashed with SHA-256 and the engine must echo
-the same digest and byte count.
+The contract transfers artifact bytes as base64 inside JSON, scoped to a task:
 
-Artifact downloads require a published SHA-256 digest. Data is streamed into a
-temporary or exclusively created file, hashed, checked against the digest and
-byte count, and only then moved into place. A mismatch removes the data. Existing
-files are never replaced without `--force`; directories, missing parents and
-symbolic-link destinations are refused.
+```json
+{ "path": "report.pdf", "mediaType": "application/pdf", "contentBase64": "..." }
+```
 
-## Convenience routes
+- `path` must be relative, at most 1024 characters, with no `..` segment and no
+  drive letter. The CLI reduces a local name to a safe basename.
+- `contentBase64` is at most 12,000,000 characters; the CLI refuses local files
+  above 8 MiB before reading them, staying under the decoded bound.
+- The engine returns an `ArtifactRecord` with `bytes` and `digest`
+  (`sha256:<64 hex>`). The CLI requires both to equal the local byte count and
+  SHA-256; otherwise it cancels the task and reports
+  `ARTIFACT_INTEGRITY_FAILED`.
 
-| Command | Match rule |
-| --- | --- |
-| `agents` | first `GET` operation whose path ends in `/agents` |
-| `models` | first `GET` operation whose path ends in `/models` |
+Because `WorkSubmitRequest` has no attachment field, the order is: submit, then
+upload to the accepted task. If the upload fails the task is cancelled, so no
+run observes a missing input.
 
-No path is hardcoded. When the match is absent the CLI exits `1` with
-`OPERATION_NOT_FOUND` and suggests `coderax openapi`.
+## Downloads
 
-## Requests
+`GET /v1/artifacts/{artifactId}/content` returns
+`{artifactId, mediaType, bytes, digest, contentBase64}`.
 
-- Route paths are appended beneath the configured deployment prefix, so
-  `--base-url https://example.com/coderax` requests
-  `https://example.com/coderax/health`, not `https://example.com/health`.
-- `call <METHOD> <PATH> [--data <json>]` — `--data` is rejected on `GET`/`HEAD`.
-- Bodies are serialized as JSON; responses are parsed as JSON when possible and
-  shown verbatim otherwise.
-- Timeout: 15s default, `--timeout` or `CODERAX_TIMEOUT_MS` to override.
-- Redirects are refused.
+- The descriptor must match the metadata record; otherwise the download is
+  refused before writing.
+- The decoded bytes are hashed and compared with the published digest and byte
+  count. A mismatch deletes the temporary file and leaves the destination
+  untouched.
+- The destination is resolved locally: `--out`, or the artifact basename in the
+  current directory. `--force` is the only authorization to replace an existing
+  file. Directories, missing parents and symlinks are refused.
 
-## Exit codes
+## Progress
 
-- `0` success
-- `1` other operational failure (missing operation, unavailable health check,
-  other non-2xx HTTP status)
-- `2` usage error or invalid configuration
-- `3` HTTP 401/403 authentication or authorization failure
-- `4` network failure or timeout
-- `5` HTTP 404 not found
-- `6` Cloud/projects unavailable, or a capability not available/registry missing
-- `2` local capability input, upload or download-destination validation
-- `1` capability task failure, artifact integrity failure, contract mismatch
-- `130` cancelled locally (a durable cloud task continues)
+`streamTaskEvents` is an SSE stream with `id: <seq>` and an `ExecutionEvent`
+body. The CLI applies events in sequence order, ignores an already-applied
+sequence or event id, resumes with `after=<lastSeq>`, and reports
+`x-coderax-truncated` when the engine says the retained window no longer
+contains the cursor. When the deployment does not publish the stream, the CLI
+polls `getTask` instead; that is a degradation, not a failure.
+
+Terminal task states are `completed`, `failed`, `cancelled`, `interrupted`.
+`awaiting_approval` is not terminal: the CLI reports the request id and keeps
+waiting until the owner decides or the local deadline expires.
+
+## Errors
+
+Problems map to stable CLI codes at the boundary:
+
+| Problem / transport | CLI code | Exit |
+| --- | --- | --- |
+| 401/403 | `UNAUTHENTICATED` | 3 |
+| 404 | `NOT_FOUND` | 5 |
+| 400/422 | `REQUEST_REJECTED` | 1 |
+| 409 | `CONFLICT` | 1 |
+| 429 | `RATE_LIMITED` | 4 |
+| 503 | `UNAVAILABLE` | 6 |
+| 5xx | `SERVER_ERROR` | 4 |
+| incompatible handshake | `CONTRACT_INCOMPATIBLE` | 7 |
+| schema violation | `CONTRACT_VIOLATION` | 7 |
+| local deadline | `WAIT_TIMEOUT` | 4 |
+| abort signal | `CANCELLED` | 130 |
 
 ## Compatibility
 
-The CLI depends only on the OpenAPI document shape and bearer auth. Adding routes
-to a deployment does not require a CLI release; removing a route degrades the
-matching command to `OPERATION_NOT_FOUND` while `coderax call` keeps working.
+The engine may add optional fields on the same major; the SDK parses them and
+the CLI ignores what it does not use. A removed operation, a changed required
+field or a different major is refused before execution. There is no downgrade
+mode and no local fallback.

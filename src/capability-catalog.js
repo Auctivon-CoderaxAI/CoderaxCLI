@@ -1,38 +1,47 @@
 /**
- * The capability command catalog.
+ * Capability command catalogue.
  *
- * This file is UX metadata only: command names, expected inputs and the MIME
- * families the owner may hand to a file input. It contains no provider,
- * inference, artifact-generation or execution logic. The engine's capability
- * registry is authoritative for which of these commands exist, which options
- * they take and whether they may run. Catalog entries are fallbacks for offline
- * help and for capabilities the registry omits; an omitted capability is
- * reported as blocked, never as operational.
+ * This file is UX metadata only: command names, the objective template, the
+ * inputs the owner may supply and which authoritative backend features the
+ * family needs. It contains no provider, inference, artifact-generation or
+ * execution logic, and it is not a capability registry: the engine's
+ * `/v1/handshake` is authoritative for what exists and whether it can run.
+ *
+ * A family listed here is never advertised as operational on the strength of
+ * this file. `capability-registry.js` resolves each family against the live
+ * handshake and reports `available`, `unconfigured`, `unverified`, `unavailable`,
+ * `blocked` or `not_implemented`.
  */
 
-export const CAPABILITY_STATUSES = Object.freeze([
-  "available",
-  "unavailable",
-  "unconfigured",
-  "unverified",
-  "blocked",
-]);
-
-export const STATUS_LABELS = Object.freeze({
+export const CAPABILITY_STATES = Object.freeze({
   available: "available",
-  unavailable: "unavailable",
   unconfigured: "unconfigured",
   unverified: "unverified",
+  unavailable: "unavailable",
   blocked: "blocked",
+  notImplemented: "not_implemented",
 });
 
-/** Only a capability the engine reports as available may be executed. */
-export const EXECUTABLE_STATUS = "available";
+export const STATE_LABELS = Object.freeze({
+  available: "available",
+  unconfigured: "unconfigured",
+  unverified: "unverified",
+  unavailable: "unavailable",
+  blocked: "blocked",
+  not_implemented: "not implemented",
+});
 
-export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+/** Only a family the engine currently reports as available may execute. */
+export const EXECUTABLE_STATE = CAPABILITY_STATES.available;
+
+/** The engine caps an artifact at 12M base64 characters; stay under the decode bound. */
+export const MAX_ARTIFACT_BYTES = 8 * 1024 * 1024;
+
+/** Contract 1.1.0 `ArtifactPath`: relative, no traversal, no drive letter. */
+export const MAX_ARTIFACT_PATH = 1024;
 
 const PDF = "application/pdf";
-const DOCUMENT = [
+const DOCUMENT = Object.freeze([
   PDF,
   "text/plain",
   "text/markdown",
@@ -40,17 +49,17 @@ const DOCUMENT = [
   "application/msword",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   "application/vnd.oasis.opendocument.text",
-];
-const SPREADSHEET = [
+]);
+const SPREADSHEET = Object.freeze([
   "text/csv",
   "text/tab-separated-values",
   "application/json",
   "application/vnd.ms-excel",
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   "application/vnd.oasis.opendocument.spreadsheet",
-];
-const IMAGE = ["image/png", "image/jpeg", "image/webp", "image/gif"];
-const AUDIO = [
+]);
+const IMAGE = Object.freeze(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+const AUDIO = Object.freeze([
   "audio/mpeg",
   "audio/mp4",
   "audio/wav",
@@ -58,172 +67,351 @@ const AUDIO = [
   "audio/ogg",
   "audio/flac",
   "audio/webm",
-];
-const ANY_TRANSFER = [...new Set([...DOCUMENT, ...SPREADSHEET, ...IMAGE, ...AUDIO])];
+]);
+const VIDEO = Object.freeze(["video/mp4", "video/webm", "video/quicktime"]);
+const ANY_TRANSFER = Object.freeze([
+  ...new Set([...DOCUMENT, ...SPREADSHEET, ...IMAGE, ...AUDIO, ...VIDEO]),
+]);
 
-function fileInput(mimeTypes, description, { required = true, name = "file" } = {}) {
+function attachment(mimeTypes, { required = true, description = "File to transfer." } = {}) {
   return Object.freeze({
-    name,
-    type: "file",
     required,
+    mimeTypes,
+    maxBytes: MAX_ARTIFACT_BYTES,
     description,
-    mimeTypes: Object.freeze([...mimeTypes]),
-    maxBytes: MAX_UPLOAD_BYTES,
   });
 }
 
-function input(name, type, description, extra = {}) {
-  return Object.freeze({ name, type, required: false, description, ...extra });
-}
-
-function entry(id, command, title, summary, inputs, primary) {
+function family(id, command, title, summary, spec) {
   return Object.freeze({
     id,
     command,
     title,
     summary,
-    primary,
-    inputs: Object.freeze(inputs),
+    mode: "work",
+    /** Handshake capability keys that must be available. The first is primary. */
+    requires: Object.freeze(["work", "artifacts"]),
+    /** Operations the family needs; absence means the deployment drifted. */
+    operations: Object.freeze(["submitWork"]),
+    /** Streams are used for progress; absence degrades to polling, not failure. */
+    optionalOperations: Object.freeze(["streamTaskEvents"]),
+    attachment: null,
+    question: null,
+    ...spec,
+    requires: Object.freeze(spec.requires ?? ["work", "artifacts"]),
+    operations: Object.freeze(spec.operations ?? ["submitWork"]),
+    optionalOperations: Object.freeze(spec.optionalOperations ?? ["streamTaskEvents"]),
   });
 }
 
-export const CAPABILITY_CATALOG = Object.freeze([
-  entry(
+const QUESTION = Object.freeze({ name: "question", flag: "question", label: "question to answer" });
+
+export const CAPABILITY_FAMILIES = Object.freeze([
+  family(
     "file.upload",
     "upload",
     "File upload",
-    "Transfer a validated file to the owner's cloud execution environment.",
-    [fileInput(ANY_TRANSFER, "Regular file to transfer.", { name: "file" })],
-    "file",
+    "Store a validated file as an artifact on an existing owner task.",
+    {
+      mode: "upload",
+      requires: ["work", "artifacts"],
+      operations: ["uploadTaskArtifact"],
+      attachment: attachment(ANY_TRANSFER, { description: "Regular file to store on the task." }),
+    },
   ),
-  entry(
+  family(
+    "document.create",
+    "create-document",
+    "Document creation",
+    "Create a document artifact from an objective.",
+    {
+      attachment: attachment(DOCUMENT, { required: false, description: "Optional source document." }),
+      options: Object.freeze([
+        { flag: "format", label: "format", values: ["md", "txt", "docx", "pdf"] },
+        { flag: "name", label: "name" },
+      ]),
+      objective: (input) =>
+        `Create a ${input.format ?? "markdown"} document${input.name ? ` named ${input.name}` : ""}: ${input.prompt}. ` +
+        "Save the document as a task artifact and report the artifact path and a short summary.",
+    },
+  ),
+  family(
     "document.analyze",
     "analyze-document",
     "Document analysis",
-    "Analyze a document in the cloud and return an artifact-backed answer.",
-    [
-      fileInput(DOCUMENT, "Document to analyze."),
-      input("question", "text", "Question to answer about the document."),
-    ],
-    "file",
+    "Analyze a document through a cloud Work task and retain the findings as artifacts.",
+    {
+      attachment: attachment(DOCUMENT, { description: "Document to analyze." }),
+      requires: ["work", "artifacts", "multimodal"],
+      question: QUESTION,
+      objective: (input) =>
+        `Analyze the attached document ${input.attachmentName}${input.question ? ` and answer: ${input.question}` : ""}. ` +
+        "Retain the findings as a task artifact and report a concise summary.",
+    },
   ),
-  entry(
+  family(
+    "pdf.create",
+    "create-pdf",
+    "PDF creation",
+    "Create a PDF artifact from an objective.",
+    {
+      options: Object.freeze([{ flag: "name", label: "name" }]),
+      objective: (input) =>
+        `Create a PDF${input.name ? ` named ${input.name}` : ""}: ${input.prompt}. ` +
+        "Save it as a task artifact and report the artifact path.",
+    },
+  ),
+  family(
     "pdf.analyze",
     "analyze-pdf",
     "PDF analysis",
-    "Analyze a PDF in the cloud without running extraction locally.",
-    [
-      fileInput([PDF], "PDF document to analyze."),
-      input("question", "text", "Question to answer about the PDF."),
-    ],
-    "file",
+    "Analyze a PDF through a cloud Work task without local extraction.",
+    {
+      attachment: attachment([PDF], { description: "PDF document to analyze." }),
+      requires: ["work", "artifacts", "multimodal"],
+      question: QUESTION,
+      objective: (input) =>
+        `Analyze the attached PDF ${input.attachmentName}${input.question ? ` and answer: ${input.question}` : ""}. ` +
+        "Retain the findings as a task artifact and report a concise summary.",
+    },
   ),
-  entry(
+  family(
+    "spreadsheet.create",
+    "create-spreadsheet",
+    "Spreadsheet creation",
+    "Create a spreadsheet artifact from an objective.",
+    {
+      options: Object.freeze([{ flag: "format", label: "format", values: ["xlsx", "csv"] }]),
+      objective: (input) =>
+        `Create a ${input.format ?? "xlsx"} spreadsheet: ${input.prompt}. ` +
+        "Save it as a task artifact and report the artifact path.",
+    },
+  ),
+  family(
     "spreadsheet.analyze",
     "analyze-spreadsheet",
     "Spreadsheet analysis",
-    "Analyze a spreadsheet in the cloud and return findings as artifacts.",
-    [
-      fileInput(SPREADSHEET, "Spreadsheet to analyze."),
-      input("question", "text", "Question to answer about the spreadsheet."),
-    ],
-    "file",
+    "Analyze a spreadsheet through a cloud Work task and retain the findings.",
+    {
+      attachment: attachment(SPREADSHEET, { description: "Spreadsheet to analyze." }),
+      requires: ["work", "artifacts", "multimodal"],
+      question: QUESTION,
+      objective: (input) =>
+        `Analyze the attached spreadsheet ${input.attachmentName}${input.question ? ` and answer: ${input.question}` : ""}. ` +
+        "Retain the findings as a task artifact and report a concise summary.",
+    },
   ),
-  entry(
+  family(
     "presentation.create",
     "create-presentation",
     "Presentation creation",
-    "Create a presentation artifact from a prompt and optional source file.",
-    [
-      input("prompt", "text", "What the presentation should contain.", { required: true }),
-      fileInput(DOCUMENT, "Optional source document.", { required: false, name: "source" }),
-      input("format", "enum", "Output format.", { values: ["pptx", "pdf"], default: "pptx" }),
-    ],
-    "prompt",
+    "Create a presentation artifact from an objective and optional source document.",
+    {
+      attachment: attachment(DOCUMENT, { required: false, description: "Optional source document." }),
+      options: Object.freeze([{ flag: "format", label: "format", values: ["pptx", "pdf"] }]),
+      objective: (input) =>
+        `Create a ${input.format ?? "pptx"} presentation: ${input.prompt}. ` +
+        `${input.attachmentName ? `Use the attached source ${input.attachmentName}. ` : ""}` +
+        "Save it as a task artifact and report the artifact path.",
+    },
   ),
-  entry(
+  family(
+    "data.analyze",
+    "analyze-data",
+    "Data analysis",
+    "Analyze a dataset and retain the analysis as artifacts.",
+    {
+      attachment: attachment(SPREADSHEET, { required: false, description: "Optional dataset." }),
+      question: QUESTION,
+      objective: (input) =>
+        `Analyze the data${input.attachmentName ? ` in the attached ${input.attachmentName}` : ""}` +
+        `${input.question ? ` and answer: ${input.question}` : ""}. ` +
+        "Retain the analysis as a task artifact and report a concise summary.",
+    },
+  ),
+  family(
+    "data.visualize",
+    "visualize-data",
+    "Data visualization",
+    "Produce a chart or visualization artifact from a dataset.",
+    {
+      attachment: attachment(SPREADSHEET, { required: false, description: "Optional dataset." }),
+      options: Object.freeze([
+        { flag: "chart", label: "chart", values: ["bar", "line", "area", "scatter", "pie"] },
+      ]),
+      objective: (input) =>
+        `Produce a ${input.chart ?? "bar"} chart${input.attachmentName ? ` from the attached ${input.attachmentName}` : ""}: ${input.prompt}. ` +
+        "Save the visualization as a task artifact and report the artifact path.",
+    },
+  ),
+  family(
     "image.understand",
     "understand-image",
     "Image understanding",
     "Describe or answer a question about an image in the cloud.",
-    [
-      fileInput(IMAGE, "Image to inspect."),
-      input("question", "text", "Question to answer about the image."),
-    ],
-    "file",
+    {
+      attachment: attachment(IMAGE, { description: "Image to inspect." }),
+      requires: ["work", "artifacts", "multimodal"],
+      question: QUESTION,
+      objective: (input) =>
+        `Inspect the attached image ${input.attachmentName}${input.question ? ` and answer: ${input.question}` : " and describe it"}. ` +
+        "Retain the answer as a task artifact and report a concise summary.",
+    },
   ),
-  entry(
+  family(
     "image.generate",
     "generate-image",
     "Image generation",
-    "Generate an image artifact through the engine's authorized provider.",
-    [
-      input("prompt", "text", "Image description.", { required: true }),
-      input("size", "enum", "Output size.", { values: ["512x512", "1024x1024", "1024x1536", "1536x1024"] }),
-      input("count", "number", "Number of images.", { min: 1, max: 4, integer: true }),
-    ],
-    "prompt",
+    "Generate an image artifact through the engine's configured provider.",
+    {
+      options: Object.freeze([
+        { flag: "size", label: "size", values: ["512x512", "1024x1024", "1024x1536", "1536x1024"] },
+        { flag: "count", label: "count", integer: true, min: 1, max: 4 },
+      ]),
+      objective: (input) =>
+        `Generate ${input.count ?? 1} image${input.count === 1 ? "" : "s"}${input.size ? ` at ${input.size}` : ""}: ${input.prompt}. ` +
+        "Save the result as a task artifact and report the artifact path.",
+    },
   ),
-  entry(
+  family(
+    "image.edit",
+    "edit-image",
+    "Image editing",
+    "Edit an image in the cloud and retain the result as an artifact.",
+    {
+      attachment: attachment(IMAGE, { description: "Image to edit." }),
+      requires: ["work", "artifacts", "multimodal"],
+      options: Object.freeze([{ flag: "instruction", label: "edit instruction" }]),
+      objective: (input) =>
+        `Edit the attached image ${input.attachmentName}: ${input.instruction ?? input.prompt}. ` +
+        "Save the edited image as a task artifact and report the artifact path.",
+    },
+  ),
+  family(
     "audio.transcribe",
     "transcribe",
     "Audio transcription",
-    "Transcribe an audio file in the cloud and return a text artifact.",
-    [
-      fileInput(AUDIO, "Audio file to transcribe."),
-      input("language", "string", "BCP-47 language hint."),
-      input("format", "enum", "Transcript format.", { values: ["txt", "srt", "vtt"], default: "txt" }),
-    ],
-    "file",
+    "Transcribe audio in the cloud and retain the transcript as an artifact.",
+    {
+      attachment: attachment(AUDIO, { description: "Audio file to transcribe." }),
+      requires: ["work", "artifacts", "multimodal"],
+      options: Object.freeze([
+        { flag: "language", label: "language" },
+        { flag: "format", label: "format", values: ["txt", "srt", "vtt"] },
+      ]),
+      objective: (input) =>
+        `Transcribe the attached audio ${input.attachmentName}${input.language ? ` in ${input.language}` : ""} ` +
+        `as ${input.format ?? "txt"}. Save the transcript as a task artifact and report the artifact path.`,
+    },
   ),
-  entry(
+  family(
     "audio.speech",
     "speak",
     "Text-to-speech",
-    "Synthesize speech in the cloud and optionally download the result.",
-    [
-      input("text", "text", "Text to synthesize.", { required: true }),
-      input("voice", "string", "Voice identifier published by the engine."),
-      input("format", "enum", "Audio format.", { values: ["mp3", "wav", "opus"], default: "mp3" }),
-    ],
-    "text",
+    "Synthesize speech in the cloud and retain the audio as an artifact.",
+    {
+      options: Object.freeze([
+        { flag: "voice", label: "voice" },
+        { flag: "format", label: "format", values: ["mp3", "wav", "opus"] },
+      ]),
+      objective: (input) =>
+        `Synthesize speech${input.voice ? ` with voice ${input.voice}` : ""} as ${input.format ?? "mp3"}: ${input.prompt}. ` +
+        "Save the audio as a task artifact and report the artifact path.",
+    },
   ),
-  entry(
+  family(
+    "video.understand",
+    "understand-video",
+    "Video understanding",
+    "Analyze a video in the cloud and retain the findings as artifacts.",
+    {
+      attachment: attachment(VIDEO, { description: "Video to analyze." }),
+      requires: ["work", "artifacts", "multimodal"],
+      question: QUESTION,
+      objective: (input) =>
+        `Analyze the attached video ${input.attachmentName}${input.question ? ` and answer: ${input.question}` : ""}. ` +
+        "Retain the findings as a task artifact and report a concise summary.",
+    },
+  ),
+  family(
     "software.create",
     "create-software",
     "Software creation",
     "Run an authorized software build in a cloud workspace and retain its artifacts.",
-    [
-      input("prompt", "text", "What to build.", { required: true }),
-      input("name", "string", "Project or package name."),
-    ],
-    "prompt",
+    {
+      options: Object.freeze([{ flag: "name", label: "name" }]),
+      objective: (input) =>
+        `Build the following software${input.name ? ` as ${input.name}` : ""}: ${input.prompt}. ` +
+        "Keep the source in the task workspace, save the distributable as a task artifact and report what was verified.",
+    },
   ),
-  entry(
+  family(
     "game.create",
     "create-game",
-    "Game creation",
-    "Run an authorized game build in a cloud workspace and retain its artifacts.",
-    [
-      input("prompt", "text", "What to build.", { required: true }),
-      input("name", "string", "Game name."),
-    ],
-    "prompt",
+    "Native Game Studio",
+    "Create a game through the engine's published Native Game Studio operations.",
+    {
+      mode: "operation",
+      requires: ["work"],
+      operations: Object.freeze([]),
+      optionalOperations: Object.freeze([]),
+      discover: Object.freeze({ tags: ["games", "game-studio"], pathPrefix: "/v1/games" }),
+      options: Object.freeze([{ flag: "name", label: "name" }]),
+      objective: (input) => `Create a game${input.name ? ` named ${input.name}` : ""}: ${input.prompt}.`,
+    },
+  ),
+  family(
+    "game.play",
+    "gaming-agent",
+    "Native Gaming Agent",
+    "Run a Native Gaming Agent session against a verified studio build.",
+    {
+      mode: "operation",
+      requires: ["work"],
+      operations: Object.freeze([]),
+      optionalOperations: Object.freeze([]),
+      discover: Object.freeze({ tags: ["gaming-agent"], pathPrefix: "/v1/games" }),
+      options: Object.freeze([
+        { flag: "session", label: "session id" },
+        { flag: "objective", label: "in-game objective" },
+      ]),
+      objective: (input) =>
+        `Play the game${input.session ? ` in session ${input.session}` : ""} to ${input.objective ?? input.prompt}. ` +
+        "Report measured completion state and any session artifact.",
+    },
+  ),
+  family(
+    "work.multi-agent",
+    "orchestrate",
+    "Multi-agent workflows",
+    "Submit a Work objective that the engine's published agents orchestrate.",
+    {
+      requires: ["work", "multiAgent"],
+      options: Object.freeze([{ flag: "agent", label: "agent id" }]),
+      objective: (input) => input.prompt,
+    },
   ),
 ]);
 
 export const CAPABILITY_COMMANDS = Object.freeze(
-  CAPABILITY_CATALOG.map((capability) => capability.command),
+  CAPABILITY_FAMILIES.map((entry) => entry.command),
 );
 
 export const CAPABILITY_COMMAND_SET = new Set(CAPABILITY_COMMANDS);
 
-export const ARTIFACT_ACTIONS = Object.freeze(["list", "inspect", "download", "associate"]);
-
+export const ARTIFACT_ACTIONS = Object.freeze(["list", "inspect", "download"]);
 export const ARTIFACT_ACTION_SET = new Set(ARTIFACT_ACTIONS);
 
-/** Options the transport itself owns; a capability may not redeclare them. */
+export const SCHEDULE_ACTIONS = Object.freeze(["list", "create", "get", "cancel"]);
+export const SCHEDULE_ACTION_SET = new Set(SCHEDULE_ACTIONS);
+
+/**
+ * Options the transport owns. A family may not redeclare them, and the CLI
+ * validates every dynamic option against the resolved family before it runs.
+ */
 export const RESERVED_OPTIONS = Object.freeze([
+  "after",
+  "agent",
   "base-url",
   "chat-path",
   "data",
@@ -235,9 +423,8 @@ export const RESERVED_OPTIONS = Object.freeze([
   "no-color",
   "no-wait",
   "out",
-  "project",
-  "conversation",
   "stream",
+  "task",
   "timeout",
   "token",
   "url",
@@ -246,12 +433,11 @@ export const RESERVED_OPTIONS = Object.freeze([
   "wait-timeout",
 ]);
 
-export function capabilityForCommand(command) {
-  return CAPABILITY_CATALOG.find((capability) => capability.command === command) ?? null;
-}
-
-export function statusLabel(status) {
-  return STATUS_LABELS[status] ?? "unknown";
+export function capabilityFamilyFor(commandOrId) {
+  const key = String(commandOrId ?? "").trim();
+  return (
+    CAPABILITY_FAMILIES.find((entry) => entry.command === key || entry.id === key) ?? null
+  );
 }
 
 export function isCapabilityCommand(command) {
@@ -259,5 +445,24 @@ export function isCapabilityCommand(command) {
 }
 
 export function isExtendedCommand(command) {
-  return command === "artifacts" || command === "capability" || command === "readiness" || command === "capabilities" || isCapabilityCommand(command);
+  return (
+    command === "artifacts" ||
+    command === "schedules" ||
+    command === "capability" ||
+    command === "readiness" ||
+    command === "capabilities" ||
+    isCapabilityCommand(command)
+  );
+}
+
+export function stateLabel(state) {
+  return STATE_LABELS[state] ?? "unknown";
+}
+
+export function optionValues(entry) {
+  return entry.options ?? [];
+}
+
+export function attachmentFor(entry) {
+  return entry.attachment ?? null;
 }
