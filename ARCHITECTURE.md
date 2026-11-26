@@ -35,7 +35,11 @@ argv ──► parseArgv ──► preflight ──► resolveSettings ──►
 | `packages/workflow-sdk/src/contract.js` | routes, capabilities, statuses, documented backend gaps | none |
 | `packages/workflow-sdk/src/http.js` | transport, SSE content-type enforcement, version header, idle timeout, cancellation | `fetch` |
 | `packages/workflow-sdk/src/sse.js` | SSE decoder, event sequencing, deduplication, gap handling | none |
-| `packages/workflow-sdk/src/client.js` | owner check, negotiation, chat, runs, builds, approvals, cancellation | contract, http, sse |
+| `packages/workflow-sdk/src/client.js` | owner check, negotiation, chat, runs, builds, approvals, cancellation | contract, http, sse, task-events |
+| `packages/workflow-sdk/src/task-events.js` | authoritative run validation, snapshot identity, cursor extraction, approval descriptor, legacy chat adapter | contract |
+| `packages/workflow-sdk/src/task-state.js` | applied snapshot/cursor, terminal latch, submission intents, settlement ledger | task-events |
+| `packages/workflow-sdk/src/task-client.js` | submit-once, follow, approval/cancel reconciliation, settlement confirmation | client, task-events, task-state |
+| `src/task-store.js` | atomic 0600 per-deployment task state | filesystem |
 | `packages/workflow-sdk/src/redact.js` | streaming and recursive token redaction | none |
 
 The SDK is imported by relative path. There is no workspace install step, no

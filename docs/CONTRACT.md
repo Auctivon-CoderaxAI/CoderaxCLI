@@ -137,6 +137,23 @@ instead of approving automatically. An approval request sends the exact
 | `7` | contract violation, including an incomplete stream |
 | `130` | cancelled or detached locally |
 
+## Task synchronization
+
+The backend remains authoritative. `docs/EVENT-PROTOCOL.md` records the exact
+rules the task layer follows: run snapshots rather than event replay, no
+synthetic event ids or sequence numbers, `Last-Event-ID` only when the
+deployment issued one, approvals by `stepIndex`, idempotent cancellation,
+manual-only retry, and no invented idempotency key for build submission. A lost
+build response is reported as `SUBMISSION_UNKNOWN` and is never retried.
+
+Completion notifications require an authoritative terminal read and are
+de-duplicated per `(runId, status, settledAt)`. There is no client-facing
+settlement-ack route, so the ledger is local delivery de-duplication, not proof
+of backend delivery.
+
+The current `/api/work/chat` cumulative-snapshot stream is kept as the clearly
+marked `legacy-chat-sse` adapter. It is not a task replay protocol.
+
 ## Tests that pin this contract
 
 `test/contract.test.js` stubs the deployment and asserts, among others:
@@ -153,3 +170,9 @@ instead of approving automatically. An approval request sends the exact
   `waiting_approval` fails closed;
 - expired credentials exit `3` without retrying;
 - an unadvertised capability exits `6` without calling the guessed route.
+
+`test/task-sync.test.js` and `test/task-http.test.js` pin the task
+synchronization rules over a real loopback HTTP harness: commit-after-handle,
+no synthetic cursor, submission ambiguity without a second POST, 409
+reconciliation for approval and cancellation, settlement de-duplication across
+processes, and distinct detach/disconnect/cancelled/failed outcomes.

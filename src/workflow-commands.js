@@ -3,6 +3,8 @@ import { spawn } from "node:child_process";
 import {
   BUILD_MODES,
   SdkError,
+  TaskClient,
+  TaskState,
   WorkflowClient,
   isTerminalStatus,
 } from "../packages/workflow-sdk/src/index.js";
@@ -20,6 +22,7 @@ import {
   truncate,
 } from "./render.js";
 import { APPROVAL_POLICIES, approveOrExplain } from "./approval.js";
+import { createFileTaskStateStore, taskStatePath } from "./task-store.js";
 import { VERSION } from "./version.js";
 
 export const EXIT = Object.freeze({
@@ -90,6 +93,27 @@ async function clientFor(ctx) {
   requireBase(ctx);
   requireAuth(ctx);
   return makeClient(ctx);
+}
+
+/**
+ * The task layer is the only owner of persisted cursor/ack state. Every command
+ * that follows, submits, approves or cancels goes through it so a reconnect and
+ * a fresh process agree about what was already handled.
+ */
+async function taskFor(ctx) {
+  const client = await clientFor(ctx);
+  const store = createFileTaskStateStore(taskStatePath(ctx.env, ctx.settings.baseUrl));
+  const state = new TaskState({
+    persist: store.persist,
+    onPersistError: (error) => {
+      ctx.err(`coderax: warning: TASK_STATE_PERSIST: ${error.message}`);
+    },
+  });
+  state.restore(await store.load());
+  return {
+    client,
+    tasks: new TaskClient({ client, state, signal: ctx.signal }),
+  };
 }
 
 function approvalPolicy(ctx) {
@@ -344,7 +368,7 @@ function defaultWorkspace(repository) {
 }
 
 export async function submitCommand(ctx, positionals) {
-  const client = await clientFor(ctx);
+  const { client, tasks } = await taskFor(ctx);
   await client.requireOwner();
 
   const request = await readPrompt(ctx, positionals);
@@ -368,13 +392,27 @@ export async function submitCommand(ctx, positionals) {
   }
   const workspace = ctx.flags.get("workspace") ?? defaultWorkspace(repository);
 
-  const result = await client.submitBuild({
-    request,
-    agentId,
-    mode,
-    repository,
-    workspace,
-  });
+  let result;
+  try {
+    result = await tasks.submit({
+      request,
+      agentId,
+      mode,
+      repository,
+      workspace,
+    });
+  } catch (error) {
+    if (error instanceof SdkError && error.code === "SUBMISSION_UNKNOWN") {
+      // The POST may have created a run. Retrying, with this key or a new one,
+      // could create a second run and a second workspace checkout.
+      if (ctx.json) {
+        ctx.out(JSON.stringify({ error: "SUBMISSION_UNKNOWN", ...error.details }, null, 2));
+      }
+      ctx.err(`coderax: SUBMISSION_UNKNOWN: ${error.message}`);
+      return EXIT.NETWORK;
+    }
+    throw error;
+  }
 
   if (ctx.json) {
     ctx.out(
@@ -537,9 +575,10 @@ export async function runCommand(ctx, positionals) {
   if (runId === undefined || runId.trim() === "") {
     throw new SdkError("USAGE", "run requires a run id: `coderax run <runId>`");
   }
-  const client = await clientFor(ctx);
+  const { client, tasks } = await taskFor(ctx);
   const follow = !ctx.flags.has("no-follow");
   const policy = approvalPolicy(ctx);
+  const wantsNotification = ctx.flags.has("notify") || ctx.flags.has("notify-command");
 
   if (!follow) {
     const run = await client.getRun(runId);
@@ -548,7 +587,12 @@ export async function runCommand(ctx, positionals) {
     } else {
       renderRun(run, ctx.out);
     }
-    notifyTerminal(ctx, run);
+    if (wantsNotification) {
+      // Completion notifications are emitted only after the authoritative run
+      // read confirms a terminal state, and only once per settlement.
+      const settled = await tasks.settle(runId);
+      if (settled.settled && settled.newlyAcknowledged) notifyTerminal(ctx, settled.run);
+    }
     return exitForRun(run);
   }
 
@@ -559,8 +603,14 @@ export async function runCommand(ctx, positionals) {
   let lastStatus = null;
   let lastRun = null;
 
+  // Approval is addressed by step index, exactly as parseApproveWorkflowStep
+  // requires. TaskClient reconciles a 409 by reading the run once.
+  const approvalClient = {
+    approveStep: async (id, index) => (await tasks.approve(id, index)).run,
+  };
+
   try {
-    const result = await client.watchRun(runId, {
+    const result = await tasks.follow(runId, {
       signal,
       maxRetries: parseMaxRetries(ctx),
       onRun: async (run) => {
@@ -577,7 +627,7 @@ export async function runCommand(ctx, positionals) {
         if (run.status === "waiting_approval") {
           const decision = await approveOrExplain({
             ctx,
-            client,
+            client: approvalClient,
             run,
             policy,
             apply: (updated) => {
@@ -592,23 +642,12 @@ export async function runCommand(ctx, positionals) {
       },
     });
 
-    const run = result.run ?? lastRun;
-    if (!ctx.json && run && lastStatus !== "waiting_approval") {
-      ctx.out("");
-      renderRun(run, ctx.out);
-    }
-    notifyTerminal(ctx, run);
-    return exitForRun(run);
-  } catch (error) {
-    if (error instanceof StopMonitoring) {
-      notifyTerminal(ctx, error.run);
-      return EXIT.UNAVAILABLE;
-    }
-    if (error instanceof SdkError && error.code === "CANCELLED" && state.interrupted) {
-      notifyTerminal(ctx, lastRun ?? { id: runId, status: "detached" });
+    const outcome = result.outcome;
+    if (outcome.kind === "detached") {
       if (ctx.flags.has("cancel-on-interrupt")) {
         try {
-          await client.cancelRun(runId);
+          const canceled = await tasks.cancelRun(runId);
+          if (wantsNotification) notifyTerminal(ctx, canceled.run);
           ctx.err(`Cancelled run ${runId}.`);
           return EXIT.OK;
         } catch (cancelError) {
@@ -621,10 +660,37 @@ export async function runCommand(ctx, positionals) {
           `Resume with: coderax run ${runId}`,
       );
       if (lastRun?.conversationId) ctx.err(`conversation ${lastRun.conversationId}`);
+      if (wantsNotification) notifyTerminal(ctx, lastRun ?? { id: runId, status: "detached" });
       return EXIT.CANCELLED;
     }
+
+    if (outcome.kind === "disconnected") {
+      // A transport failure is not a run failure: the deployment may still be
+      // executing. Report it separately from a terminal failed/cancelled run.
+      ctx.err(
+        `coderax: STREAM_INCOMPLETE: ${outcome.error ?? "the run stream ended before a terminal status"}`,
+      );
+      if (lastRun?.conversationId) ctx.err(`conversation ${lastRun.conversationId}`);
+      return EXIT.CONTRACT;
+    }
+
+    const run = result.run ?? lastRun;
+    if (!ctx.json && run && lastStatus !== "waiting_approval") {
+      ctx.out("");
+      renderRun(run, ctx.out);
+    }
+    if (wantsNotification) {
+      const settled = await tasks.settle(runId);
+      if (settled.settled && settled.newlyAcknowledged) notifyTerminal(ctx, settled.run);
+    }
+    return exitForRun(run);
+  } catch (error) {
+    if (error instanceof StopMonitoring) {
+      if (wantsNotification) notifyTerminal(ctx, error.run);
+      return EXIT.UNAVAILABLE;
+    }
     if (isTerminalStatus(lastRun?.status)) {
-      notifyTerminal(ctx, lastRun);
+      if (wantsNotification) notifyTerminal(ctx, lastRun);
       return exitForRun(lastRun);
     }
     throw error;
@@ -636,17 +702,24 @@ export async function runCommand(ctx, positionals) {
 export async function cancelCommand(ctx, positionals) {
   const id = positionals[0];
   if (!id) throw new SdkError("USAGE", "cancel requires an id");
-  const client = await clientFor(ctx);
+  const { client, tasks } = await taskFor(ctx);
   await client.requireOwner();
 
   if (ctx.flags.has("task")) {
-    const result = await client.cancelTask(id);
-    if (ctx.json) ctx.out(JSON.stringify({ task: id, result }, null, 2));
-    else ctx.out(`Cancellation requested for Work task ${id}.`);
+    const outcome = await tasks.cancelTask(id);
+    if (ctx.json) {
+      ctx.out(JSON.stringify({ task: id, ...outcome }, null, 2));
+    } else if (outcome.canceled) {
+      ctx.out(`Cancellation requested for Work task ${id}.`);
+    } else if (outcome.alreadyFinished) {
+      ctx.out(`Work task ${id} is already finished; nothing was cancelled.`);
+    } else {
+      ctx.out(`Work task ${id} has no running turn to cancel.`);
+    }
     return EXIT.OK;
   }
 
-  const run = await client.cancelRun(id);
+  const { run } = await tasks.cancelRun(id);
   if (ctx.json) ctx.out(JSON.stringify({ run, ...diagnosticsForJson(client.diagnostics) }, null, 2));
   else ctx.out(`Cancellation requested for run ${run.id}; status ${statusLabel(run.status)}.`);
   return EXIT.OK;
@@ -666,9 +739,9 @@ export async function resumeCommand(ctx, positionals) {
 export async function retryCommand(ctx, positionals) {
   const id = positionals[0];
   if (!id) throw new SdkError("USAGE", "retry requires a run id");
-  const client = await clientFor(ctx);
+  const { client, tasks } = await taskFor(ctx);
   await client.requireOwner();
-  const { previous, run } = await client.retryRun(id);
+  const { previous, run } = await tasks.retry(id);
   if (ctx.json) {
     ctx.out(JSON.stringify({ previous, run, ...diagnosticsForJson(client.diagnostics) }, null, 2));
   } else {
@@ -687,11 +760,24 @@ export async function approveCommand(ctx, positionals) {
   if (!Number.isInteger(stepIndex) || stepIndex < 0) {
     throw new SdkError("USAGE", "stepIndex must be a non-negative integer");
   }
-  const client = await clientFor(ctx);
+  const { client, tasks } = await taskFor(ctx);
   await client.requireOwner();
-  const run = await client.approveStep(id, stepIndex);
-  if (ctx.json) ctx.out(JSON.stringify({ run, ...diagnosticsForJson(client.diagnostics) }, null, 2));
-  else ctx.out(`Approved step ${stepIndex} for run ${run.id}; status ${statusLabel(run.status)}.`);
+  const outcome = await tasks.approve(id, stepIndex);
+  if (ctx.json) {
+    ctx.out(
+      JSON.stringify(
+        { run: outcome.run, applied: outcome.applied, alreadySettled: outcome.alreadySettled, ...diagnosticsForJson(client.diagnostics) },
+        null,
+        2,
+      ),
+    );
+  } else if (outcome.applied) {
+    ctx.out(`Approved step ${stepIndex} for run ${outcome.run.id}; status ${statusLabel(outcome.run.status)}.`);
+  } else {
+    ctx.out(
+      `Step ${stepIndex} for run ${outcome.run.id} was already settled; status ${statusLabel(outcome.run.status)}.`,
+    );
+  }
   return EXIT.OK;
 }
 

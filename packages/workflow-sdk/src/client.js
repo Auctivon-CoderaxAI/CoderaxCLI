@@ -12,6 +12,12 @@ import { SdkError, diagnostic } from "./errors.js";
 import { assertCompatibleVersion, createTransport, detailText } from "./http.js";
 import { EventSequencer, SseDecoder } from "./sse.js";
 import { redact, redactValue, StreamTextRedactor } from "./redact.js";
+import {
+  assertRunSnapshot,
+  classifyChatPayload,
+  cursorFromFrame,
+  workflowFrameEvent,
+} from "./task-events.js";
 
 const INFERRED = Object.freeze({
   [CAPABILITY.builds]: CAPABILITY.workflows,
@@ -353,20 +359,9 @@ export class WorkflowClient {
   }
 
   #validateRun(run, source) {
-    if (run === null || typeof run !== "object" || Array.isArray(run)) {
-      throw new SdkError("CONTRACT_VIOLATION", `${source} did not return a run object`);
-    }
-    if (typeof run.id !== "string" || run.id === "") {
-      throw new SdkError("CONTRACT_VIOLATION", `${source} returned a run without an id`);
-    }
-    if (!RUN_STATUSES.includes(run.status)) {
-      throw new SdkError(
-        "UNKNOWN_RUN_STATUS",
-        `${source} returned run status ${JSON.stringify(run.status)}; this client implements ${RUN_STATUSES.join(", ")}`,
-        { details: { runId: run.id, status: run.status ?? null } },
-      );
-    }
-    return run;
+    // One validator for the whole SDK (task-events.js), so the durable task
+    // layer and the direct client cannot disagree about a run snapshot.
+    return assertRunSnapshot(run, source);
   }
 
   #runFrom(response, source) {
@@ -660,31 +655,14 @@ export class WorkflowClient {
         return;
       }
 
-      // Engine frames: { type: 'text', text: <cumulative>, index: 0 }.
-      if (payload.type === "text" && typeof payload.text === "string") {
-        const index = payload.index;
-        if (index === undefined || index === 0) {
-          applySnapshot(payload.text, payload);
-          return;
-        }
-        return;
-      }
-
-      // Native Work frames: { message: true, text: <cumulative> }.
-      if (payload.message === true && typeof payload.text === "string") {
-        applySnapshot(payload.text, payload);
-        return;
-      }
-
-      // Legacy / OpenAI-compatible deltas.
-      if (payload.raw === true && typeof payload.text === "string") {
-        emitDelta(payload.text, payload);
-        return;
-      }
-      const candidate =
-        payload.delta ?? payload.token ?? payload.content ?? payload.choices?.[0]?.delta?.content;
-      if (typeof candidate === "string") {
-        emitDelta(candidate, payload);
+      // Legacy `/api/work/chat` compatibility: cumulative snapshots, explicit
+      // deltas and a final frame. The classifier is shared with the SDK's
+      // LegacyChatAdapter so the compatibility rules live in exactly one place.
+      const classified = classifyChatPayload(payload);
+      if (classified.kind === "snapshot") {
+        applySnapshot(classified.text, payload);
+      } else if (classified.kind === "delta") {
+        emitDelta(classified.text, payload);
       }
     };
 
@@ -768,7 +746,10 @@ export class WorkflowClient {
    * Monitor a durable workflow run. Reconnection is safe because the stream is
    * a full snapshot; event replay is used when the deployment supplies cursors.
    */
-  async watchRun(runId, { onRun, signal = this.signal, maxRetries = this.maxRetries } = {}) {
+  async watchRun(
+    runId,
+    { onRun, onHandled, signal = this.signal, maxRetries = this.maxRetries } = {},
+  ) {
     await this.requireCapability(CAPABILITY.runStream);
     const sequencer = new EventSequencer();
     let lastRun = null;
@@ -777,8 +758,9 @@ export class WorkflowClient {
     let sentCursor = false;
     let attempt = 0;
     let announcedCursorUnsupported = false;
+    let handlerFailed = false;
 
-    const record = async (run) => {
+    const record = async (run, frameCursor) => {
       const serialized = JSON.stringify(run);
       if (serialized === lastSerialized) return false;
       if (
@@ -794,9 +776,21 @@ export class WorkflowClient {
           ),
         );
       }
+      // Handle first, commit second. If the renderer or an approval fails, the
+      // snapshot is not marked applied and a reconnect re-delivers it instead
+      // of silently dropping it.
+      try {
+        await onRun?.(run);
+      } catch (error) {
+        handlerFailed = true;
+        throw error;
+      }
+      if (frameCursor !== null && frameCursor !== undefined) {
+        cursor = frameCursor.value;
+      }
       lastSerialized = serialized;
       lastRun = run;
-      await onRun?.(run);
+      await onHandled?.(run, frameCursor ?? null);
       return true;
     };
 
@@ -821,7 +815,6 @@ export class WorkflowClient {
               completed = lastRun !== null && isTerminalStatus(lastRun.status);
               break;
             }
-            if (frame.id !== null) cursor = frame.id;
             const replayBefore = sequencer.cursorReplayDetected;
             const verdict = sequencer.accept(frame);
             this.#track(verdict.diagnostics);
@@ -840,22 +833,24 @@ export class WorkflowClient {
               );
             }
             for (const accepted of verdict.frames ?? []) {
-              const payload = accepted.data;
-              if (payload !== null && typeof payload === "object" && payload.type === "error") {
+              const classified = workflowFrameEvent(accepted);
+              if (classified.kind === "stream-error") {
                 throw new SdkError(
                   "STREAM_ERROR",
-                  redact(detailText(payload.error ?? payload.message) || "run stream failed", this.token),
+                  redact(detailText(classified.error) || "run stream failed", this.token),
                 );
               }
-              if (payload === null || typeof payload !== "object" || !("run" in payload)) {
+              if (classified.kind !== "run-snapshot") {
                 throw new SdkError(
                   "CONTRACT_VIOLATION",
                   `${ROUTE.runStream(runId)} emitted a frame without a run snapshot`,
                   { details: { event: accepted.event ?? null } },
                 );
               }
-              const run = this.#validateRun(payload.run, ROUTE.runStream(runId));
-              await record(run);
+              const run = this.#validateRun(classified.run, ROUTE.runStream(runId));
+              // Each buffered frame carries its own cursor; never apply the id
+              // of the frame that happened to fill a gap.
+              await record(run, cursorFromFrame(accepted));
               if (isTerminalStatus(run.status)) {
                 completed = true;
                 break;
@@ -883,10 +878,10 @@ export class WorkflowClient {
           const flushed = sequencer.flush();
           this.#track(flushed.diagnostics);
           for (const frame of flushed.frames) {
-            const payload = frame.data;
-            if (payload !== null && typeof payload === "object" && "run" in payload) {
-              const run = this.#validateRun(payload.run, ROUTE.runStream(runId));
-              await record(run);
+            const classified = workflowFrameEvent(frame);
+            if (classified.kind === "run-snapshot") {
+              const run = this.#validateRun(classified.run, ROUTE.runStream(runId));
+              await record(run, cursorFromFrame(frame));
               if (isTerminalStatus(run.status)) completed = true;
             }
           }
@@ -908,6 +903,9 @@ export class WorkflowClient {
       if (completed && lastRun !== null && isTerminalStatus(lastRun.status)) {
         return { run: lastRun, diagnostics: this.diagnostics };
       }
+      // A handler failure is never retried internally: the frame dedupe set
+      // already saw the frame, so a silent retry would skip it entirely.
+      if (handlerFailed) throw failure;
       if (failure !== null && !this.#retryable(failure)) throw failure;
       if (attempt >= maxRetries) {
         throw new SdkError(

@@ -22,3 +22,17 @@ export {
   responseError,
 } from "./http.js";
 export { WorkflowClient } from "./client.js";
+export {
+  TASK_PROTOCOL,
+  LEGACY_CHAT_PROTOCOL,
+  LegacyChatAdapter,
+  approvalFor,
+  assertRunSnapshot,
+  classifyChatPayload,
+  cursorFromFrame,
+  runFingerprint,
+  terminalOutcome,
+  workflowFrameEvent,
+} from "./task-events.js";
+export { TASK_STATE_VERSION, TaskState, settlementKey } from "./task-state.js";
+export { TaskClient, newSubmissionKey } from "./task-client.js";

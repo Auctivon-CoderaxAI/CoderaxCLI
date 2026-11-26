@@ -1,18 +1,16 @@
-import { SdkError } from "../packages/workflow-sdk/src/index.js";
+import { SdkError, approvalFor } from "../packages/workflow-sdk/src/index.js";
 
 export const APPROVAL_POLICIES = Object.freeze(["ask", "allow", "deny"]);
 
+/**
+ * The descriptor comes from task-events.js, which records that the backend has
+ * no permission-request identifier: approval is addressed by step index only.
+ */
 export function pendingApproval(run) {
-  if (run?.status !== "waiting_approval") return null;
+  const approval = approvalFor(run);
+  if (approval === null) return null;
   const steps = Array.isArray(run.steps) ? run.steps : [];
-  for (let index = 0; index < steps.length; index += 1) {
-    const step = steps[index];
-    if (step?.approvalRequired !== true) continue;
-    if (step.approvedAt) continue;
-    if (["completed", "failed", "cancelled", "skipped"].includes(step.status)) continue;
-    return { index, step };
-  }
-  return null;
+  return { index: approval.stepIndex, step: steps[approval.stepIndex] };
 }
 
 /**
