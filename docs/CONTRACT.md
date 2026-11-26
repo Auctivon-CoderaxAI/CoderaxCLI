@@ -66,6 +66,49 @@ No path is hardcoded. When the match is absent the CLI exits `1` with
 - `6` Cloud/projects unavailable
 - `130` cancelled
 
+## Interactive terminal transport (provisional)
+
+The terminal consumes a facade with a deliberately small surface:
+
+```js
+getCapabilities() -> {
+  contractVersion, contractVerified, stream, work, tools, attachments,
+  conversations, permissions, verifiedPermissions, models, agents,
+  modelSelection, agentSelection
+}
+streamMessage({ mode, text, model, agent, conversationId, attachments,
+                signal, onEvent })
+respondPermission(payload)
+listModels(), listAgents(), listConversations(), close()
+```
+
+Events are `delta`, `replace`, `final`, `tool`, `progress`, `permission` and
+`conversation`. The presentation layer does not route models or run workflows;
+it only renders these events and passes selections through.
+
+The legacy SSE transport remains the default. `CODERAX_SDK=canonical` requires
+`contractVersion` `coderax-sdk/1`, `contractVerified: true` and streaming
+support; a mismatch exits with `SDK_CONTRACT_MISMATCH` rather than falling back
+silently. `CODERAX_SDK=auto` falls back to legacy until that handshake succeeds.
+This contract is provisional until the gateway and WorkflowEngine owners verify
+it end to end.
+
+## Permission approval (provisional)
+
+A permission request is actionable only when all of these are present:
+
+- `serverIssued: true`, received on the authenticated SSE/SDK channel
+- `requestId` issued by the server
+- `executionId` identifying the engine execution
+- `action` from the allowed set (`read_file`, `write_file`, `delete_file`,
+  `list_directory`, `run_command`, `network`, `send_files`, `use_tool`)
+- `resource` that canonicalises to an absolute path, URL or exact command
+- optional `expiresAt` and `resourceHash`; a supplied hash must match
+
+The response is `{ requestId, executionId, action, resourceHash, decision,
+decidedAt }`. Session approval applies to that exact tuple only. The legacy
+transport declares `permissions: false` and fails closed.
+
 ## Compatibility
 
 The CLI depends only on the OpenAPI document shape and bearer auth. Adding routes

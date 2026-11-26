@@ -31,6 +31,7 @@ Usage:
   coderax config get <key>
   coderax config set <key> <value>
   coderax config set [--base-url <url>] [--token <token>] [--timeout <ms>]
+  coderax history [list|clear|on|off|retention <days>] [--json]
   coderax doctor [--json]
   coderax update [--json]
   coderax health [--json]
@@ -42,17 +43,24 @@ Global options:
   --token <token>    Override the configured bearer token
   --timeout <ms>     Per-request timeout, 100-120000
   --model <id>       Override the model for one invocation
+  --agent <id>       Override the agent for one invocation
   --endpoint <name>  Override the chat endpoint name
   --chat-path <path> Override the streaming path
   --url <path>       Override the streaming path for one invocation
   --json             Machine-readable output
-  --no-color         Accepted for compatibility
+  --interactive, -i  Start the interactive terminal (Chat/Work)
+  --accessible       Line-oriented, screen-reader-friendly terminal mode
+  --resume [id]      Resume a saved conversation in interactive mode
+  --no-history       Do not read or write prompt history for this run
+  --no-color         Disable colour (also honours NO_COLOR)
   -h, --help         Show this help
   -v, --version      Show the version
 
 Environment:
   CODERAX_BASE_URL, CODERAX_TOKEN, CODERAX_TIMEOUT_MS, CODERAX_CONFIG,
-  CODERAX_CONFIG_DIR, CODERAX_CHAT_PATH, CODERAX_ENDPOINT, CODERAX_MODEL
+  CODERAX_CONFIG_DIR, CODERAX_CHAT_PATH, CODERAX_ENDPOINT, CODERAX_MODEL,
+  CODERAX_AGENT, CODERAX_HISTORY, CODERAX_HISTORY_RETENTION_DAYS,
+  CODERAX_HISTORY_MAX_ENTRIES, CODERAX_SDK
 
 Discovery: agents, models, and openapi use the deployment's OpenAPI document.
 health probes fixed paths, login checks /api/user, doctor probes the same health
@@ -76,8 +84,10 @@ const CONFIG_KEYS = Object.freeze(Object.assign(Object.create(null), {
   "chat-path": "chatPath",
   endpoint: "endpoint",
   model: "model",
+  agent: "agent",
 }));
-const CONFIG_FLAGS = ["base-url", "token", "timeout", "chat-path", "endpoint", "model"];
+const CONFIG_FLAGS = ["base-url", "token", "timeout", "chat-path", "endpoint", "model", "agent"];
+const BOOLEAN_FLAGS = new Set(["interactive", "accessible", "plain", "no-history"]);
 
 const KNOWN_COMMANDS = new Set([
   "config",
@@ -94,6 +104,7 @@ const KNOWN_COMMANDS = new Set([
   "login",
   "logout",
   "status",
+  "history",
   "doctor",
   "update",
   "help",
@@ -108,10 +119,16 @@ const KNOWN_FLAGS = new Set([
   "timeout",
   "data",
   "model",
+  "agent",
   "endpoint",
   "chat-path",
   "url",
   "no-color",
+  "interactive",
+  "accessible",
+  "plain",
+  "resume",
+  "no-history",
 ]);
 const ALLOWED_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
 
@@ -145,6 +162,10 @@ export function parseArgv(argv) {
       flags.set("no-color", true);
       continue;
     }
+    if (arg === "-i") {
+      flags.set("interactive", true);
+      continue;
+    }
     if (arg.startsWith("--")) {
       const body = arg.slice(2);
       const equals = body.indexOf("=");
@@ -156,7 +177,15 @@ export function parseArgv(argv) {
         flags.set(name, body.slice(equals + 1));
         continue;
       }
+      if (BOOLEAN_FLAGS.has(name)) {
+        flags.set(name, true);
+        continue;
+      }
       const value = argv[index + 1];
+      if (name === "resume" && (value === undefined || value.startsWith("--"))) {
+        flags.set(name, true);
+        continue;
+      }
       if (value === undefined || value.startsWith("--")) {
         throw new UsageError(`--${name} requires a value`);
       }
@@ -217,6 +246,16 @@ function preflight(positionals, flags) {
     }
   }
 
+  if (command === "history") {
+    const action = positionals[1] ?? "list";
+    if (!["list", "clear", "on", "off", "retention"].includes(action)) {
+      throw new UsageError(`unknown history action: ${action}`);
+    }
+    if (action === "retention" && !/^\d+$/.test(positionals[2] ?? "")) {
+      throw new UsageError("history retention requires a number of days");
+    }
+  }
+
   if (command === "call") {
     const methodRaw = positionals[1];
     const path = positionals[2];
@@ -268,6 +307,7 @@ async function resolveSettings(flags, deps) {
     token: token || null,
     timeoutMs,
     model: flags.has("model") ? flags.get("model") : config.model,
+    agent: flags.has("agent") ? flags.get("agent") : config.agent,
     endpoint: flags.has("endpoint") ? flags.get("endpoint") : config.endpoint,
     chatPath: flags.has("chat-path") ? flags.get("chat-path") : config.chatPath,
   };
@@ -400,6 +440,7 @@ async function commandConfig(positionals, context, deps, write, flags) {
     if (flags.has("chat-path")) patch.chatPath = flags.get("chat-path");
     if (flags.has("endpoint")) patch.endpoint = flags.get("endpoint");
     if (flags.has("model")) patch.model = flags.get("model");
+    if (flags.has("agent")) patch.agent = flags.get("agent");
     if (flags.has("timeout")) {
       const timeoutMs = Number(flags.get("timeout"));
       if (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 120000) {
@@ -446,6 +487,7 @@ export async function runCli(argv, options = {}) {
     signal: options.signal,
     stdinIsTTY: options.stdinIsTTY ?? Boolean(process.stdin.isTTY),
     readSecret: options.readSecret ?? readStdin,
+    interactiveRunner: options.interactiveRunner,
   };
 
   const write = (text) => deps.stdout(text.endsWith("\n") ? text : `${text}\n`);
@@ -485,6 +527,7 @@ export async function runCli(argv, options = {}) {
       signal: deps.signal,
       stdinIsTTY: deps.stdinIsTTY,
       readSecret: deps.readSecret,
+      interactiveRunner: deps.interactiveRunner,
     };
 
     if (command === "config") {
@@ -501,6 +544,8 @@ export async function runCli(argv, options = {}) {
         return await product.projects(ctx);
       case "status":
         return await product.status(ctx);
+      case "history":
+        return await product.history(ctx);
       case "login":
         return await product.login(ctx);
       case "logout":

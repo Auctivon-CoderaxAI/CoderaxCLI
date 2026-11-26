@@ -1,6 +1,7 @@
 import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { verifySecurePath } from "./secure-store.js";
 
 export class ConfigError extends Error {
   constructor(code, message) {
@@ -103,6 +104,10 @@ export async function loadConfig({ env = process.env, filePath, readFileImpl = r
     chatPath: env.CODERAX_CHAT_PATH?.trim() || stored.chatPath || DEFAULT_CHAT_PATH,
     endpoint: env.CODERAX_ENDPOINT?.trim() || stored.endpoint || DEFAULT_ENDPOINT,
     model: env.CODERAX_MODEL?.trim() || stored.model || "",
+    agent: env.CODERAX_AGENT?.trim() || stored.agent || "",
+    history: stored.history !== null && typeof stored.history === "object" && !Array.isArray(stored.history)
+      ? stored.history
+      : {},
     output: stored.output || "text",
     account: typeof stored.account === "string" ? stored.account : null,
   };
@@ -118,6 +123,8 @@ export async function saveConfig(
     unlinkImpl = unlink,
     mkdirImpl = mkdir,
     chmodImpl = chmod,
+    verifyImpl = verifySecurePath,
+    platform = process.platform,
   } = {},
 ) {
   const path = filePath ?? configPath();
@@ -130,6 +137,12 @@ export async function saveConfig(
   if (patch.chatPath !== undefined) next.chatPath = String(patch.chatPath);
   if (patch.endpoint !== undefined) next.endpoint = String(patch.endpoint);
   if (patch.model !== undefined) next.model = String(patch.model);
+  if (patch.agent !== undefined) next.agent = String(patch.agent);
+  if (patch.history !== undefined) {
+    next.history = patch.history === null || typeof patch.history !== "object" || Array.isArray(patch.history)
+      ? {}
+      : { ...patch.history };
+  }
   if (patch.output !== undefined) next.output = String(patch.output);
   if (patch.account !== undefined) next.account = patch.account === null ? null : String(patch.account);
 
@@ -158,6 +171,16 @@ export async function saveConfig(
     throw new ConfigError("CONFIG_WRITE_FAILED", `could not write ${path} atomically`);
   }
 
+  // A written file is not proof of a private file. Verify POSIX mode and
+  // ownership, macOS ACLs, or the Windows ACL before reporting success.
+  const verification = await verifyImpl(path, { platform });
+  if (!verification?.ok) {
+    throw new ConfigError(
+      "CONFIG_PERMISSIONS",
+      `refusing to accept the config file: ${verification?.detail ?? "permission verification failed"}`,
+    );
+  }
+
   return { path, config: next };
 }
 
@@ -170,6 +193,8 @@ export function describeConfig(config) {
     chatPath: config.chatPath,
     endpoint: config.endpoint,
     model: config.model,
+    agent: config.agent ?? "",
+    history: config.history ?? {},
     account: config.account ?? null,
     output: config.output,
   };
