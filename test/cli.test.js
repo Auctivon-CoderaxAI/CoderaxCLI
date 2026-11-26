@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, symlink } from "node:fs/promises";
+import { mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -99,12 +99,21 @@ test("missing base URL fails without leaking configuration", async () => {
   assert.match(io.err(), /BASE_URL_REQUIRED/i);
 });
 
-test("config set persists values and never prints the token", async () => {
+test("config rejects token arguments and persists no credentials", async () => {
   const io = capture();
   const env = await tempEnv();
 
-  const setCode = await runCli(
+  const rejected = capture();
+  const rejectedCode = await runCli(
     ["config", "set", "--base-url", "https://coderax.example.com", "--token", TOKEN],
+    { env, stdout: rejected.stdout, stderr: rejected.stderr },
+  );
+  assert.equal(rejectedCode, 2);
+  assert.match(rejected.err(), /not accepted/);
+  assert.equal(rejected.out().includes(TOKEN), false);
+
+  const setCode = await runCli(
+    ["config", "set", "--base-url", "https://coderax.example.com"],
     { env, stdout: io.stdout, stderr: io.stderr },
   );
   assert.equal(setCode, 0);
@@ -112,7 +121,7 @@ test("config set persists values and never prints the token", async () => {
 
   const stored = JSON.parse(await readFile(env.CODERAX_CONFIG, "utf8"));
   assert.equal(stored.baseUrl, "https://coderax.example.com");
-  assert.equal(stored.token, TOKEN);
+  assert.equal(Object.hasOwn(stored, "token"), false);
 
   const showIo = capture();
   const showCode = await runCli(["config", "show", "--json"], {
@@ -122,8 +131,57 @@ test("config set persists values and never prints the token", async () => {
   });
   assert.equal(showCode, 0);
   const shown = JSON.parse(showIo.out());
-  assert.equal(shown.tokenConfigured, true);
+  assert.equal(shown.tokenConfigured, false);
   assert.equal(showIo.out().includes(TOKEN), false);
+});
+
+test("config set refuses to move CODERAX_TOKEN to a new base URL", async () => {
+  const io = capture();
+  const env = { ...(await tempEnv()), CODERAX_TOKEN: TOKEN };
+  const code = await runCli(["config", "set", "--base-url", "https://coderax.test"], {
+    env,
+    stdout: io.stdout,
+    stderr: io.stderr,
+  });
+  assert.equal(code, 2);
+  assert.match(io.err(), /unset it before changing the base URL/);
+  assert.equal(io.out().includes(TOKEN), false);
+  assert.equal(io.err().includes(TOKEN), false);
+});
+
+test("a legacy token without a base URL can be cleared by configuring one", async () => {
+  const env = await tempEnv();
+  await writeFile(env.CODERAX_CONFIG, JSON.stringify({ token: TOKEN }), "utf8");
+  const io = capture();
+
+  const code = await runCli(["config", "set", "--base-url", "https://coderax.test"], {
+    env,
+    stdout: io.stdout,
+    stderr: io.stderr,
+  });
+  assert.equal(code, 0);
+  assert.match(io.err(), /removed the legacy plaintext token/);
+  const stored = JSON.parse(await readFile(env.CODERAX_CONFIG, "utf8"));
+  assert.equal(stored.baseUrl, "https://coderax.test");
+  assert.equal(Object.hasOwn(stored, "token"), false);
+  assert.equal(io.out().includes(TOKEN), false);
+  assert.equal(io.err().includes(TOKEN), false);
+});
+
+test("a token is never accepted as a login argument", async () => {
+  for (const argv of [["login", "--with-token", TOKEN], ["login", `--with-token=${TOKEN}`]]) {
+    const io = capture();
+    const env = await tempEnv();
+    const code = await runCli(argv, {
+      env,
+      stdout: io.stdout,
+      stderr: io.stderr,
+    });
+    assert.equal(code, 2);
+    assert.match(io.err(), /positional arguments|does not take a value/);
+    assert.equal(io.out().includes(TOKEN), false);
+    assert.equal(io.err().includes(TOKEN), false);
+  }
 });
 
 test("config set rejects an insecure remote URL", async () => {
@@ -295,6 +353,7 @@ test("missing operations are reported, not guessed", async () => {
   const { port } = server.address();
   const env = await tempEnv();
   env.CODERAX_BASE_URL = `http://127.0.0.1:${port}`;
+  env.CODERAX_TOKEN = TOKEN;
   const io = capture();
   try {
     const code = await runCli(["agents"], {

@@ -11,6 +11,7 @@ export class ConfigError extends Error {
 }
 
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
+const SECRET_FIELDS = Object.freeze(["token", "accessToken", "refreshToken", "idToken", "password", "clientSecret", "apiKey"]);
 export const DEFAULT_TIMEOUT_MS = 15000;
 export const DEFAULT_CHAT_PATH = "/api/ask/agents";
 export const DEFAULT_ENDPOINT = "agents";
@@ -46,7 +47,7 @@ export function normalizeBaseUrl(raw) {
     throw new ConfigError("BASE_URL_INVALID", "base URL must be an absolute URL, for example https://coderax.example.com");
   }
   if (url.username !== "" || url.password !== "") {
-    throw new ConfigError("BASE_URL_CREDENTIALS", "base URL must not embed credentials; use --token or CODERAX_TOKEN");
+    throw new ConfigError("BASE_URL_CREDENTIALS", "base URL must not embed credentials; use `coderax login` or CODERAX_TOKEN");
   }
   const host = url.hostname.replace(/^\[|\]$/g, "");
   const loopback = LOOPBACK_HOSTS.has(host);
@@ -87,7 +88,9 @@ export async function loadConfig({ env = process.env, filePath, readFileImpl = r
   const stored = await readStoredConfig(path, readFileImpl);
 
   const baseUrlRaw = overrides.baseUrl ?? envText(env.CODERAX_BASE_URL) ?? stored.baseUrl;
-  const token = env.CODERAX_TOKEN?.trim() || stored.token || null;
+  // The config file never supplies a token. `stored.token` is reported only as
+  // a legacy flag so `auth status` and migration can clean it up.
+  const token = envText(env.CODERAX_TOKEN) ?? null;
   const timeoutRaw = overrides.timeoutMs ?? envText(env.CODERAX_TIMEOUT_MS) ?? stored.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const timeoutMs = Number(timeoutRaw);
 
@@ -104,8 +107,58 @@ export async function loadConfig({ env = process.env, filePath, readFileImpl = r
     endpoint: env.CODERAX_ENDPOINT?.trim() || stored.endpoint || DEFAULT_ENDPOINT,
     model: env.CODERAX_MODEL?.trim() || stored.model || "",
     output: stored.output || "text",
-    account: typeof stored.account === "string" ? stored.account : null,
+    hasLegacyPlaintextToken: SECRET_FIELDS.some(
+      (field) => typeof stored[field] === "string" && stored[field] !== "",
+    ),
   };
+}
+
+/** Read a legacy plaintext token only so it can be migrated and removed. */
+export async function readLegacyToken({ filePath, readFileImpl = readFile } = {}) {
+  const path = filePath ?? configPath();
+  const stored = await readStoredConfig(path, readFileImpl);
+  // Older builds used `accessToken`; both are migrated as an access token. A
+  // lone refresh token is not usable as a session and is only reported/removed.
+  const token = [stored.token, stored.accessToken]
+    .find((value) => typeof value === "string" && value.trim() !== "");
+  return typeof token === "string" ? token.trim() : null;
+}
+
+async function writeStoredConfig(
+  path,
+  next,
+  {
+    writeFileImpl = writeFile,
+    renameImpl = rename,
+    unlinkImpl = unlink,
+    mkdirImpl = mkdir,
+    chmodImpl = chmod,
+  } = {},
+) {
+  await mkdirImpl(dirname(path), { recursive: true, mode: 0o700 });
+
+  // Write a fresh 0600 file and atomically replace the config, so an existing
+  // world-readable file never receives secret material even for an instant.
+  const tempPath = `${path}.${process.pid}.${Date.now().toString(36)}.tmp`;
+  try {
+    await writeFileImpl(tempPath, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+    try {
+      await chmodImpl(tempPath, 0o600);
+    } catch {
+      if (process.platform !== "win32") {
+        throw new ConfigError("CONFIG_PERMISSIONS", `could not restrict permissions on ${tempPath}`);
+      }
+    }
+    await renameImpl(tempPath, path);
+  } catch (error) {
+    try {
+      await unlinkImpl(tempPath);
+    } catch {
+      // Nothing to clean up.
+    }
+    if (error instanceof ConfigError) throw error;
+    throw new ConfigError("CONFIG_WRITE_FAILED", `could not write ${path} atomically`);
+  }
 }
 
 export async function saveConfig(
@@ -121,44 +174,53 @@ export async function saveConfig(
   } = {},
 ) {
   const path = filePath ?? configPath();
+
+  for (const field of SECRET_FIELDS) {
+    if (Object.hasOwn(patch, field) && patch[field] !== undefined) {
+      throw new ConfigError(
+        "CONFIG_SECRET_REJECTED",
+        `refusing to write ${field} to the plaintext config; credentials belong in the OS credential store`,
+      );
+    }
+  }
+
   const stored = await readStoredConfig(path, readFileImpl);
   const next = { ...stored };
+  // No credential field may survive an unrelated config write, including
+  // fields written by an older CLI that kept tokens in this file.
+  for (const field of SECRET_FIELDS) delete next[field];
 
   if (patch.baseUrl !== undefined) next.baseUrl = normalizeBaseUrl(patch.baseUrl).baseUrl;
-  if (patch.token !== undefined) next.token = patch.token === null ? null : String(patch.token);
   if (patch.timeoutMs !== undefined) next.timeoutMs = Number(patch.timeoutMs);
   if (patch.chatPath !== undefined) next.chatPath = String(patch.chatPath);
   if (patch.endpoint !== undefined) next.endpoint = String(patch.endpoint);
   if (patch.model !== undefined) next.model = String(patch.model);
   if (patch.output !== undefined) next.output = String(patch.output);
-  if (patch.account !== undefined) next.account = patch.account === null ? null : String(patch.account);
 
-  await mkdirImpl(dirname(path), { recursive: true, mode: 0o700 });
-
-  // Write a fresh 0600 file and atomically replace the config, so an existing
-  // world-readable file never receives the token even for an instant.
-  const tempPath = `${path}.${process.pid}.${Date.now().toString(36)}.tmp`;
-  try {
-    await writeFileImpl(tempPath, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-    try {
-      await chmodImpl(tempPath, 0o600);
-    } catch (error) {
-      if (process.platform !== "win32") {
-        throw new ConfigError("CONFIG_PERMISSIONS", `could not restrict permissions on ${tempPath}`);
-      }
-    }
-    await renameImpl(tempPath, path);
-  } catch (error) {
-    try {
-      await unlinkImpl(tempPath);
-    } catch {
-      // Nothing to clean up.
-    }
-    if (error instanceof ConfigError) throw error;
-    throw new ConfigError("CONFIG_WRITE_FAILED", `could not write ${path} atomically`);
-  }
-
+  await writeStoredConfig(path, next, { writeFileImpl, renameImpl, unlinkImpl, mkdirImpl, chmodImpl });
   return { path, config: next };
+}
+
+/** Remove a legacy plaintext token in place, without ever rewriting it. */
+export async function stripLegacyToken({
+  filePath,
+  readFileImpl = readFile,
+  writeFileImpl = writeFile,
+  renameImpl = rename,
+  unlinkImpl = unlink,
+  mkdirImpl = mkdir,
+  chmodImpl = chmod,
+} = {}) {
+  const path = filePath ?? configPath();
+  const stored = await readStoredConfig(path, readFileImpl);
+  const hadSecret = SECRET_FIELDS.some(
+    (field) => typeof stored[field] === "string" && stored[field] !== "",
+  );
+  if (!SECRET_FIELDS.some((field) => Object.hasOwn(stored, field))) return false;
+  const next = { ...stored };
+  for (const field of SECRET_FIELDS) delete next[field];
+  await writeStoredConfig(path, next, { writeFileImpl, renameImpl, unlinkImpl, mkdirImpl, chmodImpl });
+  return hadSecret;
 }
 
 export function describeConfig(config) {
@@ -166,11 +228,11 @@ export function describeConfig(config) {
     configPath: config.configPath,
     baseUrl: config.baseUrl ?? null,
     tokenConfigured: Boolean(config.token),
+    legacyPlaintextToken: Boolean(config.hasLegacyPlaintextToken),
     timeoutMs: config.timeoutMs,
     chatPath: config.chatPath,
     endpoint: config.endpoint,
     model: config.model,
-    account: config.account ?? null,
     output: config.output,
   };
 }

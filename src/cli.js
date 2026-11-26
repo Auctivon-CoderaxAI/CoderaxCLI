@@ -5,12 +5,15 @@ import {
   ConfigError,
   describeConfig,
   loadConfig,
+  normalizeBaseUrl,
   saveConfig,
 } from "./config.js";
-import { CoderaxError, formatJson, redact, request } from "./client.js";
+import { CoderaxError, formatJson, redact } from "./client.js";
 import { discoverOpenApi, findOperation } from "./discover.js";
 import * as product from "./product-commands.js";
 import { VERSION } from "./version.js";
+import { createCredentialStore, credentialAccount } from "./credentials.js";
+import { authorizedRequest, optionalSession, resolveSession } from "./auth.js";
 
 export { VERSION };
 
@@ -24,13 +27,16 @@ Usage:
   coderax agents [--json]
   coderax cloud [--json]
   coderax projects [--json]
-  coderax login [--token <token>] [--json]
+  coderax login [--no-browser] [--json]
+  coderax login --with-token [--json]
   coderax logout [--json]
+  coderax whoami [--json]
+  coderax auth status [--json]
   coderax status [--json]
   coderax config show|list [--json]
   coderax config get <key>
   coderax config set <key> <value>
-  coderax config set [--base-url <url>] [--token <token>] [--timeout <ms>]
+  coderax config set [--base-url <url>] [--timeout <ms>]
   coderax doctor [--json]
   coderax update [--json]
   coderax health [--json]
@@ -39,7 +45,8 @@ Usage:
 
 Global options:
   --base-url <url>   Override the deployment URL (HTTPS, or HTTP on loopback)
-  --token <token>    Override the configured bearer token
+  --with-token       Read a deployment token from stdin (login only)
+  --no-browser       Do not open a browser for device login
   --timeout <ms>     Per-request timeout, 100-120000
   --model <id>       Override the model for one invocation
   --endpoint <name>  Override the chat endpoint name
@@ -52,12 +59,23 @@ Global options:
 
 Environment:
   CODERAX_BASE_URL, CODERAX_TOKEN, CODERAX_TIMEOUT_MS, CODERAX_CONFIG,
-  CODERAX_CONFIG_DIR, CODERAX_CHAT_PATH, CODERAX_ENDPOINT, CODERAX_MODEL
+  CODERAX_CONFIG_DIR, CODERAX_CHAT_PATH, CODERAX_ENDPOINT, CODERAX_MODEL,
+  CODERAX_CREDENTIAL_STORE
+
+Authentication:
+  \`coderax login\` uses device authorization on the verified deployment origin.
+  Credentials are stored in the OS credential store (macOS Keychain, libsecret,
+  or Windows DPAPI), never in config.json. Tokens are never accepted as command
+  arguments because arguments are recorded in shell history. For automation use
+  CODERAX_TOKEN or \`coderax login --with-token\` with a piped deployment token.
+  The CLI never accepts or stores provider API keys; those belong in an
+  authorized cloud secret store.
 
 Discovery: agents, models, and openapi use the deployment's OpenAPI document.
-health probes fixed paths, login checks /api/user, doctor probes the same health
-endpoints, and chat and work use the configured chat path. call uses the path you supply.
-A missing discovered route fails with OPERATION_NOT_FOUND.
+health probes fixed paths, login checks the deployment's auth contract, doctor
+probes the same health endpoints, and chat and work use the configured chat path.
+call uses the path you supply. A missing discovered route fails with
+OPERATION_NOT_FOUND.
 `;
 
 const EXIT = Object.freeze({
@@ -77,7 +95,7 @@ const CONFIG_KEYS = Object.freeze(Object.assign(Object.create(null), {
   endpoint: "endpoint",
   model: "model",
 }));
-const CONFIG_FLAGS = ["base-url", "token", "timeout", "chat-path", "endpoint", "model"];
+const CONFIG_FLAGS = ["base-url", "timeout", "chat-path", "endpoint", "model"];
 
 const KNOWN_COMMANDS = new Set([
   "config",
@@ -93,6 +111,8 @@ const KNOWN_COMMANDS = new Set([
   "projects",
   "login",
   "logout",
+  "whoami",
+  "auth",
   "status",
   "doctor",
   "update",
@@ -104,7 +124,8 @@ const KNOWN_FLAGS = new Set([
   "version",
   "json",
   "base-url",
-  "token",
+  "with-token",
+  "no-browser",
   "timeout",
   "data",
   "model",
@@ -145,11 +166,27 @@ export function parseArgv(argv) {
       flags.set("no-color", true);
       continue;
     }
+    if (arg.startsWith("--with-token=") || arg.startsWith("--no-browser=")) {
+      throw new UsageError(`${arg.slice(0, arg.indexOf("="))} is a flag and does not take a value`);
+    }
+    if (arg === "--with-token") {
+      flags.set("with-token", true);
+      continue;
+    }
+    if (arg === "--no-browser") {
+      flags.set("no-browser", true);
+      continue;
+    }
     if (arg.startsWith("--")) {
       const body = arg.slice(2);
       const equals = body.indexOf("=");
       const name = equals === -1 ? body : body.slice(0, equals);
       if (!KNOWN_FLAGS.has(name)) {
+        if (/(token|secret|password|api-?key)/i.test(name)) {
+          throw new UsageError(
+            `--${name} is not accepted because command arguments are recorded in shell history; use \`coderax login\`, \`coderax login --with-token\`, or CODERAX_TOKEN`,
+          );
+        }
         throw new UsageError(`unknown option: --${name}`);
       }
       if (equals !== -1) {
@@ -191,6 +228,35 @@ function preflight(positionals, flags) {
     throw new UsageError(`unknown command: ${command}. Run \`coderax --help\`.`);
   }
 
+  if (command === "auth") {
+    const action = positionals[1] ?? "status";
+    if (!["status", "login", "logout", "whoami"].includes(action)) {
+      throw new UsageError(`unknown auth action: ${action}`);
+    }
+    if (positionals.length > 2) throw new UsageError("auth accepts one action");
+  }
+
+  const loginCommand = command === "login" || (command === "auth" && (positionals[1] ?? "status") === "login");
+  if (flags.has("with-token") && !loginCommand) {
+    throw new UsageError("--with-token is only valid with `coderax login`");
+  }
+  if (flags.has("no-browser") && !loginCommand) {
+    throw new UsageError("--no-browser is only valid with `coderax login`");
+  }
+  if (loginCommand && flags.has("with-token") && flags.has("no-browser")) {
+    throw new UsageError("--with-token and --no-browser cannot be combined");
+  }
+  if (command === "login" && positionals.length > 1) {
+    throw new UsageError("login accepts no positional arguments; pipe the token to `coderax login --with-token` instead");
+  }
+  const noArgCommands = new Set([
+    "logout", "whoami", "status", "doctor", "update", "products", "cloud", "projects",
+    "health", "openapi", "agents", "models",
+  ]);
+  if (noArgCommands.has(command) && positionals.length > 1) {
+    throw new UsageError(`${command} accepts no arguments`);
+  }
+
   if (command === "config") {
     const action = positionals[1] ?? "show";
     if (!["show", "list", "get", "set"].includes(action)) {
@@ -203,7 +269,7 @@ function preflight(positionals, flags) {
       const key = positionals[2];
       const hasFlags = CONFIG_FLAGS.some((name) => flags.has(name));
       if (!hasFlags && !key) {
-        throw new UsageError("config set requires a key and value, or --base-url/--token/--timeout");
+        throw new UsageError("config set requires a key and value, or --base-url/--timeout/--model");
       }
       if (key && hasFlags) {
         throw new UsageError("config set accepts either a key and value or flags, not both");
@@ -257,7 +323,9 @@ async function resolveSettings(flags, deps) {
   });
 
   const baseUrl = config.baseUrl;
-  const token = flags.has("token") ? flags.get("token") : config.token;
+  // Only CODERAX_TOKEN supplies a token at this layer; stored sessions are
+  // resolved from the OS credential store by the auth module.
+  const token = config.token;
   const timeoutMs = config.timeoutMs;
 
   // `config` commands must work on a fresh install, so the base URL is only
@@ -284,7 +352,12 @@ function requireBaseUrl(context) {
 }
 
 async function commandHealth(context, deps, write, flags) {
-  const { path, response } = await product.probeHealth({ ...context, fetchImpl: deps.fetchImpl });
+  const session = await optionalSession(context);
+  const { path, response } = await product.probeHealth({
+    ...context,
+    token: session?.accessToken,
+    fetchImpl: deps.fetchImpl,
+  });
   const body = responseBody(response);
   emit(
     write,
@@ -295,12 +368,18 @@ async function commandHealth(context, deps, write, flags) {
 }
 
 async function commandOpenapi(context, deps, write, flags) {
-  const discovery = await discoverOpenApi({ ...context, fetchImpl: deps.fetchImpl });
+  const session = await optionalSession(context);
+  const secrets = [context.token, session?.accessToken].filter(Boolean);
+  const discovery = await discoverOpenApi({
+    ...context,
+    token: session?.accessToken,
+    fetchImpl: deps.fetchImpl,
+  });
   const displayOperations = discovery.operations.map((operation) => ({
     ...operation,
-    path: redact(operation.path, context.token),
-    operationId: operation.operationId ? redact(operation.operationId, context.token) : null,
-    summary: operation.summary ? redact(operation.summary, context.token) : null,
+    path: redact(operation.path, secrets),
+    operationId: operation.operationId ? redact(operation.operationId, secrets) : null,
+    summary: operation.summary ? redact(operation.summary, secrets) : null,
   }));
   const lines = displayOperations
     .slice(0, 50)
@@ -318,7 +397,13 @@ async function commandOpenapi(context, deps, write, flags) {
 }
 
 async function commandResource(kind, context, deps, write, flags) {
-  const discovery = await discoverOpenApi({ ...context, fetchImpl: deps.fetchImpl });
+  const requiredScope = kind === "agents" ? "coderax:agents:read" : "coderax:models:read";
+  const session = await resolveSession(context, { requiredScope });
+  const discovery = await discoverOpenApi({
+    ...context,
+    token: session.accessToken,
+    fetchImpl: deps.fetchImpl,
+  });
   const matcher = kind === "agents" ? /\/agents\/?$/i : /\/models\/?$/i;
   const operation = findOperation(discovery.operations, matcher);
 
@@ -329,13 +414,13 @@ async function commandResource(kind, context, deps, write, flags) {
     );
   }
 
-  const response = await request({
-    ...context,
-    path: operation.path,
-    fetchImpl: deps.fetchImpl,
-  });
+  const response = await authorizedRequest(
+    context,
+    { path: operation.path },
+    { requiredScope },
+  );
   const payload = responseBody(response);
-  const displayPath = redact(operation.path, context.token);
+  const displayPath = redact(operation.path, [context.token, session.accessToken]);
 
   emit(
     write,
@@ -347,7 +432,12 @@ async function commandResource(kind, context, deps, write, flags) {
 
 async function commandCall(call, context, deps, write, flags) {
   const { method, path, body } = call;
-  const response = await request({ ...context, path, method, body, fetchImpl: deps.fetchImpl });
+  const requiredScope = "coderax:call";
+  const response = await authorizedRequest(
+    context,
+    { path, method, body },
+    { requiredScope },
+  );
   const payload = responseBody(response);
   const displayPath = redact(path, context.token);
 
@@ -367,9 +457,12 @@ async function commandConfig(positionals, context, deps, write, flags) {
     emit(
       write,
       flags,
-      `config: ${described.configPath}\nbase URL: ${described.baseUrl ?? "(not set)"}\ntoken: ${described.tokenConfigured ? "configured" : "not configured"}\ntimeout: ${described.timeoutMs}ms\nchat path: ${described.chatPath}\nendpoint: ${described.endpoint}\nmodel: ${described.model || "(not set)"}\n`,
+      `config: ${described.configPath}\nbase URL: ${described.baseUrl ?? "(not set)"}\ntoken: ${described.tokenConfigured ? "configured via environment" : "not in config (run `coderax login`)"}\ntimeout: ${described.timeoutMs}ms\nchat path: ${described.chatPath}\nendpoint: ${described.endpoint}\nmodel: ${described.model || "(not set)"}\n`,
       described,
     );
+    if (described.legacyPlaintextToken) {
+      deps.stderr(`warning: ${described.configPath} contains a legacy plaintext token; run \`coderax login --with-token\` to migrate it or delete the token field\n`);
+    }
     return;
   }
 
@@ -396,7 +489,6 @@ async function commandConfig(positionals, context, deps, write, flags) {
     patch[CONFIG_KEYS[key]] = value;
   } else {
     if (flags.has("base-url")) patch.baseUrl = flags.get("base-url");
-    if (flags.has("token")) patch.token = flags.get("token");
     if (flags.has("chat-path")) patch.chatPath = flags.get("chat-path");
     if (flags.has("endpoint")) patch.endpoint = flags.get("endpoint");
     if (flags.has("model")) patch.model = flags.get("model");
@@ -409,27 +501,108 @@ async function commandConfig(positionals, context, deps, write, flags) {
     }
   }
   if (Object.keys(patch).length === 0) {
-    throw new UsageError("config set requires a key and value, or --base-url/--token/--timeout");
+    throw new UsageError("config set requires a key and value, or --base-url/--timeout/--model");
+  }
+
+  const storedSettings = await loadConfig({ env: {}, filePath: context.configPath });
+  const storedBase = storedSettings.baseUrl;
+  // A legacy token can normally be migrated because login knows the stored
+  // deployment. If no deployment is configured yet, allow setting the base URL
+  // (saveConfig removes the plaintext token) so the user is not locked out.
+  const repairingMissingBase = patch.baseUrl !== undefined && !storedBase;
+  if (context.hasLegacyPlaintextToken && !repairingMissingBase) {
+    throw new CoderaxError(
+      "LEGACY_TOKEN_MIGRATION_REQUIRED",
+      `a legacy plaintext token is present in ${context.configPath}; run \`coderax login --with-token\` to move it into the OS credential store before changing configuration`,
+    );
+  }
+
+  // A credential is bound to the deployment it was issued for. Changing the
+  // stored URL without signing out would leave the old secret behind and make
+  // the next request look like an origin mismatch.
+  if (patch.baseUrl !== undefined) {
+    const nextBase = normalizeBaseUrl(patch.baseUrl).baseUrl;
+    if (context.token && nextBase !== storedBase) {
+      throw new CoderaxError(
+        "TOKEN_ORIGIN_OVERRIDE",
+        "CODERAX_TOKEN is configured for the current deployment; unset it before changing the base URL",
+      );
+    }
+    if (storedBase && nextBase !== storedBase && context.credentialStore?.available) {
+      let existing = null;
+      try {
+        existing = await context.credentialStore.get(credentialAccount(storedBase));
+      } catch (error) {
+        throw new CoderaxError(
+          "CREDENTIAL_READ_FAILED",
+          `could not verify stored credentials before changing the base URL: ${error.message}`,
+        );
+      }
+      if (existing) {
+        throw new CoderaxError(
+          "SIGN_OUT_FIRST",
+          "credentials are stored for the current deployment; run `coderax logout` before changing the base URL",
+        );
+      }
+    }
   }
 
   const saved = await saveConfig(patch, {
     ...(deps.saveDeps ?? {}),
     filePath: context.configPath,
   });
+  if (context.hasLegacyPlaintextToken) {
+    deps.stderr(`warning: removed the legacy plaintext token from ${saved.path}; run \`coderax login\` to sign in again\n`);
+  }
   const described = describeConfig(
     await loadConfig({ env: deps.env, filePath: saved.path }),
   );
 
-  emit(write, flags, `wrote ${saved.path}\nbase URL: ${described.baseUrl ?? "(not set)"}\ntoken: ${described.tokenConfigured ? "configured" : "not configured"}\n`, described);
+  emit(
+    write,
+    flags,
+    `wrote ${saved.path}\nbase URL: ${described.baseUrl ?? "(not set)"}\ntoken: ${described.tokenConfigured ? "configured via environment" : "not in config"}\n`,
+    described,
+  );
 }
+
+const AUTH_EXIT_CODES = new Set([
+  "UNAUTHENTICATED",
+  "SESSION_EXPIRED",
+  "INSUFFICIENT_SCOPE",
+  "FORBIDDEN",
+  "LOGIN_REJECTED",
+  "TOKEN_INVALID",
+  "TOKEN_ISSUER_MISMATCH",
+  "TOKEN_SUBJECT_MISMATCH",
+  "TOKEN_NOT_YET_VALID",
+  "DEVICE_ACCESS_DENIED",
+  "CREDENTIAL_ORIGIN_MISMATCH",
+  "CREDENTIAL_SCOPE_ESCALATION",
+  "REFRESH_UNSUPPORTED",
+  "IDENTITY_MISMATCH",
+  "HTTP_401",
+  "HTTP_403",
+]);
+
+const SETUP_EXIT_CODES = new Set([
+  "CREDENTIAL_STORE_UNAVAILABLE",
+  "CREDENTIAL_STORE_LOCKED",
+  "TLS_VERIFICATION_DISABLED",
+  "TOKEN_ORIGIN_OVERRIDE",
+  "CONFIG_SECRET_REJECTED",
+  "SIGN_OUT_FIRST",
+  "LEGACY_TOKEN_MIGRATION_REQUIRED",
+]);
 
 function exitFor(error) {
   if (error instanceof UsageError || error instanceof ConfigError || error.code === "USAGE") {
     return EXIT.usage;
   }
+  if (AUTH_EXIT_CODES.has(error.code)) return EXIT.unauthenticated;
+  if (SETUP_EXIT_CODES.has(error.code)) return EXIT.usage;
   if (error.code === "UNAVAILABLE") return EXIT.unavailable;
   if (error.code === "CANCELLED") return EXIT.cancelled;
-  if (error.code === "HTTP_401" || error.code === "HTTP_403") return EXIT.unauthenticated;
   if (error.code === "HTTP_404") return EXIT.notFound;
   if (error.code === "REQUEST_TIMEOUT" || error.code === "REQUEST_FAILED") return EXIT.network;
   return EXIT.failure;
@@ -447,6 +620,8 @@ export async function runCli(argv, options = {}) {
     stdinIsTTY: options.stdinIsTTY ?? Boolean(process.stdin.isTTY),
     readSecret: options.readSecret ?? readStdin,
   };
+  const credentialStore = options.credentialStore ?? createCredentialStore({ env: deps.env });
+  const authDeps = options.authDeps ?? {};
 
   const write = (text) => deps.stdout(text.endsWith("\n") ? text : `${text}\n`);
   const raw = (text) => deps.stdout(String(text));
@@ -470,6 +645,7 @@ export async function runCli(argv, options = {}) {
     const { call } = preflight(positionals, flags);
 
     const settings = await resolveSettings(flags, deps);
+    settings.credentialStore = credentialStore;
     const [command] = positionals;
     const ctx = {
       ...settings,
@@ -485,6 +661,8 @@ export async function runCli(argv, options = {}) {
       signal: deps.signal,
       stdinIsTTY: deps.stdinIsTTY,
       readSecret: deps.readSecret,
+      credentialStore,
+      authDeps,
     };
 
     if (command === "config") {
@@ -505,6 +683,15 @@ export async function runCli(argv, options = {}) {
         return await product.login(ctx);
       case "logout":
         return await product.logout(ctx);
+      case "whoami":
+        return await product.whoami(ctx);
+      case "auth": {
+        const action = positionals[1] ?? "status";
+        if (action === "login") return await product.login(ctx);
+        if (action === "logout") return await product.logout(ctx);
+        if (action === "whoami") return await product.whoami(ctx);
+        return await product.authStatus(ctx);
+      }
       case "chat":
         return await product.chat(ctx);
       case "work":
@@ -523,7 +710,8 @@ export async function runCli(argv, options = {}) {
         break;
     }
 
-    const context = requireBaseUrl(settings);
+    requireBaseUrl(settings);
+    const context = ctx;
 
     switch (command) {
       case "health":

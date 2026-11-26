@@ -1,8 +1,19 @@
-import { PRODUCTS, STATUS_LABELS, getOrderedProducts } from "./product-registry.js";
-import { CoderaxError, request, streamRequest } from "./client.js";
+import { statSync } from "node:fs";
 import { dirname } from "node:path";
-import { configDir, loadConfig, maskToken, saveConfig } from "./config.js";
+import { PRODUCTS, STATUS_LABELS, getOrderedProducts } from "./product-registry.js";
+import { CoderaxError, request } from "./client.js";
+import { configDir } from "./config.js";
 import { VERSION } from "./version.js";
+import {
+  HEALTH_CANDIDATES,
+  authorizedStream,
+  deviceLogin,
+  localAuthStatus,
+  loginWithToken,
+  logoutSession,
+  resolveSession,
+  whoamiIdentity,
+} from "./auth.js";
 
 export const EXIT = Object.freeze({
   OK: 0,
@@ -35,14 +46,6 @@ function requireBase(ctx) {
     );
   }
 }
-
-function requireAuth(ctx) {
-  if (!ctx.settings.token) {
-    throw new CoderaxError("UNAUTHENTICATED", "not signed in; run `coderax login` first");
-  }
-}
-
-const HEALTH_CANDIDATES = ["/health", "/api/health", "/healthz"];
 
 export async function probeHealth({ baseUrl, token, timeoutMs, fetchImpl } = {}) {
   const attempts = [];
@@ -117,23 +120,34 @@ export async function projects(ctx) {
   return EXIT.UNAVAILABLE;
 }
 
+function sessionLabel(report) {
+  if (report.session === "active") return "active";
+  if (report.session === "expired") return "expired \u2014 run `coderax login`";
+  return "none \u2014 run `coderax login`";
+}
+
 export async function status(ctx) {
-  const settings = ctx.settings;
+  const report = await localAuthStatus(ctx);
   const payload = {
     version: VERSION,
-    baseUrl: settings.baseUrl || null,
-    authenticated: Boolean(settings.token),
-    token: maskToken(settings.token),
-    tokenSource: ctx.env.CODERAX_TOKEN
-      ? "environment"
-      : settings.token
-        ? "config file"
-        : "none",
-    account: settings.account ?? null,
-    configPath: settings.configPath,
+    baseUrl: report.baseUrl,
+    authenticated: report.authenticated,
+    session: report.session,
+    source: report.source,
+    token: report.tokenMask,
+    account: report.account,
+    subject: report.subject,
+    expiresAt: report.expiresAt,
+    expiresInSeconds: report.expiresInSeconds,
+    refreshable: report.refreshable,
+    scopes: report.scopes,
+    scopesKnown: report.scopesKnown,
+    credentialStore: report.credentialStore,
+    legacyPlaintextToken: report.legacyPlaintextToken,
+    configPath: report.configPath,
     configDir: configDir(ctx.env),
-    model: settings.model || null,
-    endpoint: settings.endpoint,
+    model: ctx.settings.model || null,
+    endpoint: ctx.settings.endpoint,
   };
 
   if (ctx.json) {
@@ -144,60 +158,179 @@ export async function status(ctx) {
   ctx.out(`Coderax CLI      ${VERSION}`);
   ctx.out(`API              ${payload.baseUrl ?? "(not configured)"}`);
   ctx.out(
-    `Authentication   ${payload.authenticated ? `yes (${payload.token}, via ${payload.tokenSource})` : "no \u2014 run `coderax login`"}`,
+    `Authentication   ${payload.authenticated ? `yes (${payload.token ?? "token"}, via ${payload.source})` : `no \u2014 ${sessionLabel(report)}`}`,
   );
   if (payload.account) ctx.out(`Account          ${payload.account}`);
+  ctx.out(
+    `Credentials      ${payload.credentialStore.available ? payload.credentialStore.name : `unavailable \u2014 ${payload.credentialStore.detail}`}`,
+  );
+  if (payload.expiresAt) {
+    ctx.out(`Expires          ${new Date(payload.expiresAt).toISOString()}`);
+  }
   ctx.out(`Config           ${payload.configPath}`);
+  if (payload.legacyPlaintextToken) {
+    ctx.err(
+      `warning: a legacy plaintext token is present in ${payload.configPath}; run \`coderax login --with-token\` to migrate it, or delete the token field`,
+    );
+  }
   return EXIT.OK;
+}
+
+/** `coderax auth status`: local credential and session report, no network. */
+export async function authStatus(ctx) {
+  const report = await localAuthStatus(ctx);
+
+  if (ctx.json) {
+    ctx.out(JSON.stringify(report, null, 2));
+    return EXIT.OK;
+  }
+
+  ctx.out(`Deployment       ${report.baseUrl ?? "(not configured)"}`);
+  ctx.out(`Session          ${sessionLabel(report)}`);
+  ctx.out(`Credential source ${report.source}`);
+  ctx.out(
+    `Credential store ${report.credentialStore.available ? `${report.credentialStore.name} (${report.credentialStore.detail})` : `unavailable \u2014 ${report.credentialStore.detail}`}`,
+  );
+  if (report.account) ctx.out(`Account          ${report.account}`);
+  ctx.out(
+    `Expiry           ${
+      report.expiresAt
+        ? `${new Date(report.expiresAt).toISOString()} (${report.expirySource}, ${report.expiresInSeconds}s remaining)`
+        : "not reported by the token"
+    }`,
+  );
+  ctx.out(`Refresh          ${report.refreshable ? "available" : "not available"}`);
+  ctx.out(`Scopes           ${report.scopesKnown ? report.scopes.join(" ") || "(none)" : "not reported by the deployment"}`);
+  if (report.originBound !== null) ctx.out(`Origin bound     ${report.originBound ? "yes" : "no \u2014 run `coderax login`"}`);
+  ctx.out(`Config           ${report.configPath}`);
+  if (report.legacyPlaintextToken) {
+    ctx.err(
+      `warning: a legacy plaintext token is present in ${report.configPath}; run \`coderax login --with-token\` to migrate it, or delete the token field`,
+    );
+  }
+  if (report.credentialError) ctx.err(`warning: ${report.credentialError.message}`);
+  return EXIT.OK;
+}
+
+function emitLogin(ctx, result) {
+  const payload = {
+    authenticated: true,
+    account: result.account ?? null,
+    subject: result.subject ?? null,
+    baseUrl: result.credential.baseUrl,
+    expiresAt: result.credential.expiresAt,
+    expirySource: result.credential.expirySource,
+    scopes: result.credential.scopes,
+    scopesKnown: result.credential.scopesKnown,
+    refreshable: Boolean(result.credential.refreshToken),
+    credentialStore: ctx.credentialStore.name,
+    warnings: result.warnings ?? [],
+  };
+
+  if (ctx.json) {
+    ctx.out(JSON.stringify(payload, null, 2));
+    return;
+  }
+
+  ctx.out(`Signed in${payload.account ? ` as ${payload.account}` : ""} to ${payload.baseUrl}.`);
+  ctx.out(
+    `Session expires ${payload.expiresAt ? new Date(payload.expiresAt).toISOString() : "at an unknown time"}; credentials are in ${payload.credentialStore}.`,
+  );
+  if (payload.scopesKnown) ctx.out(`Scopes: ${payload.scopes.join(" ") || "(none)"}`);
+  for (const warning of payload.warnings) ctx.err(`warning: ${warning}`);
 }
 
 export async function login(ctx) {
   requireBase(ctx);
-  const token = ctx.flags.get("token") || ctx.env.CODERAX_TOKEN || (await ctx.readSecret());
-  if (!token) {
-    throw new CoderaxError("USAGE", "no token provided; use `coderax login --token <token>` or pipe it on stdin");
+
+  if (ctx.flags.get("with-token")) {
+    const environmentToken = typeof ctx.env.CODERAX_TOKEN === "string"
+      ? ctx.env.CODERAX_TOKEN.trim()
+      : "";
+    const token = environmentToken || (await ctx.readSecret()).trim();
+    if (!token) {
+      throw new CoderaxError(
+        "USAGE",
+        "no token provided on stdin; pipe a deployment-issued session token to `coderax login --with-token` (never a provider API key)",
+      );
+    }
+    const result = await loginWithToken(ctx, token, { source: environmentToken ? "environment" : "stdin" });
+    emitLogin(ctx, result);
+    return EXIT.OK;
   }
 
-  let account = null;
-  try {
-    const user = await request({
-      baseUrl: ctx.settings.baseUrl,
-      token,
-      path: "/api/user",
-      timeoutMs: ctx.settings.timeoutMs,
-      fetchImpl: ctx.fetchImpl,
-    });
-    account = user.json?.email ?? user.json?.username ?? user.json?.name ?? null;
-  } catch (error) {
-    // A 404 means the deployment does not expose /api/user; anything else is a
-    // real rejection and must not be stored.
-    if (error?.status !== 404) throw error;
-  }
-
-  await saveConfig({ token, account, baseUrl: ctx.settings.baseUrl }, { filePath: ctx.settings.configPath });
-  ctx.out(
-    ctx.json
-      ? JSON.stringify({ authenticated: true, token: maskToken(token), account }, null, 2)
-      : `Signed in${account ? ` as ${account}` : ""}. Token stored with 0600 permissions.`,
-  );
+  const result = await deviceLogin(ctx, {
+    ...(ctx.authDeps ?? {}),
+    noBrowser: ctx.flags.has("no-browser"),
+    notify: (text) => (ctx.json ? ctx.err(text) : ctx.out(text)),
+  });
+  emitLogin(ctx, result);
   return EXIT.OK;
 }
 
 export async function logout(ctx) {
-  const stored = await loadConfig({ env: {}, filePath: ctx.settings.configPath });
-  const removed = Boolean(stored.token);
-  const environmentTokenActive = Boolean(ctx.env.CODERAX_TOKEN?.trim());
-  await saveConfig({ token: null, account: null }, { filePath: ctx.settings.configPath });
-  const message = environmentTokenActive
-    ? "Stored credentials cleared. CODERAX_TOKEN is still set; unset it to sign out of this environment."
-    : removed
-      ? "Signed out."
-      : "No stored credentials.";
-  ctx.out(
-    ctx.json
-      ? JSON.stringify({ removed, environmentTokenActive, message }, null, 2)
-      : message,
-  );
+  const result = await logoutSession(ctx);
+  const message = result.credentialRemovalFailed
+    ? "Could not fully remove the stored credential; see the warnings below."
+    : result.environmentTokenActive
+      ? "Stored credentials cleared. CODERAX_TOKEN is still set; unset it to sign out of this environment."
+      : result.removed || result.legacyRemoved
+        ? "Signed out."
+        : "No stored credentials.";
+
+  if (ctx.json) {
+    ctx.out(
+      JSON.stringify(
+        {
+          removed: result.removed,
+          legacyRemoved: result.legacyRemoved,
+          environmentTokenActive: result.environmentTokenActive,
+          revocation: result.revocation,
+          warnings: result.warnings,
+          message,
+        },
+        null,
+        2,
+      ),
+    );
+  } else {
+    ctx.out(message);
+    for (const warning of result.warnings) ctx.err(`warning: ${warning}`);
+  }
+  return result.credentialRemovalFailed ? EXIT.ERROR : EXIT.OK;
+}
+
+export async function whoami(ctx) {
+  requireBase(ctx);
+  const result = await whoamiIdentity(ctx);
+  const payload = {
+    authenticated: true,
+    baseUrl: result.session.baseUrl,
+    account: result.account,
+    subject: result.subject,
+    source: result.session.source,
+    scopes: result.session.scopes,
+    scopesKnown: result.session.scopesKnown,
+    expiresAt: result.session.expiresAt,
+    expiresInSeconds: result.session.expiresAt === null
+      ? null
+      : Math.max(0, Math.floor((result.session.expiresAt - Date.now()) / 1000)),
+    refreshable: result.session.refreshable,
+    remoteIdentity: result.remote.available,
+  };
+
+  if (ctx.json) {
+    ctx.out(JSON.stringify(payload, null, 2));
+    return EXIT.OK;
+  }
+
+  ctx.out(`Signed in to ${payload.baseUrl}`);
+  if (payload.account) ctx.out(`Account          ${payload.account}`);
+  if (payload.subject) ctx.out(`Subject          ${payload.subject}`);
+  ctx.out(`Source           ${payload.source}`);
+  if (payload.expiresAt) ctx.out(`Expires          ${new Date(payload.expiresAt).toISOString()}`);
+  ctx.out(`Scopes           ${payload.scopesKnown ? payload.scopes.join(" ") || "(none)" : "not reported by the deployment"}`);
+  if (!payload.remoteIdentity) ctx.out("Note             the deployment did not expose a userinfo endpoint");
   return EXIT.OK;
 }
 
@@ -210,35 +343,33 @@ async function streamPrompt(ctx, mode) {
     throw new CoderaxError("USAGE", `no message provided; usage: coderax ${mode} "your prompt"`);
   }
   requireBase(ctx);
-  requireAuth(ctx);
 
   const streamed = [];
-  const assembled = await streamRequest({
-    baseUrl: ctx.settings.baseUrl,
-    token: ctx.settings.token,
-    path: ctx.flags.get("url") || (mode === "work" ? "/api/work/chat" : ctx.settings.chatPath),
-    timeoutMs: ctx.settings.timeoutMs,
-    fetchImpl: ctx.fetchImpl,
-    signal: ctx.signal,
-    body: {
-      text,
-      mode,
-      endpoint: ctx.settings.endpoint,
-      model: ctx.settings.model || undefined,
+  const assembled = await authorizedStream(
+    ctx,
+    {
+      path: ctx.flags.get("url") || (mode === "work" ? "/api/work/chat" : ctx.settings.chatPath),
+      body: {
+        text,
+        mode,
+        endpoint: ctx.settings.endpoint,
+        model: ctx.settings.model || undefined,
+      },
+      onEvent: (event) => {
+        if (event.type === "delta") {
+          streamed.push(event.text);
+          if (!ctx.json) ctx.raw(event.text);
+        } else if (event.type === "replace") {
+          // A cumulative Work snapshot may revise earlier text. The interactive
+          // terminal cannot erase already printed lines; display the correction.
+          streamed.length = 0;
+          streamed.push(event.text);
+          if (!ctx.json) ctx.raw(`\n[Revised response]\n${event.text}`);
+        }
+      },
     },
-    onEvent: (event) => {
-      if (event.type === "delta") {
-        streamed.push(event.text);
-        if (!ctx.json) ctx.raw(event.text);
-      } else if (event.type === "replace") {
-        // A cumulative Work snapshot may revise earlier text. The interactive
-        // terminal cannot erase already printed lines; display the correction.
-        streamed.length = 0;
-        streamed.push(event.text);
-        if (!ctx.json) ctx.raw(`\n[Revised response]\n${event.text}`);
-      }
-    },
-  });
+    { requiredScope: mode === "work" ? "coderax:work" : "coderax:chat" },
+  );
 
   const answer = assembled || streamed.join("");
   if (!answer) {
@@ -280,7 +411,7 @@ export async function doctor(ctx) {
   const directory = dirname(ctx.settings.configPath);
   let dirMode = null;
   try {
-    dirMode = (await import("node:fs")).statSync(directory).mode & 0o777;
+    dirMode = statSync(directory).mode & 0o777;
   } catch {
     dirMode = null;
   }
@@ -294,26 +425,63 @@ export async function doctor(ctx) {
         : "Run `chmod 700` on the config directory.",
   });
 
+  const tlsOk = String(ctx.env.NODE_TLS_REJECT_UNAUTHORIZED ?? "").trim() !== "0";
+  checks.push({
+    name: "tls",
+    ok: tlsOk,
+    detail: tlsOk ? "certificate verification enabled" : "NODE_TLS_REJECT_UNAUTHORIZED=0",
+    hint: tlsOk ? "" : "Unset NODE_TLS_REJECT_UNAUTHORIZED before using credentials.",
+  });
+
   checks.push({
     name: "base-url",
     ok: Boolean(ctx.settings.baseUrl),
     detail: ctx.settings.baseUrl || "(unset)",
     hint: ctx.settings.baseUrl ? "" : "Run `coderax config set base-url https://your-deployment`.",
   });
+
+  const report = await localAuthStatus(ctx);
   checks.push({
-    name: "auth",
-    ok: Boolean(ctx.settings.token),
-    detail: ctx.settings.token
-      ? `${maskToken(ctx.settings.token)} via ${ctx.env.CODERAX_TOKEN ? "environment" : "config file"}`
-      : "no token",
-    hint: ctx.settings.token ? "" : "Run `coderax login`.",
+    name: "credential-store",
+    ok: report.credentialStore.available,
+    detail: report.credentialStore.available
+      ? `${report.credentialStore.name} (${report.credentialStore.detail})`
+      : report.credentialStore.detail,
+    hint: report.credentialStore.available ? "" : "Install an OS credential store or use CODERAX_TOKEN for automation.",
   });
 
+  checks.push({
+    name: "session",
+    ok: report.authenticated,
+    detail:
+      report.session === "active"
+        ? `${report.account ?? "signed in"} via ${report.source}${report.expiresAt ? `, expires ${new Date(report.expiresAt).toISOString()}` : ""}`
+        : report.session === "expired"
+          ? "expired"
+          : "no session",
+    hint: report.authenticated ? "" : "Run `coderax login`.",
+  });
+
+  if (report.legacyPlaintextToken) {
+    checks.push({
+      name: "legacy-token",
+      ok: false,
+      detail: `plaintext token in ${report.configPath}`,
+      hint: "Run `coderax login --with-token` to migrate it or delete the token field.",
+    });
+  }
+
   if (ctx.settings.baseUrl) {
+    let token = null;
+    try {
+      token = (await resolveSession(ctx)).accessToken;
+    } catch {
+      token = null;
+    }
     try {
       const { path, response } = await probeHealth({
         baseUrl: ctx.settings.baseUrl,
-        token: ctx.settings.token,
+        token,
         timeoutMs: ctx.settings.timeoutMs,
         fetchImpl: ctx.fetchImpl,
       });
@@ -334,7 +502,7 @@ export async function doctor(ctx) {
     return ok ? EXIT.OK : EXIT.ERROR;
   }
   for (const check of checks) {
-    ctx.out(`${check.ok ? "\u2713" : "\u2717"} ${check.name.padEnd(14)} ${check.detail}`);
+    ctx.out(`${check.ok ? "\u2713" : "\u2717"} ${check.name.padEnd(16)} ${check.detail}`);
     if (!check.ok && check.hint) ctx.out(`  \u2192 ${check.hint}`);
   }
   return ok ? EXIT.OK : EXIT.ERROR;
@@ -348,4 +516,3 @@ export async function update(ctx) {
   ctx.out(ctx.json ? JSON.stringify({ version: VERSION, message }, null, 2) : message);
   return EXIT.OK;
 }
-

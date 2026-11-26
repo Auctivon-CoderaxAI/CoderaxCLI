@@ -1,5 +1,4 @@
 {
   "baseUrl": "https://coderax.example.com",
-  "token": "replace-with-a-deployment-issued-token",
   "timeoutMs": 15000
 }
