@@ -2,11 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
-import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runCli } from "../src/cli.js";
+import { detectInstallMethod } from "../src/diagnostics.js";
+import { programRemovalCommands } from "../src/maintenance.js";
 import {
   SUPPORTED_API_VERSION,
   SUPPORTED_DEPLOYMENT_RANGE,
@@ -119,6 +121,39 @@ test("version --json reports the install and compatibility contract", async () =
   assert.equal(info.supportedDeploymentRange, SUPPORTED_DEPLOYMENT_RANGE);
   assert.match(info.compatibilityBasis, /x-coderax-api-version/);
   assert.match(info.configPath, /config\.json$/);
+});
+
+test("npm install diagnostics use the supplied layout for removal advice", async (t) => {
+  const prefix = await mkdtemp(join(tmpdir(), "coderax-layout-"));
+  t.after(() => rm(prefix, { recursive: true, force: true }));
+  const root = join(prefix, "node_modules", "coderax-cli");
+  const modulePath = join(root, "src", "diagnostics.js");
+  const localBin = join(prefix, "node_modules", ".bin");
+  const windows = process.platform === "win32";
+  const shim = windows ? "coderax.cmd" : "coderax";
+  await mkdir(join(root, "src"), { recursive: true });
+  await writeFile(modulePath, "");
+
+  function check(path, installPath, scope) {
+    const installMethod = detectInstallMethod(path);
+    assert.equal(installMethod, `npm-${scope}`);
+    assert.deepEqual(
+      programRemovalCommands({ installMethod, installPath }),
+      [scope === "global" ? "npm uninstall --global coderax-cli" : "npm uninstall coderax-cli"],
+    );
+  }
+
+  check(modulePath, root, "local"); // bin-links=false
+  if (windows) {
+    await writeFile(join(prefix, shim), "");
+    check(modulePath, root, "global");
+  }
+  await mkdir(localBin);
+  await writeFile(join(localBin, shim), "");
+  check(modulePath, root, "local");
+
+  const globalRoot = join(prefix, "lib", "node_modules", "coderax-cli");
+  check(join(globalRoot, "src", "diagnostics.js"), globalRoot, "global");
 });
 
 test("version works even when the config file is corrupt", async () => {
