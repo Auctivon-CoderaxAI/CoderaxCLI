@@ -23,16 +23,16 @@ const INFERRED = Object.freeze({
   [CAPABILITY.cancel]: CAPABILITY.workflows,
   [CAPABILITY.workCancel]: CAPABILITY.workTasks,
   [CAPABILITY.workModels]: CAPABILITY.workTasks,
+  [CAPABILITY.chat]: CAPABILITY.workTasks,
   [CAPABILITY.workAgents]: CAPABILITY.workTasks,
 });
 
 const RETRYABLE_CODES = new Set(["NETWORK", "TIMEOUT", "STREAM_INCOMPLETE", "UNAVAILABLE", "RATE_LIMITED"]);
 
 function sleep(ms) {
-  return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    timer.unref?.();
-  });
+  // Keep this timer referenced: watchRun awaits it while reconnecting, and an
+  // unref'd timer lets Node exit before the retry when no other handle is open.
+  return new Promise((resolve) => void setTimeout(resolve, ms));
 }
 
 function normalizeCapabilities(declared) {
@@ -143,7 +143,7 @@ export class WorkflowClient {
 
   /**
    * Resolve API version and capabilities without a single write probe. A
-   * deployment without metadata is reported as unverified, not assumed.
+   * deployment without a metadata version or response header is unverified.
    */
   async negotiate() {
     if (this.negotiation === null) {
@@ -157,14 +157,17 @@ export class WorkflowClient {
 
   async #negotiate() {
     let meta = null;
+    let headerVersion = null;
     const attempts = [];
     for (const path of ROUTE.meta) {
       try {
         const response = await this.#json(path);
+        headerVersion ??= response.apiVersion;
         meta = { path, document: response.json };
         break;
       } catch (error) {
         if (error.code === "NOT_FOUND" || error.code === "HTTP_405" || error.code === "HTTP_404") {
+          headerVersion ??= error.apiVersion ?? null;
           attempts.push(`${path}: ${error.code}`);
           continue;
         }
@@ -186,43 +189,12 @@ export class WorkflowClient {
           document.api?.version ??
           null;
         if (raw !== null) {
-          if (this.strict) assertCompatibleVersion(String(raw), meta.path);
-          else {
-            try {
-              assertCompatibleVersion(String(raw), meta.path);
-            } catch (error) {
-              throw error;
-            }
-          }
-          apiVersion = String(raw);
+          const version = assertCompatibleVersion(String(raw), meta.path);
+          if (version !== null) apiVersion = String(raw);
         }
         const normalized = normalizeCapabilities(document.capabilities ?? document.features);
         capabilities = normalized.set;
         declared = normalized.known;
-      }
-    } else {
-      this.report(
-        diagnostic(
-          "API_VERSION_UNVERIFIED",
-          `the deployment publishes no API metadata (${attempts.join("; ")}); ` +
-            `this client sends x-coderax-api-version: ${API_VERSION} and cannot verify compatibility`,
-        ),
-      );
-    }
-
-    if (apiVersion === null && meta !== null) {
-      this.report(
-        diagnostic(
-          "API_VERSION_UNVERIFIED",
-          `${meta.path} does not report an apiVersion; compatibility is unverified`,
-        ),
-      );
-    }
-
-    if (declared) {
-      for (const probe of PROBES) {
-        if (capabilities.has(probe.capability)) continue;
-        // A declared capability list is authoritative: absence is meaningful.
       }
     }
 
@@ -235,15 +207,18 @@ export class WorkflowClient {
         continue;
       }
       try {
-        await this.#json(probe.path);
+        const response = await this.#json(probe.path);
+        headerVersion ??= response.apiVersion;
         probes[probe.capability] = true;
         capabilities.add(probe.capability);
       } catch (error) {
         if (error.code === "NOT_FOUND") {
+          headerVersion ??= error.apiVersion ?? null;
           probes[probe.capability] = false;
           continue;
         }
         if (error.code === "UNAVAILABLE" || error.status === 503) {
+          headerVersion ??= error.apiVersion ?? null;
           probes[probe.capability] = true;
           capabilities.add(probe.capability);
           this.report(
@@ -258,11 +233,23 @@ export class WorkflowClient {
       }
     }
 
-    if (this.strict && apiVersion === null) {
-      throw new SdkError(
-        "API_VERSION_UNVERIFIED",
-        "strict mode requires a deployment API version, but none was published",
-        { details: { attempts } },
+    apiVersion ??= headerVersion;
+    if (apiVersion === null) {
+      if (this.strict) {
+        throw new SdkError(
+          "API_VERSION_UNVERIFIED",
+          "strict mode requires a deployment API version, but none was published",
+          { details: { attempts } },
+        );
+      }
+      this.report(
+        diagnostic(
+          "API_VERSION_UNVERIFIED",
+          meta === null
+            ? `the deployment publishes no API metadata (${attempts.join("; ")}); ` +
+              `this client sends x-coderax-api-version: ${API_VERSION} and cannot verify compatibility`
+            : `${meta.path} does not report an apiVersion; compatibility is unverified`,
+        ),
       );
     }
 
@@ -529,12 +516,24 @@ export class WorkflowClient {
     agentId,
     model,
     endpoint = "agents",
+    path = ROUTE.chat,
     promptPrefix,
     onEvent,
     signal = this.signal,
   } = {}) {
     if (typeof text !== "string" || text.trim() === "") {
       throw new SdkError("USAGE", "a non-empty message is required");
+    }
+    if (typeof path !== "string" || !path.startsWith("/") || path.includes("://")) {
+      throw new SdkError("USAGE", "the chat path must be an absolute path such as /api/work/chat");
+    }
+
+    // Strict compatibility is enforced before the POST starts a generation.
+    // A response-header check after the write would be too late.
+    if (this.strict) {
+      await this.requireCapability(CAPABILITY.chat, {
+        hint: "the deployment does not advertise the Work chat capability",
+      });
     }
 
     // Preserve the legacy body shape exactly when no optional field is set:
@@ -549,7 +548,7 @@ export class WorkflowClient {
     if (model) body.model = model;
     if (promptPrefix) body.promptPrefix = promptPrefix;
 
-    const stream = await this.transport.stream(ROUTE.chat, {
+    const stream = await this.transport.stream(path, {
       method: "POST",
       body,
       signal,
@@ -597,6 +596,12 @@ export class WorkflowClient {
       onEvent?.({ type: "replace", text: assembled });
     };
 
+    const rememberConversationId = (id) => {
+      if (typeof id === "string" && id.trim() !== "" && (!this.token || !id.includes(this.token))) {
+        resolvedConversationId = id;
+      }
+    };
+
     const handleFrame = (frame) => {
       if (frame.done) {
         terminal = true;
@@ -608,8 +613,8 @@ export class WorkflowClient {
       if (payload === null || typeof payload !== "object") return;
       if (Array.isArray(payload)) return;
 
-      if (typeof payload.conversationId === "string") resolvedConversationId = payload.conversationId;
-      if (typeof payload.streamId === "string") resolvedConversationId = payload.streamId;
+      rememberConversationId(payload.conversationId);
+      rememberConversationId(payload.streamId);
       if (payload.created === true && typeof payload.message?.messageId === "string") {
         requestMessageId = payload.message.messageId;
       }
@@ -640,9 +645,7 @@ export class WorkflowClient {
         if (typeof payload.responseMessage?.messageId === "string") {
           responseMessageId = payload.responseMessage.messageId;
         }
-        if (typeof payload.responseMessage?.conversationId === "string") {
-          resolvedConversationId = payload.responseMessage.conversationId;
-        }
+        rememberConversationId(payload.responseMessage?.conversationId);
         const failure = payload.error ?? payload.responseMessage?.error;
         if (failure !== undefined && failure !== null && failure !== false) {
           throw new SdkError(
@@ -697,6 +700,19 @@ export class WorkflowClient {
         for (const frame of decoder.push(stream.text(value))) {
           if (!terminal && frame.id === null && !sequencer.sawCursor) {
             sawSnapshotOnly = true;
+          }
+          // A completion marker is not sequence-numbered, so drain buffered
+          // frames first. Otherwise a stream ending 1, 3, [DONE] would return a
+          // successful but truncated answer and silently drop frame 3.
+          if (frame.done) {
+            const flushed = sequencer.flush();
+            this.#track(flushed.diagnostics);
+            for (const buffered of flushed.frames) {
+              handleFrame(buffered);
+              if (terminal) break;
+            }
+            if (!terminal) handleFrame(frame);
+            break;
           }
           const verdict = sequencer.accept(frame);
           this.#track(verdict.diagnostics);
@@ -779,24 +795,27 @@ export class WorkflowClient {
     let announcedCursorUnsupported = false;
 
     const record = async (run) => {
-      const serialized = JSON.stringify(run);
+      // Run snapshots are rendered and returned to callers just like API
+      // responses, so redact them before deduplication or callback delivery.
+      const safeRun = redactValue(run, this.token);
+      const serialized = JSON.stringify(safeRun);
       if (serialized === lastSerialized) return false;
       if (
         lastRun !== null &&
         Array.isArray(lastRun.events) &&
-        Array.isArray(run.events) &&
-        run.events.length < lastRun.events.length
+        Array.isArray(safeRun.events) &&
+        safeRun.events.length < lastRun.events.length
       ) {
         this.report(
           diagnostic(
             "OUT_OF_ORDER_EVENT",
-            `run ${runId} returned ${run.events.length} events after ${lastRun.events.length}; keeping the newest snapshot`,
+            `run ${runId} returned ${safeRun.events.length} events after ${lastRun.events.length}; keeping the newest snapshot`,
           ),
         );
       }
       lastSerialized = serialized;
-      lastRun = run;
-      await onRun?.(run);
+      lastRun = safeRun;
+      await onRun?.(safeRun);
       return true;
     };
 

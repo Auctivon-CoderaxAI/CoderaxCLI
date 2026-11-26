@@ -9,14 +9,29 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const root = process.cwd();
-const temp = await mkdtemp(join(tmpdir(), "coderax-install-"));
+// Exercise path quoting on every CI runner, even when its temp root has no spaces.
+const temp = await mkdtemp(join(tmpdir(), "coderax install-"));
+const npm = process.platform === "win32" ? "npm.cmd" : "npm";
 
-function run(command, args, options = {}) {
-  const result = spawnSync(command, args, {
-    encoding: "utf8",
-    cwd: root,
-    ...options,
-  });
+function quoteCmdArg(value) {
+  // cmd.exe expands percent variables even within quotes.
+  if (/["%\r\n]/.test(value)) throw new Error("unsupported character in Windows smoke command");
+  return `"${value}"`;
+}
+
+function run(command, args) {
+  const options = { encoding: "utf8", cwd: root };
+  // The Windows npm and coderax shims are batch scripts. /s strips the outer
+  // quotes, leaving the executable and each argument quoted inside /c.
+  const result = process.platform === "win32"
+    ? spawnSync(process.env.ComSpec ?? "cmd.exe", [
+        "/d", "/v:off", "/s", "/c", `"${[command, ...args].map(quoteCmdArg).join(" ")}"`,
+      ], { ...options, windowsVerbatimArguments: true })
+    : spawnSync(command, args, options);
+  if (result.error) {
+    console.error(`command could not start: ${command} ${args.join(" ")}`);
+    console.error(result.error.message);
+  }
   if (result.status !== 0) {
     console.error(`command failed: ${command} ${args.join(" ")}`);
     console.error(result.stdout ?? "");
@@ -27,7 +42,7 @@ function run(command, args, options = {}) {
 }
 
 try {
-  const pack = run("npm", ["pack", "--json", "--pack-destination", temp]);
+  const pack = run(npm, ["pack", "--json", "--pack-destination", temp]);
   const parsed = JSON.parse(pack.stdout.trim());
   const filename = Array.isArray(parsed) ? parsed[0]?.filename : parsed?.filename;
   if (!filename) {
@@ -37,7 +52,7 @@ try {
 
   const tarball = join(temp, filename);
   const prefix = join(temp, "prefix");
-  run("npm", [
+  run(npm, [
     "install",
     "--prefix",
     prefix,
@@ -53,13 +68,13 @@ try {
       ? join(prefix, "node_modules", ".bin", "coderax.cmd")
       : join(prefix, "node_modules", ".bin", "coderax");
 
-  const version = run(bin, ["--version"], { shell: process.platform === "win32" });
+  const version = run(bin, ["--version"]);
   if (!/coderax-cli \d+\.\d+\.\d+/.test(version.stdout)) {
     console.error(`unexpected --version output: ${version.stdout}`);
     process.exit(1);
   }
 
-  const help = run(bin, ["--help"], { shell: process.platform === "win32" });
+  const help = run(bin, ["--help"]);
   if (!help.stdout.includes("coderax work submit")) {
     console.error("installed binary did not print the expected help");
     process.exit(1);
