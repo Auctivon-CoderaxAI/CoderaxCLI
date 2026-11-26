@@ -116,3 +116,58 @@ test("Work completes, persists status and emits notifications on the real engine
     await started.close();
   }
 });
+
+test("the workflow control plane verifies and runs on the real engine", { skip }, async () => {
+  const started = await helpers.startTestApp();
+  try {
+    const environment = await cli(started, ["workflow", "environments", "--json"]);
+    assert.equal(environment.code, 0, environment.err);
+    const data = environment.json().data;
+    assert.equal(data.ready, true);
+    assert.equal(data.trust, "unverified");
+    assert.equal(data.deploymentIdentity.supported, false);
+    assert.equal(data.repositoryIdentity.supported, false);
+    assert.equal(data.authorization.owner, true);
+
+    // The authoritative Native agent publishes `tools: false`. The CLI must
+    // refuse repository engineering instead of pretending the engine can do it.
+    assert.equal(data.engineering.available, false);
+    assert.equal(data.engineering.selectedAgentTools, false);
+    assert.deepEqual(data.engineering.toolCapableAgents, []);
+
+    const kinds = await cli(started, ["workflow", "kinds", "--json"]);
+    assert.equal(kinds.code, 0, kinds.err);
+    assert.equal(kinds.json().data.kinds.find((entry) => entry.name === "inspect").available, false);
+
+    const run = await cli(started, [
+      "workflow", "run", "inspect", "report the release risks",
+      "--repo", "acme/widgets", "--json",
+    ]);
+    assert.equal(run.code, 7, `${run.err}\n${run.out}`);
+    assert.equal(run.json().error.code, "CAPABILITY_UNSUPPORTED");
+    assert.deepEqual(run.json().error.details.toolCapableAgents, []);
+
+    const pr = await cli(started, [
+      "workflow", "pr", "--head", "feature/release", "--base", "main",
+      "--confirm", "--allow-production", "--allow-destructive", "--json",
+    ]);
+    assert.equal(pr.code, 6, pr.out);
+    assert.equal(pr.json().data.available, false);
+    assert.equal(pr.json().data.sent, false);
+    assert.equal(pr.json().data.operation, "createPullRequest");
+    assert.equal(pr.json().data.request.merge, false);
+  } finally {
+    await started.close();
+  }
+});
+
+test("the real engine refuses an unauthenticated workflow write", { skip }, async () => {
+  const started = await helpers.startTestApp();
+  try {
+    const denied = await cli(started, ["workflow", "run", "fix", "a bug", "--json"], { token: "not-the-owner" });
+    assert.equal(denied.code, 3, denied.out);
+    assert.equal(denied.json().error.code, "unauthorized");
+  } finally {
+    await started.close();
+  }
+});

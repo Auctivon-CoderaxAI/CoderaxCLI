@@ -42,6 +42,14 @@ Each kind is a declarative objective sent to the published `POST /v1/work`
 operation. The engine's agent decides how to execute it. Every kind requires
 the selected agent to publish `tools: true`.
 
+At the pinned engine commit `808dfd3`, Coderax Native publishes
+`tools: false`. Engineering kinds therefore refuse with
+`CAPABILITY_UNSUPPORTED` (`7`) until the engine configures and publishes a
+tool-capable agent (OpenCode advertises `tools: true` when its transport is
+available). `workflow environments` and `workflow kinds` report the selected
+agent's tools flag and name any tool-capable agent. The CLI never substitutes
+an agent and never runs a coding task locally.
+
 | Kind | Cloud action | Writes |
 | --- | --- | --- |
 | `inspect` | Repository structure, build/test entry points, CI and risks | no |
@@ -160,13 +168,19 @@ shorter preset path.
 
 ## Backend integration status
 
-The control plane is verified against a real HTTP fixture implementing the
-published contract, including authentication, readiness, task submission,
-streaming, permissions and cancellation. It has **not** been run against a live
-Coderax WorkflowEngine deployment in this repository because no deployment URL
-or owner token is committed here.
+The control plane is verified two ways:
 
-The remaining integration work belongs to the engine, not the CLI:
+- A real HTTP fixture implements the published contract, including
+authentication, readiness, task submission, streaming, permissions,
+cancellation and a successful engineering run with a tool-capable agent.
+- The pinned authoritative WorkflowEngine commit is built and exercised
+locally and in CI. The real-engine tests prove contract negotiation, owner
+authentication, a rejected unauthenticated workflow write, successful `work`
+lifecycle and the capability refusal for the Native agent's `tools: false`.
+
+No live deployment URL or owner token is committed to this repository, so a
+production engineering run is not claimed. The remaining integration work
+belongs to the engine, not the CLI:
 
 1. Publish repository discovery with immutable repository ids and an
    authorization check per repository.

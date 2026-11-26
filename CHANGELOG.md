@@ -21,9 +21,15 @@
 - `--confirm`, `--allow-production` and `--allow-destructive` never substitute
   for server authorization.
 - Interactive `/workflow <kind> <request>` and shell completion.
-- 30 new tests, including real HTTP adversarial tests for unauthorized writes,
+- 31 new tests, including real HTTP adversarial tests for unauthorized writes,
   server-trust claims, protected branches, backend permission denial and
-  unavailable delivery operations. Full suite: 210 passed, 3 skipped.
+  unavailable delivery operations.
+- Real-engine tests now cover the workflow control plane. The pinned engine's
+  Native agent reports `tools: false`, so engineering kinds refuse with
+  `CAPABILITY_UNSUPPORTED` until a tool-capable agent is configured; the CLI
+  reports the capability instead of substituting an agent.
+- Full suite: 211 passed, 5 skipped (the real-engine tests run separately
+  against a built engine checkout and pass 5/5).
 
 ## 1.0.0 — 2026-11-26
 

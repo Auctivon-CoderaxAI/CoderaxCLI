@@ -79,6 +79,13 @@ function environmentHuman(runtime, environment) {
   runtime.write(`  ${runtime.style.dim("url")}         ${engineLabel(runtime)}`);
   runtime.write(`  ${runtime.style.dim("owner")}       authenticated (${environment.authorization.proof})`);
   runtime.write(`  ${runtime.style.dim("agent")}       ${environment.agent.id}  ${environment.agent.published ? "published" : environment.agent.reason}`);
+  const engineering = environment.engineering;
+  runtime.write(
+    `  ${runtime.style.dim("engineering")} ${engineering.available ? "available" : "unavailable"}`
+      + (engineering.toolCapableAgents.length > 0
+        ? `  tool-capable agents: ${engineering.toolCapableAgents.join(", ")}`
+        : "  no available tool-capable agent"),
+  );
   runtime.write(`  ${runtime.style.dim("identity")}    deployment id not published by contract 1.0.0`);
   runtime.write(`  ${runtime.style.dim("repository")}  repository id not published by contract 1.0.0`);
   runtime.write(`  ${runtime.style.dim("trust")}       ${environment.trust}; server flags are never treated as authorization`);

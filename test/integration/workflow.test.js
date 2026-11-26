@@ -132,6 +132,16 @@ test("an agent without tools refuses the task instead of running it locally", as
     const result = await cli(env, ["workflow", "run", "fix", "a bug", "--json"]);
     assert.equal(result.code, 7);
     assert.equal(result.json().error.code, "CAPABILITY_UNSUPPORTED");
+    assert.deepEqual(result.json().error.details.toolCapableAgents, []);
+    assert.equal(posts(engine).length, 0);
+  });
+});
+
+test("an unavailable external agent is refused, never substituted", async () => {
+  await withEngine({}, async ({ engine, env }) => {
+    const result = await cli(env, ["workflow", "run", "fix", "a bug", "--agent", "opencode", "--json"]);
+    assert.equal(result.code, 7);
+    assert.equal(result.json().error.code, "CAPABILITY_UNSUPPORTED");
     assert.equal(posts(engine).length, 0);
   });
 });

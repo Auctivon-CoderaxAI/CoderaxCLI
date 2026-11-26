@@ -188,6 +188,14 @@ coderax workflow cancel <taskId>
 approval and cancellation machinery as `work`, so a detached task survives the
 terminal and can be inspected from Coderax Web or another terminal.
 
+Engineering kinds require the selected agent to publish `tools: true`. The
+pinned authoritative engine currently publishes Coderax Native with
+`tools: false`; until a tool-capable agent (for example OpenCode) is configured
+and available, `workflow run` exits `7` with `CAPABILITY_UNSUPPORTED` and sends
+no task. `workflow environments` and `workflow kinds` report the capability and
+name any tool-capable agent. The CLI never substitutes an agent or simulates a
+coding run locally.
+
 `workflow environments` proves the exact contract, engine readiness and an
 owner-authenticated `GET /v1/agents` call. It reports `trust: "unverified"`
 when the contract publishes no deployment identifier; a server-supplied
@@ -309,8 +317,8 @@ used.
 ```sh
 npm ci
 npm run check          # syntax, ESM boundary, zero-dependency and version checks
-npm test               # 210 unit, CLI, contract, integration and interactive tests
-                       # (3 real-engine tests skip without a built checkout)
+npm test               # 216 unit, CLI, contract, integration and interactive tests
+                       # (5 real-engine tests skip without a built checkout)
 npm run test:contract  # vendored pin and local mirror; add an engine checkout for cross-repo
 WORKFLOW_ENGINE_ROOT=../Coderax-WorkflowEngine npm run test:engine
 npm run pack:check     # packed entrypoint and dependency integrity
@@ -325,10 +333,10 @@ with an in-memory store. It is test-only; the CLI has no local engine mode.
 
 - A deployed WorkflowEngine URL and an owner token are required for live use.
   Neither is baked into this repository.
-- The engine's Native agent reports its real capabilities. When it publishes
-  `tools: false`, repository inspection, code changes, tests, diffs, PR
-  preparation, review remediation and CI monitoring are refused with
-  `CAPABILITY_UNSUPPORTED`; they are not faked locally.
+- The engine's Native agent reports its real capabilities. The pinned engine
+  currently publishes Coderax Native with `tools: false`, so engineering kinds
+  are refused with `CAPABILITY_UNSUPPORTED` until a tool-capable agent such as
+  OpenCode is configured and available. They are not faked locally.
 - The `pr` template prepares a PR body but never pushes or opens a pull request.
   The CLI holds no GitHub token.
 - Repository discovery, pause, diff, branch, commit, PR creation, CI status and

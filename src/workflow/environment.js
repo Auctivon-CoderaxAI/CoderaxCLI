@@ -26,6 +26,9 @@ export async function verifyEnvironment(client, { agent = "coderax" } = {}) {
 
   const healthy = health.status !== "failed";
   const ready = healthy && readiness.ready === true && descriptor.supported;
+  const toolCapableAgents = agents.agents
+    .filter((entry) => entry.availability.available && entry.capabilities.tools === true)
+    .map((entry) => entry.id);
 
   return {
     engineUrl: client.baseUrl,
@@ -49,6 +52,7 @@ export async function verifyEnvironment(client, { agent = "coderax" } = {}) {
         id: entry.id,
         available: entry.availability.available,
         reason: entry.availability.reason,
+        tools: entry.capabilities.tools === true,
       })),
     },
     agent: {
@@ -59,6 +63,11 @@ export async function verifyEnvironment(client, { agent = "coderax" } = {}) {
       availability: descriptor.agent?.availability ?? null,
     },
     ready,
+    engineering: {
+      available: Boolean(ready && toolCapableAgents.length > 0),
+      selectedAgentTools: descriptor.agent?.capabilities?.tools === true,
+      toolCapableAgents,
+    },
     trust: "unverified",
     deploymentIdentity: {
       supported: false,
@@ -96,12 +105,20 @@ export function assertWorkflowEnvironment(environment, { kind, model = false, de
 
   const capabilities = environment.agent.capabilities ?? {};
   if (kind?.requiresTools && capabilities.tools !== true) {
+    const capable = environment.engineering?.toolCapableAgents ?? [];
     throw new CoderaxError(
       "CAPABILITY_UNSUPPORTED",
       `agent ${environment.agent.id} does not publish the tools capability required for ${kind.label}`,
       {
-        details: { agent: environment.agent.id, capability: "tools", sent: false },
-        hint: "Select an agent that publishes tools; the CLI does not simulate a coding run locally.",
+        details: {
+          agent: environment.agent.id,
+          capability: "tools",
+          toolCapableAgents: capable,
+          sent: false,
+        },
+        hint: capable.length > 0
+          ? `Select a tool-capable agent with --agent <id>: ${capable.join(", ")}.`
+          : "The engine publishes no available tool-capable agent, so engineering tasks cannot run. The CLI does not simulate a coding run locally.",
       },
     );
   }
