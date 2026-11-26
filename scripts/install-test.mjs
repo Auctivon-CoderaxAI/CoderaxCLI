@@ -658,7 +658,26 @@ console.log(version.VERSION);
   console.log(`\ncoderax install-test: PASS (${results.length} checks on ${process.platform}-${process.arch}, node ${process.versions.node})`);
 } catch (error) {
   failure = error;
+  const failed = results.at(-1);
+  const detail = `${failed?.name ?? "setup"}: ${error?.message ?? error}`.replace(/\r?\n/g, " ").slice(0, 1200);
   console.error(`\ncoderax install-test: FAIL after ${results.length} checks`);
+  // Public check annotations carry the failing check even when the job log is
+  // not downloadable without repository credentials.
+  if (process.env.GITHUB_ACTIONS === "true") {
+    console.log(`::error title=coderax install-test (${process.platform})::${detail}`);
+  }
+  if (process.env.GITHUB_STEP_SUMMARY) {
+    const summary = [
+      `## coderax install-test: FAIL (${process.platform}-${process.arch})`,
+      "",
+      `Failing check: ${failed?.name ?? "setup"}`,
+      "",
+      "```",
+      String(error?.stack ?? error).slice(0, 4000),
+      "```",
+    ].join("\n");
+    await writeFile(process.env.GITHUB_STEP_SUMMARY, `${summary}\n`);
+  }
 } finally {
   const evidence = {
     schemaVersion: 1,
