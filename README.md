@@ -275,8 +275,7 @@ used.
 ```sh
 npm ci
 npm run check          # syntax, ESM boundary, zero-dependency and version checks
-npm test               # 180 unit, CLI, contract, integration and interactive tests
-                       # (3 real-engine tests skip without a built checkout)
+npm test               # 183 tests; 3 real-engine tests skip without a built checkout
 npm run test:contract  # vendored pin and local mirror; add an engine checkout for cross-repo
 WORKFLOW_ENGINE_ROOT=../Coderax-WorkflowEngine npm run test:engine
 npm run pack:check     # packed entrypoint and dependency integrity
