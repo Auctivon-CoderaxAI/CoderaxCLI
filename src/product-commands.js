@@ -3,6 +3,15 @@ import { dirname } from "node:path";
 import { PRODUCTS, STATUS_LABELS, getOrderedProducts } from "./product-registry.js";
 import { CoderaxError, request } from "./client.js";
 import { configDir } from "./config.js";
+import { readTokenFile } from "./credentials.js";
+import {
+  checkCompatibility,
+  detectDeploymentVersion,
+  isSupportedDeploymentVersion,
+} from "./compat.js";
+import { collectVersionInfo } from "./diagnostics.js";
+import { CAPABILITY } from "../packages/workflow-sdk/src/contract.js";
+import { WorkflowClient } from "../packages/workflow-sdk/src/index.js";
 import { VERSION } from "./version.js";
 import {
   HEALTH_CANDIDATES,
@@ -243,6 +252,19 @@ function emitLogin(ctx, result) {
 export async function login(ctx) {
   requireBase(ctx);
 
+  const tokenFile = ctx.flags.get("token-file");
+  if (tokenFile !== undefined) {
+    let token;
+    try {
+      token = await readTokenFile(tokenFile);
+    } catch (error) {
+      throw new CoderaxError("TOKEN_FILE", error.message);
+    }
+    const result = await loginWithToken(ctx, token, { source: "token-file" });
+    emitLogin(ctx, result);
+    return EXIT.OK;
+  }
+
   if (ctx.flags.get("with-token")) {
     const environmentToken = typeof ctx.env.CODERAX_TOKEN === "string"
       ? ctx.env.CODERAX_TOKEN.trim()
@@ -404,12 +426,21 @@ export async function work(ctx) {
 
 export async function doctor(ctx) {
   const checks = [];
+  let backendDependencies = [];
   const major = Number(process.versions.node.split(".")[0]);
   checks.push({
     name: "node",
     ok: major >= 24,
     detail: process.versions.node,
     hint: major >= 24 ? "" : "Node 24 or newer is required.",
+  });
+
+  const install = ctx.install ?? collectVersionInfo({ env: ctx.env ?? process.env });
+  checks.push({
+    name: "install",
+    ok: true,
+    detail: `${install.installMethod} (${install.installPath})`,
+    hint: "",
   });
 
   const directory = dirname(ctx.settings.configPath);
@@ -445,13 +476,20 @@ export async function doctor(ctx) {
   });
 
   const report = await localAuthStatus(ctx);
+  const environmentToken = typeof ctx.env.CODERAX_TOKEN === "string" && ctx.env.CODERAX_TOKEN.trim() !== "";
   checks.push({
     name: "credential-store",
-    ok: report.credentialStore.available,
+    ok: report.credentialStore.available || environmentToken,
     detail: report.credentialStore.available
       ? `${report.credentialStore.name} (${report.credentialStore.detail})`
-      : report.credentialStore.detail,
-    hint: report.credentialStore.available ? "" : "Install an OS credential store or use CODERAX_TOKEN for automation.",
+      : environmentToken
+        ? `unavailable (${report.credentialStore.detail}); CODERAX_TOKEN automation is active`
+        : report.credentialStore.detail,
+    hint: report.credentialStore.available
+      ? ""
+      : environmentToken
+        ? "CODERAX_TOKEN is process-scoped and never written to disk."
+        : "Install an OS credential store or use CODERAX_TOKEN for automation.",
   });
 
   checks.push({
@@ -484,6 +522,123 @@ export async function doctor(ctx) {
         detail: error.message,
         hint: "The deployment must expose an authenticated role for /api/user.",
       });
+    }
+
+    if (ctx.settings.baseUrl) {
+      let token = null;
+      try {
+        token = (await resolveSession(ctx)).accessToken;
+      } catch {
+        token = null;
+      }
+      if (token !== null) {
+        const client = new WorkflowClient({
+          baseUrl: ctx.settings.baseUrl,
+          token,
+          timeoutMs: ctx.settings.timeoutMs,
+          fetchImpl: ctx.fetchImpl,
+          clientVersion: VERSION,
+          signal: ctx.signal,
+          strict: false,
+        });
+        try {
+          const state = await client.negotiate();
+          checks.push({
+            name: "api-version",
+            ok: true,
+            detail: state.apiVersion === null ? "unverified (no /api/meta)" : state.apiVersion,
+            hint:
+              state.apiVersion === null
+                ? "Publish /api/meta with { apiVersion, capabilities }; without it the CLI cannot pin compatibility."
+                : "",
+          });
+
+          const deployment = await detectDeploymentVersion({
+            baseUrl: ctx.settings.baseUrl,
+            token,
+            timeoutMs: ctx.settings.timeoutMs,
+            fetchImpl: ctx.fetchImpl,
+          });
+          const deployed = deployment === null ? null : isSupportedDeploymentVersion(deployment.version);
+          checks.push({
+            name: "deployment",
+            ok: deployed === null || deployed.supported !== false,
+            detail:
+              deployment === null
+                ? "not published in the OpenAPI document"
+                : `${deployment.version} (${deployment.source}) ${
+                    deployed.supported === true ? "supported" : deployed.supported === false ? "unsupported" : "unknown"
+                  }`,
+            hint:
+              deployed?.supported === false
+                ? `The deployment is ${deployed.reason}. Upgrade it or install a CLI release that supports it.`
+                : "",
+          });
+
+          const capabilities = [...state.capabilities].sort();
+          checks.push({
+            name: "capabilities",
+            ok: capabilities.length > 0,
+            detail: capabilities.length > 0 ? capabilities.join(", ") : "none advertised",
+            hint: "The deployment publishes no capability metadata; the CLI probed safe GET routes.",
+          });
+
+          const workflows = state.capabilities.has(CAPABILITY.workflows);
+          backendDependencies = [
+            {
+              capability: CAPABILITY.chat,
+              status: "enforced-per-request",
+              endpoint: "/api/work/chat",
+              note: "SSE vs JSON is rejected at the response boundary",
+            },
+            {
+              capability: CAPABILITY.workTasks,
+              status: state.capabilities.has(CAPABILITY.workTasks) ? "available" : "missing",
+              endpoint: "/api/work/tasks",
+            },
+            {
+              capability: CAPABILITY.workflows,
+              status: workflows ? "available" : "missing",
+              endpoint: "/api/workflows",
+            },
+            {
+              capability: CAPABILITY.builds,
+              status: workflows ? "inferred" : "missing",
+              endpoint: "/api/workflows/builds",
+              note: "POST 404 is reported as CAPABILITY_UNAVAILABLE",
+            },
+            {
+              capability: CAPABILITY.runStream,
+              status: workflows ? "inferred" : "missing",
+              endpoint: "/api/workflows/runs/:id/stream",
+              note: "snapshot-only; no Last-Event-ID support in the current backend",
+            },
+            {
+              capability: CAPABILITY.repos,
+              status: state.capabilities.has(CAPABILITY.repos) ? "available" : "missing",
+              endpoint: "/api/repos",
+              note: "absent: pass --repo <owner/name> to work submit",
+            },
+          ];
+          const missing = backendDependencies.filter((entry) => entry.status === "missing");
+          checks.push({
+            name: "backend",
+            ok: missing.length === 0,
+            detail:
+              missing.length === 0
+                ? "required routes present"
+                : `missing: ${missing.map((entry) => entry.capability).join(", ")}`,
+            hint: "Deploy the matching Coderax backend; dependent commands fail closed.",
+          });
+        } catch (error) {
+          checks.push({
+            name: "api-version",
+            ok: false,
+            detail: error.message,
+            hint: "Check the deployment URL and token.",
+          });
+        }
+      }
     }
   }
 
@@ -523,7 +678,7 @@ export async function doctor(ctx) {
 
   const ok = checks.every((check) => check.ok);
   if (ctx.json) {
-    ctx.out(JSON.stringify({ ok, version: VERSION, checks }, null, 2));
+    ctx.out(JSON.stringify({ ok, version: VERSION, checks, backendDependencies }, null, 2));
     return ok ? EXIT.OK : EXIT.ERROR;
   }
   for (const check of checks) {
@@ -531,6 +686,37 @@ export async function doctor(ctx) {
     if (!check.ok && check.hint) ctx.out(`  \u2192 ${check.hint}`);
   }
   return ok ? EXIT.OK : EXIT.ERROR;
+}
+
+export async function compat(ctx) {
+  requireBase(ctx);
+  const verdict = await checkCompatibility({
+    baseUrl: ctx.settings.baseUrl,
+    token: ctx.settings.token,
+    timeoutMs: ctx.settings.timeoutMs,
+    fetchImpl: ctx.fetchImpl,
+    signal: ctx.signal,
+  });
+  const status =
+    verdict.supported === true ? "compatible" : verdict.supported === false ? "incompatible" : "unknown";
+  const payload = { cliVersion: VERSION, status, ...verdict };
+
+  if (ctx.json) {
+    ctx.out(JSON.stringify(payload, null, 2));
+    return verdict.supported === true ? EXIT.OK : EXIT.ERROR;
+  }
+
+  ctx.out(`CLI              ${VERSION} (API ${verdict.apiRange})`);
+  ctx.out(`API version      ${verdict.apiVersion ?? "(not reported)"}${verdict.apiSource ? ` (${verdict.apiSource})` : ""}`);
+  ctx.out(
+    `Deployment       ${verdict.deploymentVersion ?? "(not published)"}${
+      verdict.deploymentSource ? ` (${verdict.deploymentSource})` : ""
+    }`,
+  );
+  ctx.out(`Supported        ${verdict.range} deployments, API ${verdict.apiRange}`);
+  ctx.out(`Basis            ${verdict.basis}`);
+  ctx.out(`Compatibility    ${status} \u2014 ${verdict.reason}`);
+  return verdict.supported === true ? EXIT.OK : EXIT.ERROR;
 }
 
 export async function update(ctx) {

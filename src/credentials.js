@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { accessSync, constants as fsConstants, existsSync } from "node:fs";
-import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { redact } from "./client.js";
 import { configDir } from "./config.js";
@@ -429,4 +429,31 @@ export function createCredentialStore({
       };
     },
   };
+}
+
+/**
+ * Read a token from an explicitly authorized file without ever putting it in
+ * argv. POSIX files must not be group/other readable; symlinks are refused so a
+ * planted link cannot redirect the read. Windows ACLs are verified by the
+ * shared secure-store helper when the file is used; the token file itself is
+ * still bounded and must be a regular file.
+ */
+export async function readTokenFile(path, { platform = process.platform } = {}) {
+  const info = await lstat(path);
+  if (info.isSymbolicLink()) {
+    throw new CredentialError("CREDENTIAL_FILE", `${path} is a symbolic link; refusing to read a token through it`);
+  }
+  if (!info.isFile()) throw new CredentialError("CREDENTIAL_FILE", `${path} is not a regular file`);
+  if (info.size > 1024 * 1024) {
+    throw new CredentialError("CREDENTIAL_FILE", `${path} is too large to be a token file`);
+  }
+  if (platform !== "win32" && (info.mode & 0o077) !== 0) {
+    throw new CredentialError(
+      "CREDENTIAL_FILE",
+      `${path} is readable by group or others (mode ${(info.mode & 0o777).toString(8)}); run \`chmod 600 ${path}\``,
+    );
+  }
+  const token = (await readFile(path, "utf8")).trim();
+  if (!token) throw new CredentialError("CREDENTIAL_FILE", `${path} is empty`);
+  return token;
 }

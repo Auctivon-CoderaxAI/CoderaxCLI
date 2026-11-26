@@ -12,6 +12,8 @@ import { CoderaxError, formatJson, redact, request, sanitizeTerminalText } from 
 import { discoverOpenApi, findOperation } from "./discover.js";
 import * as product from "./product-commands.js";
 import * as workflow from "./workflow-commands.js";
+import * as maintenance from "./maintenance.js";
+import { collectVersionInfo, formatVersionInfo } from "./diagnostics.js";
 import { SdkError } from "../packages/workflow-sdk/src/index.js";
 import { VERSION } from "./version.js";
 import { createCredentialStore, credentialAccount } from "./credentials.js";
@@ -24,6 +26,7 @@ const USAGE = `coderax ${VERSION} - owner-only cloud client for a Coderax deploy
 Usage:
   coderax login [--no-browser] [--json]       device sign-in; verifies the owner role
   coderax login --with-token [--json]         read a deployment session token from stdin
+  coderax login --token-file <path> [--json]  read a 0600 token file (never argv)
   coderax logout [--json]                     revoke the session and clear the OS store
   coderax whoami [--json]                     verify the live owner identity
   coderax auth status|login|logout|whoami [--json]
@@ -46,6 +49,9 @@ Usage:
   coderax agents [--work] [--json]
   coderax models [--work] [--json]
   coderax doctor [--json] / coderax diagnostics [--json]
+  coderax version [--json]
+  coderax compat [--json]
+  coderax uninstall [--yes] [--dry-run] [--purge] [--json]
   coderax health [--json]
   coderax openapi [--json]
   coderax call <METHOD> <PATH> [--data <json>] [--json]
@@ -57,6 +63,7 @@ Usage:
 
 Global options:
   --base-url <url>   Override the deployment URL (HTTPS, or HTTP on loopback)
+  --token-file <p>   Read the bearer token from a 0600 file (never argv)
   --timeout <ms>     Per-request timeout, 100-120000
   --model <id>       Override the model for one invocation
   --agent <id>       Select an agent for chat, Work or an autonomous build
@@ -68,6 +75,8 @@ Global options:
   --strict           Fail on unverified API version or missing capabilities
   --max-retries <n>  Reconnect attempts for durable run monitoring (0-10)
   --json             Machine-readable output (run monitoring emits NDJSON)
+  --yes, --dry-run   Confirm or preview the uninstall command
+  --purge            With uninstall: also remove stored credentials
   --no-color         Accepted for compatibility
   -h, --help         Show this help
   -v, --version      Show the version
@@ -77,9 +86,14 @@ Environment:
   CODERAX_CONFIG_DIR, CODERAX_CHAT_PATH, CODERAX_ENDPOINT, CODERAX_MODEL,
   CODERAX_AGENT, CODERAX_CREDENTIAL_STORE
 
-Credentials are stored in macOS Keychain, Linux libsecret, or Windows DPAPI.
-A token argument is never accepted; use device login or pipe a token to
-\`coderax login --with-token\`. CODERAX_TOKEN is for short-lived automation only.
+Tokens: credentials are stored in macOS Keychain, Linux libsecret, or Windows
+DPAPI. A token argument is never accepted; use device login, \`--token-file\`, or pipe
+a token to \`coderax login --with-token\`. CODERAX_TOKEN is for short-lived
+automation only. There is no plaintext-file fallback.
+
+Release: \`version\` reports the install and compatibility contract, \`compat\`
+checks the deployment's API-version handshake, and \`uninstall\` removes local
+user data only. Upgrades and uninstalls never run automatically.
 
 Exit codes:
   0 ok, 1 failed operation/task, 2 usage, 3 unauthenticated/not owner,
@@ -143,6 +157,9 @@ const KNOWN_COMMANDS = new Set([
   "doctor",
   "diagnostics",
   "update",
+  "compat",
+  "uninstall",
+  "cleanup",
   "help",
   "version",
 ]);
@@ -153,6 +170,7 @@ const KNOWN_FLAGS = new Set([
   "base-url",
   "with-token",
   "no-browser",
+  "token-file",
   "timeout",
   "data",
   "model",
@@ -178,6 +196,9 @@ const KNOWN_FLAGS = new Set([
   "strict",
   "max-retries",
   "work",
+  "yes",
+  "dry-run",
+  "purge",
   "no-color",
 ]);
 const ALLOWED_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
@@ -197,6 +218,9 @@ const BOOLEAN_FLAGS = new Set([
   "task",
   "with-token",
   "no-browser",
+  "yes",
+  "dry-run",
+  "purge",
 ]);
 
 export class UsageError extends Error {
@@ -228,6 +252,12 @@ export function parseArgv(argv) {
     if (arg === "--no-color") {
       flags.set("no-color", true);
       continue;
+    }
+    if (arg === "--token" || arg.startsWith("--token=")) {
+      throw new UsageError(
+        "--token is refused: a token in argv leaks into shell history and process listings. " +
+          "Use `coderax login` (secure prompt), `--token-file <path>`, stdin, or CODERAX_TOKEN.",
+      );
     }
     if (arg.startsWith("--")) {
       const body = arg.slice(2);
@@ -299,11 +329,17 @@ function preflight(positionals, flags) {
   if (flags.has("with-token") && !loginCommand) {
     throw new UsageError("--with-token is only valid with `coderax login`");
   }
+  if (flags.has("token-file") && !loginCommand) {
+    throw new UsageError("--token-file is only valid with `coderax login`");
+  }
   if (flags.has("no-browser") && !loginCommand) {
     throw new UsageError("--no-browser is only valid with `coderax login`");
   }
-  if (loginCommand && flags.has("with-token") && flags.has("no-browser")) {
-    throw new UsageError("--with-token and --no-browser cannot be combined");
+  if (loginCommand && flags.has("with-token") && flags.has("token-file")) {
+    throw new UsageError("--with-token and --token-file cannot be combined");
+  }
+  if (loginCommand && flags.has("no-browser") && (flags.has("with-token") || flags.has("token-file"))) {
+    throw new UsageError("--no-browser cannot be combined with a non-interactive token source");
   }
   if (command === "login" && positionals.length > 1) {
     throw new UsageError("login accepts no positional arguments; pipe the token to `coderax login --with-token` instead");
@@ -729,6 +765,14 @@ export async function runCli(argv, options = {}) {
       return EXIT.ok;
     }
 
+    // Diagnostics must work before configuration exists and even when the
+    // config file is unreadable; neither answer needs the deployment.
+    if (positionals[0] === "version") {
+      const info = deps.install ?? collectVersionInfo({ env: deps.env });
+      deps.stdout(flags.has("json") ? formatJson(info) : formatVersionInfo(info));
+      return EXIT.ok;
+    }
+
     const { call } = preflight(positionals, flags);
 
     const settings = await resolveSettings(flags, deps);
@@ -751,6 +795,7 @@ export async function runCli(argv, options = {}) {
       confirm: deps.confirm,
       credentialStore,
       authDeps,
+      install: deps.install ?? collectVersionInfo({ env: deps.env }),
     };
 
     if (command === "config") {
@@ -813,12 +858,20 @@ export async function runCli(argv, options = {}) {
         return await product.doctor(ctx);
       case "update":
         return await product.update(ctx);
+      case "compat":
+        return await product.compat(ctx);
+      case "uninstall":
+      case "cleanup":
+        return await maintenance.uninstall(ctx);
       case "help":
         deps.stdout(USAGE);
         return EXIT.ok;
-      case "version":
-        write(`coderax-cli ${VERSION}`);
+      case "version": {
+        const info = ctx.install;
+        if (ctx.json) deps.stdout(formatJson(info));
+        else deps.stdout(formatVersionInfo(info));
         return EXIT.ok;
+      }
       default:
         break;
     }
@@ -869,13 +922,58 @@ async function defaultConfirm(question) {
 
 async function readStdin() {
   if (process.stdin.isTTY) {
-    return "";
+    return promptHidden();
   }
   let data = "";
   for await (const chunk of process.stdin) {
     data += chunk;
   }
   return data.trim();
+}
+
+/**
+ * Read a secret from a terminal with echo disabled. Without this the token
+ * would be echoed to the screen and captured by terminal recording, which is
+ * the same exposure as putting it in argv.
+ */
+async function promptHidden(question = "Deployment token (input hidden): ") {
+  const { stdin, stderr } = process;
+  if (!stdin.isTTY) return "";
+  stderr.write(question);
+  const wasRaw = stdin.isRaw;
+  stdin.setRawMode(true);
+  stdin.resume();
+  stdin.setEncoding("utf8");
+  return new Promise((resolve) => {
+    let value = "";
+    const cleanup = (clear) => {
+      stdin.setRawMode(Boolean(wasRaw));
+      stdin.pause();
+      stdin.removeListener("data", onData);
+      if (clear) stderr.write("\n");
+    };
+    const onData = (chunk) => {
+      for (const char of chunk) {
+        if (char === "\r" || char === "\n") {
+          cleanup(true);
+          resolve(value.trim());
+          return;
+        }
+        if (char === "\u0003") {
+          cleanup(true);
+          resolve("");
+          process.exitCode = 130;
+          return;
+        }
+        if (char === "\u007f" || char === "\b") {
+          value = value.slice(0, -1);
+          continue;
+        }
+        value += char;
+      }
+    };
+    stdin.on("data", onData);
+  });
 }
 
 export function isEntrypoint(entry = process.argv[1]) {

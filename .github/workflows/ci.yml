@@ -2,34 +2,37 @@ name: ci
 
 on:
   push:
-    # PR #5 owns `main`; verify this stacked security branch on every push so
-    # the exact stacked SHA has a hosted run even before a PR is opened.
+    # Verify the secure branch on every push so the exact stacked SHA has a
+    # hosted run before a PR is opened, and keep main verified.
     branches: [main, feat/secure-owner-auth]
+  # Only code changes start the matrix. A plain `pull_request` also fires on
+  # edits, labels and bot comments; with cancel-in-progress that killed a
+  # running Windows job when a review bot updated the PR body.
   pull_request:
-  workflow_dispatch:
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read
 
 concurrency:
-  # A queued run can otherwise hold the group forever when an older matrix has
-  # a failed OS and a queued sibling. Key the group by SHA so the exact-head
-  # run is never blocked by a superseded queue entry.
+  # Key by SHA so an exact-head run is never blocked by a superseded queue
+  # entry held by an older matrix.
   group: ci-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: true
 
 jobs:
-  # The protected branch requires the check context named exactly "test".
-  # Keep that aggregator name while running the suite on free standard runners
-  # for every supported OS. No larger runners, paid actions or secrets are used.
+  # Hosted standard runners only. This repository is public, so these minutes
+  # are free; no larger runner, paid action, secret or deployment is used.
   verify:
     name: verify (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
     steps:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -39,15 +42,45 @@ jobs:
         uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b # v4.0.3
         with:
           node-version: "24"
+          cache: npm
+      - name: Install from the lockfile
+        run: npm ci --ignore-scripts
       - name: Syntax check
         run: npm run check
       - name: Unit, CLI and contract tests
         run: node scripts/run-tests.mjs
       - name: Cross-platform install smoke
         run: node scripts/smoke-install.mjs
+      - name: Build release artifacts
+        run: npm run build
+      - name: Verify checksums, contents, installers and safety
+        run: npm run verify
+      # Real packed artifacts: install into a path with spaces and Unicode,
+      # refuse argv tokens, authenticate over stdin, exercise every
+      # compatibility state, stream Work SSE, upgrade atomically with rollback,
+      # and uninstall.
       - name: Install Linux Secret Service for real-store verification
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libsecret-tools gnome-keyring dbus-x11
+      # The secure build has no plaintext credential fallback. Hosted runners
+      # must therefore prove login through the real platform store.
+      - name: Hosted installation acceptance (install -> auth -> upgrade -> uninstall)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            dbus-run-session -- bash -euo pipefail -c '
+              export XDG_RUNTIME_DIR=$(mktemp -d)
+              eval "$(printf "\n" | gnome-keyring-daemon --unlock --components=secrets)"
+              export CODERAX_INSTALL_TEST_REQUIRE_STORE=1
+              npm run install-test
+            '
+          else
+            CODERAX_INSTALL_TEST_REQUIRE_STORE=1 npm run install-test
+          fi
+      - name: Reproducibility check
+        if: runner.os == 'Linux'
+        run: npm run repro
       - name: Verify Windows DPAPI credential store
         if: runner.os == 'Windows'
         run: node scripts/verify-credential-store.mjs
@@ -64,7 +97,20 @@ jobs:
             eval "$(printf "\n" | gnome-keyring-daemon --unlock --components=secrets)"
             node scripts/verify-credential-store.mjs
           '
+      - name: Upload installation evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: install-evidence-${{ matrix.os }}
+          path: |
+            dist/install-evidence.json
+            dist/SHA256SUMS
+            dist/sbom.spdx.json
+            dist/release-manifest.json
+          if-no-files-found: ignore
+          retention-days: 14
 
+  # The protected branch requires a check context named exactly "test".
   test:
     name: test
     needs: verify
@@ -81,3 +127,37 @@ jobs:
             echo "One or more platform jobs did not pass."
             exit 1
           fi
+
+  dependencies:
+    name: dependency audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b # v4.0.3
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Install from the lockfile
+        run: npm ci --ignore-scripts
+      - name: Runtime dependencies must remain empty
+        shell: bash
+        run: |
+          node -e '
+            const pkg = require("./package.json");
+            const deps = Object.keys(pkg.dependencies ?? {});
+            if (deps.length > 0) {
+              console.error("runtime dependencies are not allowed: " + deps.join(", "));
+              process.exit(1);
+            }
+            console.log("runtime dependencies: 0");
+          '
+      - name: Audit the dependency tree
+        run: npm audit --audit-level=high
+      - name: Show the full dependency tree
+        run: npm ls --all
