@@ -11,6 +11,10 @@ import {
 } from "../src/credentials.js";
 
 const SECRET = "credential-secret-value";
+// Linux helper discovery is exercised on the Ubuntu runner. On Windows the
+// libsecret provider is intentionally unavailable, so these path-based mocks
+// cannot represent it faithfully.
+const linuxTest = process.platform === "win32" ? test.skip : test;
 
 async function fakePath(binary) {
   const directory = await mkdtemp(join(tmpdir(), "coderax-bin-"));
@@ -62,7 +66,7 @@ test("an explicitly selected provider is unavailable on the wrong platform", asy
   assert.match(store.detail, /macOS/);
 });
 
-test("libsecret receives the secret on stdin, never in argv", async () => {
+linuxTest("libsecret receives the secret on stdin, never in argv", async () => {
   const path = await fakePath("secret-tool");
   const calls = [];
   const run = async (command, args, { input }) => {
@@ -86,7 +90,7 @@ test("libsecret receives the secret on stdin, never in argv", async () => {
   assert.equal(calls[2].args[0], "clear");
 });
 
-test("a missing libsecret item is null, but a locked keyring is an error", async () => {
+linuxTest("a missing libsecret item is null, but a locked keyring is an error", async () => {
   const path = await fakePath("secret-tool");
   const missing = createCredentialStore({
     platform: "linux",
@@ -106,7 +110,7 @@ test("a missing libsecret item is null, but a locked keyring is an error", async
   );
 });
 
-test("credential helper errors never echo the secret", async () => {
+linuxTest("credential helper errors never echo the secret", async () => {
   const path = await fakePath("secret-tool");
   const store = createCredentialStore({
     platform: "linux",
