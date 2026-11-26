@@ -85,8 +85,10 @@ await mkdir(home, { recursive: true });
 
 const env = {
   ...process.env,
-  HOME: home,
-  USERPROFILE: home,
+  // Keep the real OS profile: macOS Keychain, Linux libsecret and Windows
+  // DPAPI are user-scoped. The application config remains sandboxed below.
+  HOME: process.env.HOME ?? home,
+  USERPROFILE: process.env.USERPROFILE ?? home,
   CODERAX_CONFIG: configPath,
   CODERAX_PREFIX: prefix,
   CODERAX_BIN_DIR: binDir,
@@ -658,6 +660,8 @@ console.log(version.VERSION);
   console.log(`\ncoderax install-test: PASS (${results.length} checks on ${process.platform}-${process.arch}, node ${process.versions.node})`);
 } catch (error) {
   failure = error;
+  const message = String(error?.message ?? error).replace(/\r/g, "").replace(/\n/g, "%0A").slice(0, 900);
+  console.log(`::error title=Installation acceptance::${message}`);
   console.error(`\ncoderax install-test: FAIL after ${results.length} checks`);
 } finally {
   const evidence = {

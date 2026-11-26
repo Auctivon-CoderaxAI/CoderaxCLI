@@ -10,14 +10,8 @@ import { spawnSync } from "node:child_process";
 
 const root = process.cwd();
 // Exercise path quoting on every CI runner, even when its temp root has no spaces.
-const temp = await mkdtemp(join(tmpdir(), "coderax install-"));
-const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-
-function quoteCmdArg(value) {
-  // cmd.exe expands percent variables even within quotes.
-  if (/["%\r\n]/.test(value)) throw new Error("unsupported character in Windows smoke command");
-  return `"${value}"`;
-}
+const temp = await mkdtemp(join(tmpdir(), "coderax-install-"));
+const npm = "npm";
 
 function fail(message) {
   console.error(message);
@@ -27,14 +21,13 @@ function fail(message) {
 }
 
 function run(command, args) {
-  const options = { encoding: "utf8", cwd: root };
-  // The Windows npm and coderax shims are batch scripts. /s strips the outer
-  // quotes, leaving the executable and each argument quoted inside /c.
-  const result = process.platform === "win32"
-    ? spawnSync(process.env.ComSpec ?? "cmd.exe", [
-        "/d", "/v:off", "/s", "/c", `"${[command, ...args].map(quoteCmdArg).join(" ")}"`,
-      ], { ...options, windowsVerbatimArguments: true })
-    : spawnSync(command, args, options);
+  const result = spawnSync(command, args, {
+    encoding: "utf8",
+    cwd: root,
+    // Windows resolves the npm shim through cmd.exe; without a shell spawnSync
+    // reports ENOENT even though npm is on PATH.
+    shell: process.platform === "win32",
+  });
   if (result.error) {
     console.error(`command could not start: ${command} ${args.join(" ")}`);
     console.error(result.error.message);
