@@ -188,8 +188,9 @@ try {
     }
   }
 
-  # Reject traversal, absolute paths, and drive-qualified entries before
-  # Expand-Archive writes anything outside the staging directory.
+  # Validate and extract every entry with .NET. Expand-Archive in Windows
+  # PowerShell 5.1 can fail on a valid ZIP with an ExtractToDirectory overload
+  # error, and extracting entry by entry lets us enforce the staging boundary.
   Add-Type -AssemblyName System.IO.Compression.FileSystem
   $zip = [System.IO.Compression.ZipFile]::OpenRead($archive)
   try {
@@ -201,11 +202,24 @@ try {
     }
     $links = @($zip.Entries | Where-Object { ($_.ExternalAttributes -band 0xF000) -eq 0xA000 })
     if ($links.Count -gt 0) { Fail "archive contains a symbolic link: $($links[0].FullName)" 3 }
+
+    $root = [System.IO.Path]::GetFullPath($temp).TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+    foreach ($entry in $zip.Entries) {
+      $target = [System.IO.Path]::GetFullPath((Join-Path $temp $entry.FullName))
+      if (-not $target.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) {
+        Fail "archive entry escapes the staging directory: $($entry.FullName)" 3
+      }
+      if ($entry.Name -eq "" -or $entry.FullName.EndsWith("/") -or $entry.FullName.EndsWith("\")) {
+        New-Item -ItemType Directory -Path $target -Force | Out-Null
+        continue
+      }
+      New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
+      [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $target, $true)
+    }
   } finally {
     $zip.Dispose()
   }
 
-  Expand-Archive -LiteralPath $archive -DestinationPath $temp -Force
   $extracted = Join-Path $temp "coderax-cli-$Version"
   if (-not (Test-Path -LiteralPath (Join-Path $extracted "src\cli.js"))) {
     Fail "unexpected archive layout: src\cli.js is missing" 3
