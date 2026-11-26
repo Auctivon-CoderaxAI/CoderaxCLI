@@ -32,7 +32,6 @@ jobs:
     permissions:
       contents: write # create the release and upload assets
       id-token: write # Sigstore keyless signing for provenance
-      attestations: write # publish the provenance attestation
     steps:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -77,17 +76,28 @@ jobs:
         run: npm run repro
       - name: Installation test
         run: npm run install-test
-      - name: Attest build provenance for every release asset
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-path: "dist/*"
-      - name: Verify the provenance the installer checks
+      # GitHub artifact attestations are public-repository-only on GitHub Free.
+      # Keyless Sigstore signing is free for private repositories and produces a
+      # portable bundle that ships beside each asset.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@d7543c93d881b35a8faa02e8e3605f69b7a1ce62 # v3.10.0
+      - name: Sign release assets with Sigstore
+        run: |
+          set -euo pipefail
+          for f in dist/*; do
+            [ -f "$f" ] || continue
+            case "$f" in *.sigstore.json) continue ;; esac
+            cosign sign-blob --yes --bundle "${f}.sigstore.json" "$f"
+          done
+      - name: Verify the signed archive
         env:
-          GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.meta.outputs.version }}
         run: |
-          gh attestation verify "dist/coderax-cli-${VERSION}-standalone.tar.gz" \
-            --repo "$GITHUB_REPOSITORY"
+          cosign verify-blob \
+            --bundle "dist/coderax-cli-${VERSION}-standalone.tar.gz.sigstore.json" \
+            --certificate-identity-regexp "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/(tags|heads)/.*" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "dist/coderax-cli-${VERSION}-standalone.tar.gz"
       - name: Publish the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -105,9 +115,9 @@ jobs:
   npm:
     name: publish to npm (requires authorization)
     needs: release
-    # Triple gate: a manual dispatch that explicitly asks to publish, a
-    # repository variable the owner sets, and the protected "npm-publish"
-    # environment (configure required reviewers in repository settings).
+    # Requires an explicit manual dispatch and an owner-set repository variable.
+    # Configure npm-publish reviewers where supported. On private GitHub Free,
+    # keep NPM_PUBLISH_ENABLED unset until a replacement approval control exists.
     # package.json is also "private": true until the owner authorizes
     # publication, so even a misconfigured run is refused by npm.
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_npm == true && vars.NPM_PUBLISH_ENABLED == 'true' }}
@@ -115,7 +125,7 @@ jobs:
     environment: npm-publish
     permissions:
       contents: read
-      id-token: write # trusted publishing / provenance, no long-lived token
+      id-token: write # trusted publishing, no long-lived token
     steps:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -139,7 +149,8 @@ jobs:
         run: |
           cd dist
           sha256sum -c SHA256SUMS --ignore-missing
-      - name: Publish with provenance
+      - name: Publish to npm
         run: |
           version="$(node -p 'require("./package.json").version')"
-          npm publish "./dist/coderax-cli-${version}.tgz" --access public --provenance
+          # npm provenance requires a public source repository; private Free cannot use it.
+          npm publish "./dist/coderax-cli-${version}.tgz" --access public

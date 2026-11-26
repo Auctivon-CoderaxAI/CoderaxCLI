@@ -1,0 +1,15 @@
+# Synthetic input for the terminal's sensitive prompt detector.
+1402b3fdd613b5346335fcf9511149441e11e720:test/terminal-history.test.js:generic-api-key:37
+56bbb62add176e8921541c0930972107336bc0da:test/terminal-history.test.js:generic-api-key:37
+ac71c7756d94d6c6d8a2d6e985206ba9654b1736:test/terminal-history.test.js:generic-api-key:37
+5731ddc8b50d6929b909276c80e015ad27beb93b:test/terminal-history.test.js:generic-api-key:37
+# OpenAPI SHA-256 digest in contract metadata.
+6984f84ffad61f4033f8fbbacf2c619eb19aa92a:src/contract.js:generic-api-key:26
+fb661c82f3e63e53f0e1f97a22ace99c66591632:src/contract.js:generic-api-key:26
+38bd538678dffae4fefcedd0d09a70462ff1ca0f:src/contract.js:generic-api-key:26
+3ef6c5bc93f34e6b222576ebb2db6c04a869aad8:src/engine/contract.js:generic-api-key:27
+# Synthetic owner token for the local engine HTTP test.
+fb661c82f3e63e53f0e1f97a22ace99c66591632:test/engine-http.test.js:generic-api-key:15
+38bd538678dffae4fefcedd0d09a70462ff1ca0f:test/engine-http.test.js:generic-api-key:15
+# Dummy provider key for the environment redaction test.
+3ef6c5bc93f34e6b222576ebb2db6c04a869aad8:test/redact.test.js:generic-api-key:69

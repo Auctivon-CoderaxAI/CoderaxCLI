@@ -55,15 +55,17 @@ Get-Content SHA256SUMS | ForEach-Object {
 
 Release downloads are public: <https://github.com/Auctivon-CoderaxAI/CoderaxCLI/releases>.
 
-When a release publishes Sigstore build attestations, add authenticated
-provenance on top of the checksum:
+Use `--provenance` / `-Provenance` (or `CODERAX_REQUIRE_PROVENANCE=1`)
+to verify the archive after the checksum check. Install Cosign on PATH
+for releases with a `.sigstore.json` bundle. The installer downloads the
+bundle alongside the archive and verifies the signature from the CoderaxCLI
+release workflow. For `--from-file` / `-FromFile`, save the bundle next to
+the archive with `.sigstore.json` appended to the archive filename.
 
-```sh
-gh attestation verify coderax-cli-0.3.0-standalone.tar.gz \
-  --repo Auctivon-CoderaxAI/CoderaxCLI
-```
-
-The installer can do this for you with `--provenance` / `-Provenance`.
+If the bundle is absent (HTTP 404 for a download, or no local sidecar),
+the installer requires the GitHub CLI (`gh`) and a valid legacy GitHub
+attestation. Invalid bundles, other bundle download failures, and releases
+without either verified form of evidence stop installation.
 
 ## Option A — standalone installer (Linux and macOS)
 
@@ -92,7 +94,7 @@ and only then moves it to `~/.coderax/cli/$version` and atomically repoints
 | `--from-file <path>` | — | Install a local tarball (air-gapped) |
 | `--checksum <sha256>` | — | Required with `--from-file` |
 | `--base-url <url>` | GitHub Releases | HTTPS release mirror |
-| `--provenance` | off | Verify build provenance with `gh` |
+| `--provenance` | off | Verify a Sigstore bundle or legacy GitHub attestation |
 | `--force` | off | Atomically replace the same version, retaining a rollback copy |
 | `--dry-run` | off | Print the plan and change nothing |
 | `--skip-verify` | off | Skip checksum verification (not recommended) |
