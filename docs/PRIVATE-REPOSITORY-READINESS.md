@@ -1,6 +1,12 @@
 # Private-repository readiness — CoderaxCLI
 
-Status: CI and release changes are prepared for GitHub Free private operation. Visibility is unchanged; the owner must resolve the merge and publish approval controls before privatizing.
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:b2f7d263b5c9c4528cad754c56b635210a3456b336bb82bbc2a7ea3b54bec3ef -->
+
+Status: CI and release changes are prepared for GitHub Free private operation. Visibility is unchanged. Before privatizing, the owner must resolve the merge and publish approval controls and establish a release distribution path for both installers. The POSIX and Windows installers download GitHub Release assets without credentials, so their default downloads will fail once the repository is private. Provide a release endpoint both installers can use, or document how users with repository access can download the release assets and install offline with `--from-file` (POSIX) and `-FromFile` (Windows).
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 ## Blockers and required controls
 
