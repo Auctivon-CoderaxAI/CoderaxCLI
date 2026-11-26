@@ -23,11 +23,34 @@ product commands (chat / work / products / cloud / login / doctor)
 | `src/client.js` | one HTTP request, error mapping, redaction | `fetch` only |
 | `src/discover.js` | find and summarize the OpenAPI document | client |
 | `src/product-registry.js` | canonical five-product status data | none |
-| `src/product-commands.js` | chat, Work, products, Cloud, login, doctor | config, client, registry |
+| `src/product-commands.js` | chat, Work, products, Cloud, login, doctor, update | config, client, registry, compat, diagnostics |
+| `src/compat.js` | WorkflowEngine version detection and range evaluation | client, discover |
+| `src/diagnostics.js` | install-method detection, version report | filesystem, config, compat |
+| `src/maintenance.js` | uninstall and cleanup of user data | filesystem, config |
 | `src/cli.js` | parsing, preflight, dispatch, output | all of the above |
 
 Each layer is injectable: tests pass `fetchImpl`, `env`, `stdout`, and file
 readers, so the suite runs offline and never touches a real deployment.
+
+## Release pipeline
+
+```
+src/ + README + docs ──► scripts/build-release.mjs ──► dist/
+                              │                        ├─ npm tarball
+                              │                        ├─ standalone tar.gz
+                              │                        ├─ standalone zip
+                              │                        ├─ SHA256SUMS + manifest
+                              │                        └─ SBOM + notes
+                              ▼
+                    scripts/verify-release.mjs  (checksums, contents, safety)
+                    scripts/repro-check.mjs     (two builds, identical bytes)
+                    scripts/install-test.mjs    (install → auth → SDK → uninstall)
+```
+
+Archives are written in `scripts/lib/archive.mjs` rather than by system tools so
+the bytes depend only on the source and a fixed metadata set. See
+[`docs/RELEASE.md`](docs/RELEASE.md) for the maintainer procedure and
+[`docs/DISTRIBUTION.md`](docs/DISTRIBUTION.md) for channel decisions.
 
 ## Ordering rules
 

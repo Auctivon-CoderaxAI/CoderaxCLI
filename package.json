@@ -1,18 +1,62 @@
 {
   "name": "coderax-cli",
-  "version": "0.1.0",
-  "private": true,
-  "description": "Canonical Coderax CLI: chat, Work mode, products, login, health, OpenAPI discovery, and authenticated calls",
+  "version": "0.2.0",
+  "description": "Coderax CLI: the command-line access and control interface for a cloud-hosted Coderax deployment. Chat, Work mode, products, login, health, OpenAPI discovery, and authenticated calls.",
   "type": "module",
   "bin": {
     "coderax": "src/cli.js"
   },
-  "engines": {
-    "node": ">=24"
+  "exports": {
+    ".": "./src/cli.js",
+    "./client": "./src/client.js",
+    "./compat": "./src/compat.js",
+    "./config": "./src/config.js",
+    "./diagnostics": "./src/diagnostics.js",
+    "./discover": "./src/discover.js",
+    "./product-registry": "./src/product-registry.js",
+    "./version": "./src/version.js",
+    "./package.json": "./package.json"
   },
+  "files": [
+    "src/",
+    "docs/CONTRACT.md",
+    "ARCHITECTURE.md",
+    "CHANGELOG.md",
+    "SECURITY.md"
+  ],
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "private": true,
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/",
+    "provenance": true
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Auctivon-CoderaxAI/Coderax-CLI.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Auctivon-CoderaxAI/Coderax-CLI/issues"
+  },
+  "homepage": "https://github.com/Auctivon-CoderaxAI/Coderax-CLI#readme",
+  "keywords": [
+    "coderax",
+    "cli",
+    "workflow-engine",
+    "agents"
+  ],
   "scripts": {
     "start": "node src/cli.js --help",
-    "test": "node --test",
-    "check": "node --check src/config.js && node --check src/client.js && node --check src/discover.js && node --check src/cli.js && node --check src/product-commands.js && node --check src/product-registry.js && node --check src/version.js"
+    "test": "node --test test/*.test.js",
+    "check": "node --check src/config.js && node --check src/client.js && node --check src/discover.js && node --check src/cli.js && node --check src/product-commands.js && node --check src/product-registry.js && node --check src/version.js && node --check src/compat.js && node --check src/diagnostics.js && node --check src/maintenance.js",
+    "build": "node scripts/build-release.mjs",
+    "verify": "node scripts/verify-release.mjs",
+    "repro": "node scripts/repro-check.mjs",
+    "install-test": "node scripts/install-test.mjs",
+    "audit": "npm audit --audit-level=high",
+    "release:check": "npm run check && npm test && npm run build && npm run verify && npm run repro && npm run install-test",
+    "prepublishOnly": "npm run release:check"
   }
 }

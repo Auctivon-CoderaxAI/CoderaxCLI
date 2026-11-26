@@ -8,9 +8,22 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # Standard GitHub-hosted runners only. Free and unlimited for public
+        # repositories; drawn from the plan's included compute when private.
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -20,7 +33,61 @@ jobs:
         uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b # v4.0.3
         with:
           node-version: "24"
+          cache: npm
+      - name: Install from the lockfile
+        run: npm ci --ignore-scripts
       - name: Syntax check
         run: npm run check
       - name: Unit and CLI tests
         run: npm test
+      - name: Build release artifacts
+        run: npm run build
+      - name: Verify artifacts, checksums, and install safety
+        run: npm run verify
+      - name: Installation test (install, authenticate, uninstall)
+        run: npm run install-test
+      - name: Reproducibility check
+        if: runner.os == 'Linux'
+        run: npm run repro
+      - name: Upload install evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: install-evidence-${{ matrix.os }}
+          path: dist/install-evidence.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+  dependencies:
+    name: dependency audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b # v4.0.3
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Install from the lockfile
+        run: npm ci --ignore-scripts
+      - name: Runtime dependencies must remain empty
+        shell: bash
+        run: |
+          node -e '
+            const pkg = require("./package.json");
+            const deps = Object.keys(pkg.dependencies ?? {});
+            if (deps.length > 0) {
+              console.error("runtime dependencies are not allowed: " + deps.join(", "));
+              process.exit(1);
+            }
+            console.log("runtime dependencies: 0");
+          '
+      - name: Audit the dependency tree
+        run: npm audit --audit-level=high
+      - name: Show the full dependency tree
+        run: npm ls --all

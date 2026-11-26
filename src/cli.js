@@ -8,7 +8,10 @@ import {
   saveConfig,
 } from "./config.js";
 import { CoderaxError, formatJson, redact, request } from "./client.js";
+import { checkEngineCompatibility } from "./compat.js";
+import { collectVersionInfo, formatVersionInfo } from "./diagnostics.js";
 import { discoverOpenApi, findOperation } from "./discover.js";
+import * as maintenance from "./maintenance.js";
 import * as product from "./product-commands.js";
 import { VERSION } from "./version.js";
 
@@ -32,7 +35,10 @@ Usage:
   coderax config set <key> <value>
   coderax config set [--base-url <url>] [--token <token>] [--timeout <ms>]
   coderax doctor [--json]
+  coderax version [--json]
+  coderax compat [--json]
   coderax update [--json]
+  coderax uninstall [--yes] [--dry-run] [--json]
   coderax health [--json]
   coderax openapi [--json]
   coderax call <METHOD> <PATH> [--data <json>] [--json]
@@ -46,6 +52,8 @@ Global options:
   --chat-path <path> Override the streaming path
   --url <path>       Override the streaming path for one invocation
   --json             Machine-readable output
+  --yes, --dry-run   Confirm or preview the uninstall command
+  --purge            With uninstall: also remove stored credentials
   --no-color         Accepted for compatibility
   -h, --help         Show this help
   -v, --version      Show the version
@@ -58,6 +66,12 @@ Discovery: agents, models, and openapi use the deployment's OpenAPI document.
 health probes fixed paths, login checks /api/user, doctor probes the same health
 endpoints, and chat and work use the configured chat path. call uses the path you supply.
 A missing discovered route fails with OPERATION_NOT_FOUND.
+
+Release:
+  version reports the CLI version, Node runtime, install method and the
+  supported WorkflowEngine range. compat compares the configured deployment's
+  reported engine version with that range. Upgrades and uninstalls never run
+  automatically.
 `;
 
 const EXIT = Object.freeze({
@@ -96,8 +110,11 @@ const KNOWN_COMMANDS = new Set([
   "status",
   "doctor",
   "update",
-  "help",
   "version",
+  "compat",
+  "uninstall",
+  "cleanup",
+  "help",
 ]);
 const KNOWN_FLAGS = new Set([
   "help",
@@ -112,6 +129,10 @@ const KNOWN_FLAGS = new Set([
   "chat-path",
   "url",
   "no-color",
+  // uninstall / cleanup
+  "yes",
+  "dry-run",
+  "purge",
 ]);
 const ALLOWED_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
 
@@ -143,6 +164,18 @@ export function parseArgv(argv) {
     }
     if (arg === "--no-color") {
       flags.set("no-color", true);
+      continue;
+    }
+    if (arg === "--yes" || arg === "-y") {
+      flags.set("yes", true);
+      continue;
+    }
+    if (arg === "--dry-run") {
+      flags.set("dry-run", true);
+      continue;
+    }
+    if (arg === "--purge") {
+      flags.set("purge", true);
       continue;
     }
     if (arg.startsWith("--")) {
@@ -292,6 +325,33 @@ async function commandHealth(context, deps, write, flags) {
     `health: ok (GET ${path}) HTTP ${response.status}\n${response.json ? formatJson(response.json) : ""}`,
     { endpoint: path, status: response.status, body },
   );
+}
+
+async function commandCompat(context, deps, write, flags) {
+  const result = await checkEngineCompatibility({
+    baseUrl: context.baseUrl,
+    token: context.token,
+    timeoutMs: context.timeoutMs,
+    fetchImpl: deps.fetchImpl,
+  });
+  const payload = { cliVersion: VERSION, ...result };
+  const status = result.supported === true
+    ? "compatible"
+    : result.supported === false
+      ? "unsupported"
+      : "unknown";
+  emit(
+    write,
+    flags,
+    [
+      `CLI              ${VERSION}`,
+      `supports         ${result.range}`,
+      `WorkflowEngine   ${result.engineVersion ?? "(not reported)"}${result.engineSource ? ` (${result.engineSource})` : ""}`,
+      `compatibility    ${status} \u2014 ${result.reason}`,
+    ].join("\n"),
+    { ...payload, status },
+  );
+  return result.supported === true ? EXIT.ok : EXIT.failure;
 }
 
 async function commandOpenapi(context, deps, write, flags) {
@@ -468,9 +528,17 @@ export async function runCli(argv, options = {}) {
     }
 
     const { call } = preflight(positionals, flags);
+    const [command] = positionals;
+
+    // Version diagnostics must work on a broken config, so they run before
+    // configuration resolution reads the file.
+    if (command === "version") {
+      const info = collectVersionInfo({ env: deps.env });
+      write(flags.has("json") ? formatJson(info) : formatVersionInfo(info).trimEnd());
+      return EXIT.ok;
+    }
 
     const settings = await resolveSettings(flags, deps);
-    const [command] = positionals;
     const ctx = {
       ...settings,
       settings,
@@ -485,6 +553,7 @@ export async function runCli(argv, options = {}) {
       signal: deps.signal,
       stdinIsTTY: deps.stdinIsTTY,
       readSecret: deps.readSecret,
+      install: collectVersionInfo({ env: deps.env }),
     };
 
     if (command === "config") {
@@ -513,11 +582,13 @@ export async function runCli(argv, options = {}) {
         return await product.doctor(ctx);
       case "update":
         return await product.update(ctx);
+      case "compat":
+        return await commandCompat(requireBaseUrl(settings), deps, write, flags);
+      case "uninstall":
+      case "cleanup":
+        return await maintenance.uninstall(ctx);
       case "help":
         deps.stdout(USAGE);
-        return EXIT.ok;
-      case "version":
-        write(`coderax-cli ${VERSION}`);
         return EXIT.ok;
       default:
         break;

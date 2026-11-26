@@ -71,3 +71,31 @@ No path is hardcoded. When the match is absent the CLI exits `1` with
 The CLI depends only on the OpenAPI document shape and bearer auth. Adding routes
 to a deployment does not require a CLI release; removing a route degrades the
 matching command to `OPERATION_NOT_FOUND` while `coderax call` keeps working.
+
+## WorkflowEngine version reporting
+
+A deployment should report the WorkflowEngine version in one of these places,
+in order of preference:
+
+1. `GET /health` (or `/api/health`, `/healthz`):
+   `workflowEngine.version`, `workflowEngineVersion`, `engine.version`,
+   `services.workflowEngine.version`, or `capabilities.workflowEngine`.
+2. The OpenAPI document's `info.version`.
+
+A bare top-level `version` in a health response is ignored: it commonly
+identifies the web service, not the engine, and using it would produce a wrong
+compatibility verdict.
+
+CLI release `0.2.0` supports `>=0.8.0 <1.0.0`. Prerelease engine versions are
+reported as unsupported. When no version is reported, compatibility is
+`unknown`, which is distinct from `incompatible`: `coderax compat` exits `1`
+for both, but `coderax doctor` only fails when the reported version is outside
+the range.
+
+The CLI does not block commands on a failed compatibility check. Automation that
+must enforce the range should run `coderax compat --json` and treat a non-zero
+exit code as fatal.
+
+`info.version` is therefore part of the contract, not decoration: a deployment
+that changes it across a major boundary signals a potentially breaking engine
+surface to every CLI in the field.
