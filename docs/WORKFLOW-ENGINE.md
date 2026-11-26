@@ -57,17 +57,23 @@ coderax engine agents
 coderax engine models
 coderax engine chat "hello" --mode cloud
 coderax engine work submit "durable objective" --follow
-coderax engine tasks <taskId>
-coderax engine tasks events <taskId> --json
-coderax engine tasks cancel <taskId> --reason "owner request"
-coderax engine tasks resume <taskId>
-coderax engine tasks retry <taskId>
+coderax engine work submit "durable objective" --detach
+coderax engine task <taskId>
+coderax engine tasks                    # durable completions via notifications
+coderax engine events <taskId> --once --json
+coderax engine cancel <taskId> --reason "owner request"
+coderax engine resume <taskId>
+coderax engine retry <taskId>
 coderax engine conversations
-coderax engine conversations <conversationId>
+coderax engine conversation <conversationId>
 coderax engine memory --mode private
 coderax engine permissions <taskId>
 coderax engine permissions decide <taskId> <requestId> approve
+coderax engine approve <taskId> <requestId>
+coderax engine deny <taskId> <requestId> --reason "not this resource"
+coderax engine artifacts <taskId>       # metadata only
 coderax engine notifications
+coderax engine status
 coderax engine capabilities --json
 ```
 
@@ -78,14 +84,20 @@ without a request. The same rule applies to every engine identifier: only a
 single identifier of at most 128 characters is accepted, and URL encoding is
 applied after validation. Path traversal never reaches a route.
 
-`--follow` polls the authoritative task state; it never re-submits Work.
-`tasks events` replays from `?after=<n>` and stops at the terminal event,
-without reconnecting. `resume`, `retry` and `cancel` read the current
-generation when one is required; the client never guesses a generation.
+Without `--follow`, Work is submit-only and `--detach` is the explicit alias;
+the task continues on the engine. `--follow` consumes the durable SSE stream,
+including reconnect/replay, and never re-submits Work. `events` replays from
+`?after=<n>`; `--once` stops at the terminal event. `resume`, `retry` and
+`cancel` read the current generation when one is required; the client never
+guesses a generation. `tasks` is derived from durable notifications because
+1.0.0 has no task-list operation; `task <id>` is the authoritative status read.
+`artifacts` reports metadata only; upload and download are not implemented by
+the contract.
 
 For machine output, `--json` emits one JSON document. The event stream is the
-exception: it emits NDJSON, one compact event per line. Follow progress is
-written to stderr so stdout remains valid JSON.
+exception: `events --json` emits NDJSON, one compact event per line, followed
+by a final summary object. Work progress with `--json` stays off stdout, so the
+final document remains parseable.
 
 ## Contract and identity checks
 
@@ -121,12 +133,14 @@ route must stay on the configured origin.
 | conversations, memory | available | 1.0.0 operations |
 | permissions read/decide | available | 1.0.0 operations |
 | notifications | available | 1.0.0 list operation |
+| task discovery | available | derived from durable notifications; no task-list operation exists |
 | task list / execution list | blocked | no list operation in 1.0.0 |
 | schedules | blocked | no schedule operation in 1.0.0 |
-| artifacts and file transfers | blocked | task results only list paths; no transfer route |
+| artifact metadata | available | paths and digests read from `getTask` results |
+| file transfers | blocked | no upload, download or transfer route |
 | plugins, tools | blocked | no operation in 1.0.0 |
 | projects | blocked | separate Coderax deployment API, not the engine |
-| detach | blocked | Work is durable by default; no detach request exists |
+| detach | available as `work --detach` | no detach request exists; Work is durable by default |
 | cloud browser | blocked | no session operation in 1.0.0 |
 | Native Game Studio, Native Gaming Agent | blocked | no operation in 1.0.0 |
 | OpenAPI discovery | blocked | the engine serves no document |
@@ -147,10 +161,11 @@ CODERAX_ENGINE_DIR=/path/to/Coderax-WorkflowEngine npm run test:engine
 
 It covers health and contract reporting, unauthenticated and wrong-token
 refusal, agents/models discovery, chat, durable Work to `completed`, task
-read, SSE event replay, conversations, memory, permissions, notifications,
-compat and verify, and a blocked schedule command pointed at an unreachable
-origin (proving fail-closed behavior). The test is skipped when
-`CODERAX_ENGINE_DIR` is not set; the regular suite remains dependency-free.
+read and notification-derived discovery, SSE event replay, artifact metadata,
+conversations, memory, permissions, notifications, status, compat and verify,
+and a blocked schedule command pointed at an unreachable origin (proving
+fail-closed behavior). The test is skipped when `CODERAX_ENGINE_DIR` is not
+set; the regular suite remains dependency-free.
 
 ## Consolidation boundaries
 
@@ -159,18 +174,22 @@ This branch is the integration point for two existing workstreams:
 - **PR #6** (`327d3ea`): release, owner authentication and OS credential
   storage, durable synchronization, installers, 0.3.0 packaging and 3-OS CI.
 - **`feat/engine-thin-client-v1`** (`0cd85bf`): the pinned engine contract,
-  OpenAPI provenance, validated HTTP client, SSE decoder and event assembler.
-  Those modules are adopted here as `src/contract.js`, `src/engine.js`,
-  `src/sse.js`, `src/events.js`, `contracts/` and `test/engine-contract.test.js`.
-  Its separate `src/cli.js`/`engine-commands.js` dispatch was not merged; the
-  registry-driven `engine` surface is this branch's single command table.
+  OpenAPI provenance, validated HTTP client, SSE decoder, event assembler and
+  command handlers. Those modules are adopted here as `src/contract.js`,
+  `src/engine.js`, `src/sse.js`, `src/events.js`, `src/engine-surface.js`,
+  `contracts/` and `test/engine-contract.test.js`. Its separate top-level
+  `src/cli.js` was not merged; the registry-driven `engine` adapter is this
+  branch's single engine command table.
 
 This branch owns the integration files `src/command-registry.js`,
 `src/engine-client.js`, `src/engine-commands.js`, the `engine`/`completion`
 dispatch hooks in `src/cli.js`, and the engine job in
-`.github/workflows/ci.yml`. The engine-core files remain owned by the
-`feat/engine-thin-client-v1` workstream; changes there should be integrated,
-not re-derived.
+`.github/workflows/ci.yml`. `src/engine-commands.js` is deliberately a thin
+adapter: contract/owner preflight, identifier validation, secure login/logout,
+capability reporting and output sanitization. It does not reimplement the
+adopted Chat, Work, task, permission or memory handlers. The engine-core and
+handler files remain owned by the `feat/engine-thin-client-v1` workstream;
+changes there should be integrated, not re-derived.
 
 Remaining work is dependency-linked, not merged blindly:
 

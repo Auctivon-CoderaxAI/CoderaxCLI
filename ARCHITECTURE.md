@@ -20,10 +20,14 @@ argv ──► parseArgv ──► preflight ──► resolveSettings ──►
                                   fetch (HTTPS, no redirects)
 
 engine ──► command-registry ──► engine-client ──► /v1/health + /v1/agents
-           (one command table)   (contract gate)          │
+           (one engine table)    (contract gate)          │
                                                             ▼
                                                     engine-commands
-                                                    (available/blocked)
+                                                    (thin adapter)
+                                                            │
+                                                            ▼
+                                                    engine-surface
+                                                    (adopted handlers)
 ```
 
 ## Layers
@@ -48,7 +52,8 @@ engine ──► command-registry ──► engine-client ──► /v1/health +
 | `src/sse.js` | engine SSE framing and JSON frame parsing (engine workstream) | none |
 | `src/events.js` | event assembly, dedupe, terminal detection, reconnect policy (engine workstream) | contract |
 | `src/engine-client.js` | contract-version gate, owner proof and error/exit mapping over `engine.js` | contract, engine, registry |
-| `src/engine-commands.js` | `engine` handlers, capability matrix, fail-closed dispatch | registry, engine-client |
+| `src/engine-commands.js` | thin `engine` adapter: validation, preflight, secure auth, capability matrix, fail-closed dispatch | registry, engine-client, engine-surface |
+| `src/engine-surface.js` | adopted Chat, Work, task, permission, conversation, memory and artifact-metadata handlers (engine workstream) | engine, events, contract |
 | `packages/workflow-sdk/src/contract.js` | routes, capabilities, statuses, documented backend gaps | none |
 | `packages/workflow-sdk/src/http.js` | transport, SSE content-type enforcement, version header, idle timeout, cancellation | `fetch` |
 | `packages/workflow-sdk/src/sse.js` | SSE decoder, event sequencing, deduplication, gap handling | none |
@@ -62,9 +67,9 @@ npm dependency and no duplicate backend implementation inside the CLI.
 
 `coderax engine ...` targets the separate WorkflowEngine backend. The engine
 does not serve an OpenAPI document, so the CLI binds to the pinned route table
-in `src/contract.js` and checks the vendored document's SHA-256. The HTTP, SSE
-and event-assembly core is adopted from the engine thin-client workstream; the
-command registry remains the only command table. Every
+in `src/contract.js` and checks the vendored document's SHA-256. The HTTP, SSE,
+event-assembly and handler surface is adopted from the engine thin-client
+workstream; the command registry remains the only engine command table. Every
 authenticated command validates `GET /v1/health`'s `contractVersion` (1.0.x)
 first, then proves the owner token with `GET /v1/agents`, and only then calls
 the requested operation. Any other contract line exits `6`; a 401/403 exits
@@ -72,9 +77,12 @@ the requested operation. Any other contract line exits `6`; a 401/403 exits
 and URL-encoded, and no side-effecting request is retried.
 
 Commands absent from 1.0.0 are `blocked` in the registry and return exit `6`
-before configuration or HTTP. `engine capabilities --json` reports the same
-matrix. Shell completion is generated from the registry by
-`coderax completion <bash|zsh|fish>`, so completion cannot drift from dispatch.
+before configuration or HTTP. Artifact metadata is available from `getTask`;
+file transfer is blocked separately. `engine capabilities --json` reports the
+same matrix. Shell completion is generated from the registry by
+`coderax completion <bash|zsh|fish>`, so engine completion cannot drift from
+engine dispatch. The legacy top-level commands still use PR #6's dispatch
+switch and USAGE text; they are not part of the engine registry.
 
 ## Credentials
 

@@ -109,22 +109,64 @@ export const ENGINE_COMMANDS = Object.freeze([
     name: "work",
     status: "available",
     operation: "submitWork",
-    usage: "engine work submit <objective>|--data <json> [--agent <id>] [--model <provider/model>] [--mode private|cloud] [--no-approval] [--follow] [--json]",
-    summary: "Submit durable Work and optionally follow it to a terminal state.",
+    usage: "engine work submit <objective>|--data <json> [--agent <id>] [--model <provider/model>] [--mode private|cloud] [--no-approval] [--follow|--detach] [--json]",
+    summary: "Submit durable Work; --follow streams it, --detach returns after submission.",
+  },
+  {
+    name: "task",
+    status: "available",
+    operation: "getTask",
+    usage: "engine task <taskId> [--json]",
+    summary: "Read one task's authoritative status by id.",
   },
   {
     name: "tasks",
     status: "available",
-    operation: "getTask",
-    usage: "engine tasks <taskId> | events <taskId> [--after <n>] | cancel <taskId> [--reason <text>] | resume <taskId> | retry <taskId> [--generation <n>] [--model <provider/model>]",
-    summary: "Read a task, replay its events, or cancel/resume/retry it.",
+    operation: "listNotifications",
+    usage: "engine tasks [--json]",
+    summary: "List durable task completions derived from notifications; 1.0.0 has no task-list operation.",
+  },
+  {
+    name: "events",
+    status: "available",
+    operation: "streamTaskEvents",
+    usage: "engine events <taskId> [--after <n>] [--once] [--json]",
+    summary: "Replay and tail a task's durable event stream.",
+  },
+  {
+    name: "cancel",
+    status: "available",
+    operation: "cancelTask",
+    usage: "engine cancel <taskId> [--reason <text>] [--json]",
+    summary: "Request cancellation of a durable task.",
+  },
+  {
+    name: "resume",
+    status: "available",
+    operation: "resumeTask",
+    usage: "engine resume <taskId> [--generation <n>] [--json]",
+    summary: "Resume a paused or interrupted task.",
+  },
+  {
+    name: "retry",
+    status: "available",
+    operation: "retryTask",
+    usage: "engine retry <taskId> [--generation <n>] [--model <provider/model>] [--json]",
+    summary: "Retry a terminal task from its authoritative generation.",
   },
   {
     name: "conversations",
     status: "available",
     operation: "listConversations",
-    usage: "engine conversations [<conversationId>] [--json]",
-    summary: "List conversations or read one with its transcript.",
+    usage: "engine conversations [--json]",
+    summary: "List chat and Work conversations.",
+  },
+  {
+    name: "conversation",
+    status: "available",
+    operation: "getConversation",
+    usage: "engine conversation <conversationId> [--json]",
+    summary: "Read one conversation transcript.",
   },
   {
     name: "memory",
@@ -141,6 +183,20 @@ export const ENGINE_COMMANDS = Object.freeze([
     summary: "Read pending permission requests or decide one.",
   },
   {
+    name: "approve",
+    status: "available",
+    operation: "decidePermission",
+    usage: "engine approve <taskId> <requestId> [--reason <text>] [--json]",
+    summary: "Approve one pending permission request.",
+  },
+  {
+    name: "deny",
+    status: "available",
+    operation: "decidePermission",
+    usage: "engine deny <taskId> <requestId> [--reason <text>] [--json]",
+    summary: "Deny one pending permission request.",
+  },
+  {
     name: "notifications",
     status: "available",
     operation: "listNotifications",
@@ -155,11 +211,18 @@ export const ENGINE_COMMANDS = Object.freeze([
     summary: "Report available, unconfigured and blocked capabilities.",
   },
   {
+    name: "status",
+    status: "available",
+    operation: null,
+    usage: "engine status [--json]",
+    summary: "Show the configured engine URL, token source and data mode.",
+  },
+  {
     name: "doctor",
     status: "available",
     operation: "getHealth",
     usage: "engine doctor [--json]",
-    summary: "Alias for compat with the engine contract check.",
+    summary: "Run local and engine diagnostics, including contract and owner auth.",
   },
   {
     name: "help",
@@ -175,8 +238,15 @@ export const ENGINE_COMMANDS = Object.freeze([
   },
   {
     name: "artifacts",
+    status: "available",
+    operation: "getTask",
+    usage: "engine artifacts <taskId> [--json]",
+    summary: "List artifact metadata from a task result; 1.0.0 has no upload or download operation.",
+  },
+  {
+    name: "transfers",
     status: "blocked",
-    reason: "WorkflowEngine 1.0.0 lists artifact paths in task results but exposes no artifact or file-transfer operation.",
+    reason: "WorkflowEngine 1.0.0 exposes no artifact upload, download or file-transfer operation; task results carry metadata only.",
   },
   {
     name: "plugins",
@@ -197,11 +267,6 @@ export const ENGINE_COMMANDS = Object.freeze([
     name: "executions",
     status: "blocked",
     reason: "WorkflowEngine 1.0.0 has no execution-list operation; a task can only be read by id.",
-  },
-  {
-    name: "detach",
-    status: "blocked",
-    reason: "WorkflowEngine 1.0.0 does not accept a detach request; Work is durable by default because submit returns before the run finishes.",
   },
   {
     name: "browser",
@@ -317,6 +382,7 @@ export const GLOBAL_FLAGS = Object.freeze([
   "reason",
   "generation",
   "after",
+  "once",
 ]);
 
 export const BOOLEAN_GLOBAL_FLAGS = Object.freeze([
@@ -337,6 +403,7 @@ export const BOOLEAN_GLOBAL_FLAGS = Object.freeze([
   "dry-run",
   "purge",
   "no-approval",
+  "once",
 ]);
 
 /** Shell completion generated from this registry, not a second list. */

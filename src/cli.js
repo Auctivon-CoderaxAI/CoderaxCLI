@@ -482,17 +482,26 @@ function exitFor(error) {
   if (
     error.code === "UNAUTHENTICATED" ||
     error.code === "FORBIDDEN" ||
+    error.code === "unauthorized" ||
+    error.code === "forbidden" ||
     error.code === "HTTP_401" ||
     error.code === "HTTP_403"
   ) {
     return EXIT.unauthenticated;
   }
-  if (error.code === "NOT_FOUND" || error.code === "HTTP_404") return EXIT.notFound;
+  if (
+    error.code === "NOT_FOUND" ||
+    error.code === "not_found" ||
+    error.code === "HTTP_404"
+  ) {
+    return EXIT.notFound;
+  }
   if (
     error.code === "NETWORK" ||
     error.code === "TIMEOUT" ||
     error.code === "REQUEST_TIMEOUT" ||
-    error.code === "REQUEST_FAILED"
+    error.code === "REQUEST_FAILED" ||
+    error.code === "STREAM_DISCONNECTED"
   ) {
     return EXIT.network;
   }

@@ -10,9 +10,10 @@ version is `0`, a minor release may change behaviour.
 ### Added
 
 - Authoritative WorkflowEngine 1.0.0 command namespace: `health`, `ready`,
-  `compat`, `verify`, `agents`, `models`, `chat`, `work`, `tasks` (read, events,
-  cancel, resume, retry), `conversations`, `memory`, `permissions`,
-  `notifications` and `capabilities`.
+  `compat`, `verify`, `agents`, `models`, `chat`, `work`, `task`, `tasks`,
+  `events`, `cancel`, `resume`, `retry`, `conversations`, `conversation`,
+  `memory`, `permissions`, `approve`, `deny`, `artifacts` (metadata),
+  `notifications`, `status` and `capabilities`.
 - One authoritative command registry for the engine surface, top-level dispatch
   validation, help, capability reporting and generated bash/zsh/fish
   completion (`coderax completion <shell>`).
@@ -23,23 +24,30 @@ version is `0`, a minor release may change behaviour.
   SSE replay and fail-closed blocked commands; the CI workflow now runs it on
   Ubuntu against a pinned engine commit.
 - Adopted the pinned engine contract, vendored OpenAPI digest, validated HTTP
-  client, SSE decoder and event assembler from `feat/engine-thin-client-v1`
-  (`0cd85bf`); no second route catalogue or transport is kept.
+  client, SSE decoder, event assembler and command handlers from
+  `feat/engine-thin-client-v1` (`0cd85bf`); no second route catalogue,
+  transport or handler layer is kept. `src/engine-commands.js` is a thin
+  registry adapter with contract/owner preflight and secure credential
+  handling.
 
 ### Changed
 
 - Consolidated PR #6's release, authentication, durable-sync and packaging work
   into this branch; the engine namespace is layered on the release base rather
   than a parallel CLI.
+- Replaced the branch's parallel engine handlers with the adopted
+  `engine-surface.js`; Work now streams durable SSE events, pauses on approval,
+  and reports authoritative task status and artifact metadata.
 - Removed the superseded OpenAPI-discovery command catalog for commands the
   authoritative engine does not implement.
 
 ### Blocked
 
-- Schedules, artifacts and file transfers, plugins, tools, projects, execution
-  lists, detach, cloud browser, Native Game Studio and Native Gaming Agent are
-  declared blocked because WorkflowEngine 1.0.0 has no such operations. They
-  exit `6` without a request and are never simulated.
+- Schedules, file transfers, plugins, tools, projects, execution lists, cloud
+  browser, Native Game Studio and Native Gaming Agent are declared blocked
+  because WorkflowEngine 1.0.0 has no such operations. They exit `6` without a
+  request and are never simulated. Artifact metadata and notification-derived
+  task discovery are available; `work --detach` is the supported detach path.
 
 ## [0.3.0] - 2026-11-26
 

@@ -10,8 +10,9 @@ The separate **Coderax WorkflowEngine** is exposed through the authoritative
 `coderax engine ...` namespace. It is not the legacy `/api/work` deployment
 API: the engine namespace binds only to the published 1.0.0 contract, validates
 the served contract version and owner token before each authenticated call,
-and marks schedules, artifacts, tools, projects, cloud browser, Game Studio and
-Gaming Agent as blocked because 1.0.0 has no such operations. See
+and marks schedules, file transfers, tools, projects, cloud browser, Game
+Studio and Gaming Agent as blocked because 1.0.0 has no such operations.
+Artifact metadata and notification-derived task discovery are available; see
 [docs/WORKFLOW-ENGINE.md](docs/WORKFLOW-ENGINE.md).
 
 The CLI does not run models, agents, containers, or databases locally. Inference
@@ -87,7 +88,8 @@ else. No administrator rights, services, daemons, or open ports.
 | Pinned engine contract / vendored OpenAPI digest | ✅ adopted from the engine thin-client workstream; drift-tested |
 | Engine HTTP/SSE core with response validation and idle timeout | ✅ adopted; exercised against the real engine |
 | Engine contract/auth preflight, blocked capabilities | ✅ implemented, tested; blocked commands send no request |
-| Engine schedules, artifacts, tools, projects, cloud browser, game features | ⛔ blocked — absent from WorkflowEngine 1.0.0 |
+| Engine artifact metadata, notification-derived task discovery | ✅ available; file transfer remains absent |
+| Engine schedules, tools, projects, cloud browser, game features | ⛔ blocked — absent from WorkflowEngine 1.0.0 |
 | `doctor` diagnostics, `version`, `compat`, `uninstall` | ✅ implemented, tested |
 | Reproducible artifacts, SHA-256 checksums, SPDX SBOM | ✅ implemented, verified |
 | Traversal/symlink/overwrite-safe archive extraction | ✅ implemented, tested |
@@ -138,8 +140,10 @@ coderax engine health
 coderax engine verify
 coderax engine chat "Summarize this repository" --mode cloud
 coderax engine work submit "Fix the failing test" --follow
-coderax engine tasks <taskId>
-coderax engine tasks events <taskId> --json
+coderax engine task <taskId>
+coderax engine tasks
+coderax engine events <taskId> --once --json
+coderax engine artifacts <taskId> --json
 coderax engine capabilities --json
 coderax completion bash > ~/.coderax-completion.bash
 ```

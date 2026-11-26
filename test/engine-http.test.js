@@ -178,26 +178,42 @@ test(
         env,
       );
       assert.equal(work.code, 0, work.err);
-      assert.equal(work.json.task.state, "completed");
-      assert.ok(work.json.task.taskId.startsWith("task_"));
-      assert.match(work.json.task.result.summary, /live engine reply/);
+      assert.equal(work.json.state, "completed");
+      assert.ok(work.json.taskId.startsWith("task_"));
+      assert.match(work.json.text, /live engine reply/);
 
-      const task = await invoke(["engine", "tasks", work.json.task.taskId, "--json"], env);
+      const task = await invoke(["engine", "tasks", work.json.taskId, "--json"], env);
       assert.equal(task.code, 0, task.err);
-      assert.equal(task.json.task.state, "completed");
-      assert.equal(task.json.task.steps.length, 3);
+      assert.equal(task.json.state, "completed");
+      assert.equal(task.json.steps.length, 3);
+
+      const taskById = await invoke(["engine", "task", work.json.taskId, "--json"], env);
+      assert.equal(taskById.code, 0, taskById.err);
+      assert.equal(taskById.json.state, "completed");
+
+      const taskDiscovery = await invoke(["engine", "tasks", "--json"], env);
+      assert.equal(taskDiscovery.code, 0, taskDiscovery.err);
+      assert.ok(
+        taskDiscovery.json.notifications.some((item) => item.taskId === work.json.taskId),
+      );
 
       const events = await invoke(
-        ["engine", "tasks", "events", work.json.task.taskId, "--json"],
+        ["engine", "tasks", "events", work.json.taskId, "--json"],
         env,
       );
       assert.equal(events.code, 0, events.err);
       const eventTypes = events.out
         .split("\n")
         .filter((line) => line.trim() !== "")
-        .map((line) => JSON.parse(line).type);
+        .map((line) => JSON.parse(line).type)
+        .filter(Boolean);
       assert.ok(eventTypes.includes("task.started"));
       assert.ok(eventTypes.includes("task.completed"));
+
+      const artifacts = await invoke(["engine", "artifacts", work.json.taskId, "--json"], env);
+      assert.equal(artifacts.code, 0, artifacts.err);
+      assert.equal(artifacts.json.transferSupported, false);
+      assert.deepEqual(artifacts.json.artifacts, []);
 
       const conversations = await invoke(["engine", "conversations", "--json"], env);
       assert.equal(conversations.code, 0, conversations.err);
@@ -212,7 +228,7 @@ test(
       assert.deepEqual(memory.json.entries, []);
 
       const permissions = await invoke(
-        ["engine", "permissions", work.json.task.taskId, "--json"],
+        ["engine", "permissions", work.json.taskId, "--json"],
         env,
       );
       assert.equal(permissions.code, 0, permissions.err);
@@ -223,9 +239,13 @@ test(
       assert.ok(notifications.json.unread >= 1);
       assert.ok(
         notifications.json.notifications.some(
-          (notification) => notification.taskId === work.json.task.taskId,
+          (notification) => notification.taskId === work.json.taskId,
         ),
       );
+
+      const status = await invoke(["engine", "status", "--json"], env);
+      assert.equal(status.code, 0, status.err);
+      assert.equal(status.json.authenticated, true);
 
       const compat = await invoke(["engine", "compat", "--json"], env);
       assert.equal(compat.code, 0, compat.err);

@@ -205,6 +205,18 @@ test("malformed --data and empty Work objectives fail before any request", async
   });
   assert.equal(empty, 2);
   assert.match(io.err(), /non-empty objective/);
+
+  const badAfter = await runCli(
+    ["engine", "work", "submit", "say hello", "--follow", "--after", "nope"],
+    {
+      env: await env(),
+      fetchImpl: stub.fetchImpl,
+      stdout: io.stdout,
+      stderr: io.stderr,
+    },
+  );
+  assert.equal(badAfter, 2);
+  assert.match(io.err(), /--after must be a non-negative integer/);
   assert.equal(stub.calls.length, 0);
 });
 
@@ -284,8 +296,70 @@ test("Work --data is validated then submitted as one durable task", async () => 
   const work = stub.calls[2];
   assert.equal(work.path, "/v1/work");
   assert.equal(work.method, "POST");
-  assert.deepEqual(work.body, { objective: "say hello", mode: "cloud" });
-  assert.equal(JSON.parse(io.out()).task.taskId, "task_1");
+  assert.deepEqual(work.body, {
+    objective: "say hello",
+    mode: "cloud",
+    requireApproval: true,
+  });
+  const result = JSON.parse(io.out());
+  assert.equal(result.taskId, "task_1");
+  assert.equal(result.detached, true);
+});
+
+test("task discovery and artifact metadata use the adopted surface", async () => {
+  const io = capture();
+  const stub = healthyEngine({
+    "/v1/notifications": () =>
+      json(200, {
+        unread: 1,
+        notifications: [
+          {
+            taskId: "task_1",
+            state: "completed",
+            summary: "done",
+            read: false,
+            createdAt: "2026-01-01T00:00:00.000Z",
+          },
+        ],
+      }),
+    "/v1/work/task_1": () =>
+      json(200, {
+        taskId: "task_1",
+        conversationId: "conv_1",
+        state: "completed",
+        agent: "coderax",
+        mode: "cloud",
+        generation: 1,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:01.000Z",
+        cancelRequested: false,
+        steps: [],
+        result: { artifacts: [{ path: "out.txt", bytes: 3, digest: "sha256:abc" }] },
+      }),
+  });
+
+  const tasks = await runCli(["engine", "tasks", "--json"], {
+    env: await env(),
+    fetchImpl: stub.fetchImpl,
+    stdout: io.stdout,
+    stderr: io.stderr,
+  });
+  assert.equal(tasks, 0, io.err());
+  assert.equal(JSON.parse(io.out()).notifications[0].taskId, "task_1");
+  assert.equal(stub.calls.at(-1).path, "/v1/notifications");
+
+  const artifactIo = capture();
+  const artifacts = await runCli(["engine", "artifacts", "task_1", "--json"], {
+    env: await env(),
+    fetchImpl: stub.fetchImpl,
+    stdout: artifactIo.stdout,
+    stderr: artifactIo.stderr,
+  });
+  assert.equal(artifacts, 0, artifactIo.err());
+  const payload = JSON.parse(artifactIo.out());
+  assert.equal(payload.transferSupported, false);
+  assert.deepEqual(payload.artifacts, [{ path: "out.txt", bytes: 3, digest: "sha256:abc" }]);
+  assert.equal(stub.calls.at(-1).path, "/v1/work/task_1");
 });
 
 test("capabilities reports blocked commands and unconfigured deployment without a request", async () => {
@@ -308,6 +382,20 @@ test("capabilities reports blocked commands and unconfigured deployment without 
   assert.equal(schedules.status, "blocked");
   const healthCommand = report.commands.find((command) => command.name === "health");
   assert.equal(healthCommand.status, "unconfigured");
+});
+
+test("engine status is local and needs no request", async () => {
+  const io = capture();
+  const stub = healthyEngine();
+  const code = await runCli(["engine", "status", "--json"], {
+    env: await env(),
+    fetchImpl: stub.fetchImpl,
+    stdout: io.stdout,
+    stderr: io.stderr,
+  });
+  assert.equal(code, 0, io.err());
+  assert.equal(stub.calls.length, 0);
+  assert.equal(JSON.parse(io.out()).authenticated, true);
 });
 
 test("completion is generated from the same registry", async () => {
@@ -357,9 +445,9 @@ test("untrusted engine text cannot inject terminal escapes", async () => {
       json(200, {
         agents: [
           {
-            id: "coderax",
+            id: "coderax\u001B[31m",
             engine: "native",
-            label: "red\u001B[31m label",
+            label: "red label",
             external: false,
             capabilities: {},
             availability: { available: true, reason: "ready", detail: "ok" },
@@ -376,7 +464,7 @@ test("untrusted engine text cannot inject terminal escapes", async () => {
   });
   assert.equal(code, 0);
   assert.equal(io.out().includes("\u001B"), false);
-  assert.match(io.out(), /red label/);
+  assert.match(io.out(), /coderax/);
 });
 
 test("unknown Work fields and conversation traversal fail before the request", async () => {
@@ -466,6 +554,8 @@ test("engine help works without a deployment and names blocked work", async () =
   assert.match(io.out(), /authoritative WorkflowEngine 1\.0\.0/);
   assert.match(io.out(), /Blocked by the 1\.0\.0 contract/);
   assert.match(io.out(), /schedules - WorkflowEngine 1\.0\.0 exposes no schedule/);
+  assert.match(io.out(), /transfers - WorkflowEngine 1\.0\.0 exposes no artifact/);
+  assert.doesNotMatch(io.out(), /detach - WorkflowEngine/);
 });
 
 test("unknown engine commands are usage errors", async () => {
