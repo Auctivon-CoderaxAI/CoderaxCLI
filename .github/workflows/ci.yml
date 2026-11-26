@@ -2,7 +2,9 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    # PR #5 owns `main`; verify this stacked security branch on every push so
+    # the exact stacked SHA has a hosted run even before a PR is opened.
+    branches: [main, feat/secure-owner-auth]
   pull_request:
   workflow_dispatch:
 
