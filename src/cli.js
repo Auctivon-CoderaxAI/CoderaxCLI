@@ -8,50 +8,67 @@ import {
   saveConfig,
 } from "./config.js";
 import { CoderaxError, formatJson, redact, request } from "./client.js";
-import { checkEngineCompatibility } from "./compat.js";
-import { collectVersionInfo, formatVersionInfo } from "./diagnostics.js";
 import { discoverOpenApi, findOperation } from "./discover.js";
-import * as maintenance from "./maintenance.js";
 import * as product from "./product-commands.js";
+import * as workflow from "./workflow-commands.js";
+import * as maintenance from "./maintenance.js";
+import { collectVersionInfo, formatVersionInfo } from "./diagnostics.js";
+import { SdkError } from "../packages/workflow-sdk/src/index.js";
 import { VERSION } from "./version.js";
 
 export { VERSION };
 
-const USAGE = `coderax ${VERSION} - command-line client for a Coderax deployment
+const USAGE = `coderax ${VERSION} - owner-only cloud client for a Coderax deployment
 
 Usage:
-  coderax products [--json]
-  coderax chat [message] [--model <id>] [--json]
-  coderax work [message] [--model <id>] [--json]
-  coderax models [--json]
-  coderax agents [--json]
-  coderax cloud [--json]
-  coderax projects [--json]
-  coderax login [--token <token>] [--json]
+  coderax login [--token-file <path>] [--json]  verify the owner role, then store the token
   coderax logout [--json]
+  coderax whoami [--json]
   coderax status [--json]
-  coderax config show|list [--json]
-  coderax config get <key>
-  coderax config set <key> <value>
-  coderax config set [--base-url <url>] [--token <token>] [--timeout <ms>]
-  coderax doctor [--json]
+  coderax chat [message] [--model <id>] [--agent <id>] [--conversation <id>] [--new] [--json]
+  coderax work [message] [--model <id>] [--agent <id>] [--json]
+  coderax work submit <prompt> --repo <owner/name> --agent <id> [--base-ref <ref>]
+                              [--mode turbo15|autonomous|verified] [--workspace <name>]
+                              [--follow] [--json]
+  coderax tasks [taskId] [--json]              durable Work conversations
+  coderax workflows [--json]
+  coderax runs --workflow <id> [--json]
+  coderax run <runId> [--no-follow] [--approval ask|allow|deny] [--notify]
+                      [--notify-command <cmd>] [--cancel-on-interrupt] [--json]
+  coderax cancel <runId|taskId> [--task] [--json]
+  coderax resume <runId> [--json]
+  coderax retry <runId> [--follow] [--json]
+  coderax approve <runId> <stepIndex> [--json]
+  coderax repos [--json]
+  coderax agents [--work] [--json]
+  coderax models [--work] [--json]
+  coderax doctor [--json] / coderax diagnostics [--json]
   coderax version [--json]
   coderax compat [--json]
-  coderax update [--json]
-  coderax uninstall [--yes] [--dry-run] [--json]
+  coderax uninstall [--yes] [--dry-run] [--purge] [--json]
   coderax health [--json]
   coderax openapi [--json]
   coderax call <METHOD> <PATH> [--data <json>] [--json]
+  coderax products|cloud|projects|update [--json]
+  coderax config show|list [--json]
+  coderax config get <key>
+  coderax config set <key> <value>
+  coderax config set [--base-url <url>] [--timeout <ms>]
 
 Global options:
   --base-url <url>   Override the deployment URL (HTTPS, or HTTP on loopback)
-  --token <token>    Override the configured bearer token
+  --token-file <p>   Read the bearer token from a 0600 file (never argv)
   --timeout <ms>     Per-request timeout, 100-120000
   --model <id>       Override the model for one invocation
+  --agent <id>       Select an agent for chat, Work or an autonomous build
   --endpoint <name>  Override the chat endpoint name
   --chat-path <path> Override the streaming path
   --url <path>       Override the streaming path for one invocation
-  --json             Machine-readable output
+  --conversation <id> Continue a specific conversation
+  --new              Start a new conversation
+  --strict           Fail on unverified API version or missing capabilities
+  --max-retries <n>  Reconnect attempts for durable run monitoring (0-10)
+  --json             Machine-readable output (run monitoring emits NDJSON)
   --yes, --dry-run   Confirm or preview the uninstall command
   --purge            With uninstall: also remove stored credentials
   --no-color         Accepted for compatibility
@@ -60,18 +77,29 @@ Global options:
 
 Environment:
   CODERAX_BASE_URL, CODERAX_TOKEN, CODERAX_TIMEOUT_MS, CODERAX_CONFIG,
-  CODERAX_CONFIG_DIR, CODERAX_CHAT_PATH, CODERAX_ENDPOINT, CODERAX_MODEL
+  CODERAX_CONFIG_DIR, CODERAX_CHAT_PATH, CODERAX_ENDPOINT, CODERAX_MODEL,
+  CODERAX_AGENT, CODERAX_CREDENTIAL_STORE
 
-Discovery: agents, models, and openapi use the deployment's OpenAPI document.
-health probes fixed paths, login checks /api/user, doctor probes the same health
-endpoints, and chat and work use the configured chat path. call uses the path you supply.
-A missing discovered route fails with OPERATION_NOT_FOUND.
+Tokens: passing a token as a command-line argument is refused because it would
+appear in shell history and process listings. Use \`coderax login\` (secure
+prompt), \`--token-file <path>\`, stdin, or CODERAX_TOKEN. Tokens are stored in
+the operating-system credential store when one offers a non-argv interface, and
+in a 0600 config file otherwise.
 
-Release:
-  version reports the CLI version, Node runtime, install method and the
-  supported WorkflowEngine range. compat compares the configured deployment's
-  reported engine version with that range. Upgrades and uninstalls never run
-  automatically.
+Release: \`version\` reports the install and compatibility contract, \`compat\`
+checks the deployment's API-version handshake, and \`uninstall\` removes local
+user data only. Upgrades and uninstalls never run automatically.
+
+Exit codes:
+  0 ok, 1 failed operation/task, 2 usage, 3 unauthenticated/not owner,
+  4 network or timeout, 5 not found, 6 backend capability or API version
+  unavailable, 7 contract violation (including incomplete streams), 130 cancelled.
+
+Discovery: agents, models, and openapi use the deployment's OpenAPI document
+(\`--work\` uses the Work-eligible routes). health probes fixed paths. login and
+whoami verify /api/user and require the owner role. chat and work use the native
+Work chat SSE endpoint. Durable Work uses /api/workflows; a deployment without
+it fails closed with CAPABILITY_UNAVAILABLE.
 `;
 
 const EXIT = Object.freeze({
@@ -82,6 +110,7 @@ const EXIT = Object.freeze({
   network: 4,
   notFound: 5,
   unavailable: 6,
+  contract: 7,
   cancelled: 130,
 });
 
@@ -90,8 +119,9 @@ const CONFIG_KEYS = Object.freeze(Object.assign(Object.create(null), {
   "chat-path": "chatPath",
   endpoint: "endpoint",
   model: "model",
+  agent: "agent",
 }));
-const CONFIG_FLAGS = ["base-url", "token", "timeout", "chat-path", "endpoint", "model"];
+const CONFIG_FLAGS = ["base-url", "timeout", "chat-path", "endpoint", "model", "agent"];
 
 const KNOWN_COMMANDS = new Set([
   "config",
@@ -108,33 +138,80 @@ const KNOWN_COMMANDS = new Set([
   "login",
   "logout",
   "status",
+  "whoami",
+  "tasks",
+  "workflows",
+  "runs",
+  "run",
+  "cancel",
+  "resume",
+  "retry",
+  "approve",
+  "repos",
   "doctor",
+  "diagnostics",
   "update",
-  "version",
   "compat",
   "uninstall",
   "cleanup",
   "help",
+  "version",
 ]);
 const KNOWN_FLAGS = new Set([
   "help",
   "version",
   "json",
   "base-url",
-  "token",
+  "token-file",
   "timeout",
   "data",
   "model",
+  "agent",
   "endpoint",
   "chat-path",
   "url",
+  "conversation",
+  "new",
+  "repo",
+  "base-ref",
+  "mode",
+  "workspace",
+  "follow",
+  "detach",
+  "no-follow",
+  "approval",
+  "workflow",
+  "task",
+  "notify",
+  "notify-command",
+  "cancel-on-interrupt",
+  "strict",
+  "max-retries",
+  "work",
+  "yes",
+  "dry-run",
+  "purge",
   "no-color",
-  // uninstall / cleanup
+]);
+const ALLOWED_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
+const BOOLEAN_FLAGS = new Set([
+  "help",
+  "version",
+  "json",
+  "no-color",
+  "new",
+  "follow",
+  "detach",
+  "no-follow",
+  "strict",
+  "notify",
+  "cancel-on-interrupt",
+  "work",
+  "task",
   "yes",
   "dry-run",
   "purge",
 ]);
-const ALLOWED_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
 
 export class UsageError extends Error {
   constructor(message) {
@@ -166,17 +243,11 @@ export function parseArgv(argv) {
       flags.set("no-color", true);
       continue;
     }
-    if (arg === "--yes" || arg === "-y") {
-      flags.set("yes", true);
-      continue;
-    }
-    if (arg === "--dry-run") {
-      flags.set("dry-run", true);
-      continue;
-    }
-    if (arg === "--purge") {
-      flags.set("purge", true);
-      continue;
+    if (arg === "--token" || arg.startsWith("--token=")) {
+      throw new UsageError(
+        "--token is refused: a token in argv leaks into shell history and process listings. " +
+          "Use `coderax login` (secure prompt), `--token-file <path>`, stdin, or CODERAX_TOKEN.",
+      );
     }
     if (arg.startsWith("--")) {
       const body = arg.slice(2);
@@ -187,6 +258,10 @@ export function parseArgv(argv) {
       }
       if (equals !== -1) {
         flags.set(name, body.slice(equals + 1));
+        continue;
+      }
+      if (BOOLEAN_FLAGS.has(name)) {
+        flags.set(name, true);
         continue;
       }
       const value = argv[index + 1];
@@ -290,7 +365,7 @@ async function resolveSettings(flags, deps) {
   });
 
   const baseUrl = config.baseUrl;
-  const token = flags.has("token") ? flags.get("token") : config.token;
+  const token = config.token;
   const timeoutMs = config.timeoutMs;
 
   // `config` commands must work on a fresh install, so the base URL is only
@@ -301,6 +376,7 @@ async function resolveSettings(flags, deps) {
     token: token || null,
     timeoutMs,
     model: flags.has("model") ? flags.get("model") : config.model,
+    agent: flags.has("agent") ? flags.get("agent") : config.agent,
     endpoint: flags.has("endpoint") ? flags.get("endpoint") : config.endpoint,
     chatPath: flags.has("chat-path") ? flags.get("chat-path") : config.chatPath,
   };
@@ -325,33 +401,6 @@ async function commandHealth(context, deps, write, flags) {
     `health: ok (GET ${path}) HTTP ${response.status}\n${response.json ? formatJson(response.json) : ""}`,
     { endpoint: path, status: response.status, body },
   );
-}
-
-async function commandCompat(context, deps, write, flags) {
-  const result = await checkEngineCompatibility({
-    baseUrl: context.baseUrl,
-    token: context.token,
-    timeoutMs: context.timeoutMs,
-    fetchImpl: deps.fetchImpl,
-  });
-  const payload = { cliVersion: VERSION, ...result };
-  const status = result.supported === true
-    ? "compatible"
-    : result.supported === false
-      ? "unsupported"
-      : "unknown";
-  emit(
-    write,
-    flags,
-    [
-      `CLI              ${VERSION}`,
-      `supports         ${result.range}`,
-      `WorkflowEngine   ${result.engineVersion ?? "(not reported)"}${result.engineSource ? ` (${result.engineSource})` : ""}`,
-      `compatibility    ${status} \u2014 ${result.reason}`,
-    ].join("\n"),
-    { ...payload, status },
-  );
-  return result.supported === true ? EXIT.ok : EXIT.failure;
 }
 
 async function commandOpenapi(context, deps, write, flags) {
@@ -427,7 +476,7 @@ async function commandConfig(positionals, context, deps, write, flags) {
     emit(
       write,
       flags,
-      `config: ${described.configPath}\nbase URL: ${described.baseUrl ?? "(not set)"}\ntoken: ${described.tokenConfigured ? "configured" : "not configured"}\ntimeout: ${described.timeoutMs}ms\nchat path: ${described.chatPath}\nendpoint: ${described.endpoint}\nmodel: ${described.model || "(not set)"}\n`,
+      `config: ${described.configPath}\nbase URL: ${described.baseUrl ?? "(not set)"}\ntoken: ${described.tokenConfigured ? "configured" : "not configured"}\ntimeout: ${described.timeoutMs}ms\nchat path: ${described.chatPath}\nendpoint: ${described.endpoint}\nmodel: ${described.model || "(not set)"}\nagent: ${described.agent || "(not set)"}\nowner role: ${described.role ?? "(unverified)"}\nconversations: ${described.conversationCount}\n`,
       described,
     );
     return;
@@ -456,10 +505,10 @@ async function commandConfig(positionals, context, deps, write, flags) {
     patch[CONFIG_KEYS[key]] = value;
   } else {
     if (flags.has("base-url")) patch.baseUrl = flags.get("base-url");
-    if (flags.has("token")) patch.token = flags.get("token");
     if (flags.has("chat-path")) patch.chatPath = flags.get("chat-path");
     if (flags.has("endpoint")) patch.endpoint = flags.get("endpoint");
     if (flags.has("model")) patch.model = flags.get("model");
+    if (flags.has("agent")) patch.agent = flags.get("agent");
     if (flags.has("timeout")) {
       const timeoutMs = Number(flags.get("timeout"));
       if (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 120000) {
@@ -487,11 +536,41 @@ function exitFor(error) {
   if (error instanceof UsageError || error instanceof ConfigError || error.code === "USAGE") {
     return EXIT.usage;
   }
-  if (error.code === "UNAVAILABLE") return EXIT.unavailable;
+  if (
+    error.code === "CONTRACT_VIOLATION" ||
+    error.code === "STREAM_INCOMPLETE" ||
+    error.code === "RESUME_UNSUPPORTED" ||
+    error.code === "UNKNOWN_RUN_STATUS"
+  ) {
+    return EXIT.contract;
+  }
+  if (
+    error.code === "UNAVAILABLE" ||
+    error.code === "CAPABILITY_UNAVAILABLE" ||
+    error.code === "API_VERSION_UNSUPPORTED" ||
+    error.code === "API_VERSION_UNVERIFIED" ||
+    error.code === "OWNER_UNVERIFIABLE"
+  ) {
+    return EXIT.unavailable;
+  }
   if (error.code === "CANCELLED") return EXIT.cancelled;
-  if (error.code === "HTTP_401" || error.code === "HTTP_403") return EXIT.unauthenticated;
-  if (error.code === "HTTP_404") return EXIT.notFound;
-  if (error.code === "REQUEST_TIMEOUT" || error.code === "REQUEST_FAILED") return EXIT.network;
+  if (
+    error.code === "UNAUTHENTICATED" ||
+    error.code === "FORBIDDEN" ||
+    error.code === "HTTP_401" ||
+    error.code === "HTTP_403"
+  ) {
+    return EXIT.unauthenticated;
+  }
+  if (error.code === "NOT_FOUND" || error.code === "HTTP_404") return EXIT.notFound;
+  if (
+    error.code === "NETWORK" ||
+    error.code === "TIMEOUT" ||
+    error.code === "REQUEST_TIMEOUT" ||
+    error.code === "REQUEST_FAILED"
+  ) {
+    return EXIT.network;
+  }
   return EXIT.failure;
 }
 
@@ -506,6 +585,7 @@ export async function runCli(argv, options = {}) {
     signal: options.signal,
     stdinIsTTY: options.stdinIsTTY ?? Boolean(process.stdin.isTTY),
     readSecret: options.readSecret ?? readStdin,
+    confirm: options.confirm ?? defaultConfirm,
   };
 
   const write = (text) => deps.stdout(text.endsWith("\n") ? text : `${text}\n`);
@@ -527,18 +607,18 @@ export async function runCli(argv, options = {}) {
       return EXIT.ok;
     }
 
-    const { call } = preflight(positionals, flags);
-    const [command] = positionals;
-
-    // Version diagnostics must work on a broken config, so they run before
-    // configuration resolution reads the file.
-    if (command === "version") {
-      const info = collectVersionInfo({ env: deps.env });
-      write(flags.has("json") ? formatJson(info) : formatVersionInfo(info).trimEnd());
+    // Diagnostics must work before configuration exists and even when the
+    // config file is unreadable; neither answer needs the deployment.
+    if (positionals[0] === "version") {
+      const info = deps.install ?? collectVersionInfo({ env: deps.env });
+      deps.stdout(flags.has("json") ? formatJson(info) : formatVersionInfo(info));
       return EXIT.ok;
     }
 
+    const { call } = preflight(positionals, flags);
+
     const settings = await resolveSettings(flags, deps);
+    const [command] = positionals;
     const ctx = {
       ...settings,
       settings,
@@ -553,7 +633,8 @@ export async function runCli(argv, options = {}) {
       signal: deps.signal,
       stdinIsTTY: deps.stdinIsTTY,
       readSecret: deps.readSecret,
-      install: collectVersionInfo({ env: deps.env }),
+      confirm: deps.confirm,
+      install: deps.install ?? collectVersionInfo({ env: deps.env }),
     };
 
     if (command === "config") {
@@ -574,22 +655,55 @@ export async function runCli(argv, options = {}) {
         return await product.login(ctx);
       case "logout":
         return await product.logout(ctx);
+      case "whoami":
+        return await workflow.whoamiCommand(ctx);
       case "chat":
-        return await product.chat(ctx);
+        return await workflow.chatCommand(ctx, ctx.args);
       case "work":
-        return await product.work(ctx);
+        return await workflow.workCommand(ctx, ctx.args);
+      case "tasks":
+        return await workflow.tasksCommand(ctx, ctx.args);
+      case "workflows":
+        return await workflow.workflowsCommand(ctx);
+      case "runs":
+        return await workflow.runsCommand(ctx);
+      case "run":
+        return await workflow.runCommand(ctx, ctx.args);
+      case "cancel":
+        return await workflow.cancelCommand(ctx, ctx.args);
+      case "resume":
+        return await workflow.resumeCommand(ctx, ctx.args);
+      case "retry":
+        return await workflow.retryCommand(ctx, ctx.args);
+      case "approve":
+        return await workflow.approveCommand(ctx, ctx.args);
+      case "repos":
+        return await workflow.reposCommand(ctx);
+      case "agents":
+        if (ctx.flags.has("work")) return await workflow.workAgentsCommand(ctx);
+        break;
+      case "models":
+        if (ctx.flags.has("work")) return await workflow.workModelsCommand(ctx);
+        break;
       case "doctor":
+      case "diagnostics":
         return await product.doctor(ctx);
       case "update":
         return await product.update(ctx);
       case "compat":
-        return await commandCompat(requireBaseUrl(settings), deps, write, flags);
+        return await product.compat(ctx);
       case "uninstall":
       case "cleanup":
         return await maintenance.uninstall(ctx);
       case "help":
         deps.stdout(USAGE);
         return EXIT.ok;
+      case "version": {
+        const info = ctx.install;
+        if (ctx.json) deps.stdout(formatJson(info));
+        else deps.stdout(formatVersionInfo(info));
+        return EXIT.ok;
+      }
       default:
         break;
     }
@@ -614,7 +728,11 @@ export async function runCli(argv, options = {}) {
         throw new UsageError(`unknown command: ${command}. Run \`coderax --help\`.`);
     }
   } catch (error) {
-    const known = error instanceof UsageError || error instanceof ConfigError || error instanceof CoderaxError;
+    const known =
+      error instanceof UsageError ||
+      error instanceof ConfigError ||
+      error instanceof CoderaxError ||
+      error instanceof SdkError;
     const detail =
       error instanceof UsageError ? error.message : `${error.code ?? "ERROR"}: ${error.message}`;
     deps.stderr(`coderax: ${known ? detail : "unexpected failure"}\n`);
@@ -622,15 +740,72 @@ export async function runCli(argv, options = {}) {
   }
 }
 
+async function defaultConfirm(question) {
+  if (!process.stdin.isTTY) return null;
+  const { createInterface } = await import("node:readline/promises");
+  const readline = createInterface({ input: process.stdin, output: process.stderr });
+  try {
+    const answer = await readline.question(question);
+    return /^y(es)?$/i.test(answer.trim());
+  } finally {
+    readline.close();
+  }
+}
+
 async function readStdin() {
   if (process.stdin.isTTY) {
-    return "";
+    return promptHidden();
   }
   let data = "";
   for await (const chunk of process.stdin) {
     data += chunk;
   }
   return data.trim();
+}
+
+/**
+ * Read a secret from a terminal with echo disabled. Without this the token
+ * would be echoed to the screen and captured by terminal recording, which is
+ * the same exposure as putting it in argv.
+ */
+async function promptHidden(question = "Deployment token (input hidden): ") {
+  const { stdin, stderr } = process;
+  if (!stdin.isTTY) return "";
+  stderr.write(question);
+  const wasRaw = stdin.isRaw;
+  stdin.setRawMode(true);
+  stdin.resume();
+  stdin.setEncoding("utf8");
+  return new Promise((resolve) => {
+    let value = "";
+    const cleanup = (clear) => {
+      stdin.setRawMode(Boolean(wasRaw));
+      stdin.pause();
+      stdin.removeListener("data", onData);
+      if (clear) stderr.write("\n");
+    };
+    const onData = (chunk) => {
+      for (const char of chunk) {
+        if (char === "\r" || char === "\n") {
+          cleanup(true);
+          resolve(value.trim());
+          return;
+        }
+        if (char === "\u0003") {
+          cleanup(true);
+          resolve("");
+          process.exitCode = 130;
+          return;
+        }
+        if (char === "\u007f" || char === "\b") {
+          value = value.slice(0, -1);
+          continue;
+        }
+        value += char;
+      }
+    };
+    stdin.on("data", onData);
+  });
 }
 
 export function isEntrypoint(entry = process.argv[1]) {

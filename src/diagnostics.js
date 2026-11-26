@@ -9,7 +9,11 @@
 import { existsSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { SUPPORTED_ENGINE_RANGE } from "./compat.js";
+import {
+  COMPATIBILITY_BASIS,
+  SUPPORTED_API_VERSION,
+  SUPPORTED_DEPLOYMENT_RANGE,
+} from "./compat.js";
 import { configDir, configPath } from "./config.js";
 import { NODE_REQUIREMENT, PACKAGE_NAME, VERSION } from "./version.js";
 
@@ -91,7 +95,9 @@ export function collectVersionInfo({ env = process.env } = {}) {
     configPath: configPath(env),
     configDir: configDir(env),
     channel: env.CODERAX_CHANNEL?.trim() || "stable",
-    supportedWorkflowEngine: SUPPORTED_ENGINE_RANGE,
+    supportedApiVersion: `${SUPPORTED_API_VERSION}.x`,
+    supportedDeploymentRange: SUPPORTED_DEPLOYMENT_RANGE,
+    compatibilityBasis: COMPATIBILITY_BASIS,
   };
 }
 
@@ -104,7 +110,8 @@ export function formatVersionInfo(info) {
     `install      ${info.installMethod} (${info.installPath})`,
     `config       ${info.configPath}`,
     `channel      ${info.channel}`,
-    `engine       ${info.supportedWorkflowEngine}`,
+    `api          ${info.supportedApiVersion}`,
+    `deployment   ${info.supportedDeploymentRange}`,
   ];
   return `${lines.join("\n")}\n`;
 }

@@ -100,20 +100,29 @@ test("missing base URL fails without leaking configuration", async () => {
   assert.match(io.err(), /BASE_URL_REQUIRED/i);
 });
 
-test("config set persists values and never prints the token", async () => {
+test("config set persists values and refuses a token in argv", async () => {
   const io = capture();
   const env = await tempEnv();
 
   const setCode = await runCli(
-    ["config", "set", "--base-url", "https://coderax.example.com", "--token", TOKEN],
+    ["config", "set", "--base-url", "https://coderax.example.com"],
     { env, stdout: io.stdout, stderr: io.stderr },
   );
   assert.equal(setCode, 0);
-  assert.equal(io.out().includes(TOKEN), false);
 
   const stored = JSON.parse(await readFile(env.CODERAX_CONFIG, "utf8"));
   assert.equal(stored.baseUrl, "https://coderax.example.com");
-  assert.equal(stored.token, TOKEN);
+  assert.equal(stored.token ?? null, null);
+
+  // A credential is not a configuration value: it must not travel through argv.
+  const refused = capture();
+  const refusedCode = await runCli(
+    ["config", "set", "--token", TOKEN],
+    { env, stdout: refused.stdout, stderr: refused.stderr },
+  );
+  assert.equal(refusedCode, 2);
+  assert.match(refused.err(), /argv/);
+  assert.equal(refused.err().includes(TOKEN), false);
 
   const showIo = capture();
   const showCode = await runCli(["config", "show", "--json"], {
@@ -123,7 +132,7 @@ test("config set persists values and never prints the token", async () => {
   });
   assert.equal(showCode, 0);
   const shown = JSON.parse(showIo.out());
-  assert.equal(shown.tokenConfigured, true);
+  assert.equal(shown.tokenConfigured, false);
   assert.equal(showIo.out().includes(TOKEN), false);
 });
 

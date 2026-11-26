@@ -25,7 +25,11 @@ import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createTarGz, createZip } from "./lib/archive.mjs";
-import { SUPPORTED_ENGINE_RANGE } from "../src/compat.js";
+import {
+  COMPATIBILITY_BASIS,
+  SUPPORTED_API_VERSION,
+  SUPPORTED_DEPLOYMENT_RANGE,
+} from "../src/compat.js";
 import { NODE_REQUIREMENT, PACKAGE_NAME, VERSION } from "../src/version.js";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -227,6 +231,32 @@ for (const script of scriptFiles) {
   if (!existsSync(join(ROOT, "scripts", script))) throw new Error(`missing installer: scripts/${script}`);
 }
 
+// The installers must be able to extract an archive without trusting the host
+// tar/zip implementation, and without downloading a second helper. Their safe
+// extractor is embedded at build time as base64; verify-release decodes it and
+// compares it with these sources so the shipped copy cannot drift.
+const EXTRACTOR_SOURCES = [
+  ["scripts/lib/archive.mjs", "@CODERAX_ARCHIVE_B64@"],
+  ["scripts/lib/safe-extract.mjs", "@CODERAX_EXTRACT_B64@"],
+];
+
+async function injectExtractors(script) {
+  let text = await readFile(join(ROOT, "scripts", script), "utf8");
+  for (const [source, marker] of EXTRACTOR_SOURCES) {
+    const body = await readFile(join(ROOT, source));
+    text = text.split(marker).join(body.toString("base64"));
+  }
+  return Buffer.from(text, "utf8");
+}
+
+const installerScripts = new Map();
+for (const script of scriptFiles) {
+  installerScripts.set(
+    script,
+    script.startsWith("install") ? await injectExtractors(script) : await readFile(join(ROOT, "scripts", script)),
+  );
+}
+
 const npmEntries = npmOrder(await entriesFrom("package/", packageList));
 
 const standaloneFiles = [...packageList, ...scriptFiles];
@@ -236,7 +266,7 @@ const overrides = new Map([
   ...scriptFiles.map((file) => [file, null]),
 ]);
 for (const file of scriptFiles) {
-  overrides.set(file, await readFile(join(ROOT, "scripts", file)));
+  overrides.set(file, installerScripts.get(file));
 }
 // bin/* are launchers, not repository files; add them explicitly.
 async function standaloneEntries() {
@@ -272,7 +302,7 @@ const artifacts = [
 for (const artifact of artifacts) await writeFile(join(OUT, artifact.name), artifact.data);
 await writeFile(join(OUT, "release-notes.md"), await releaseNotes());
 for (const script of scriptFiles) {
-  await writeFile(join(OUT, script), await readFile(join(ROOT, "scripts", script)));
+  await writeFile(join(OUT, script), installerScripts.get(script));
 }
 const sbomBody = `${JSON.stringify(sbom(), null, 2)}\n`;
 await writeFile(join(OUT, "sbom.spdx.json"), sbomBody);
@@ -284,7 +314,9 @@ const manifest = {
   sourceDate: new Date(MTIME).toISOString(),
   sourceDateEpoch: SOURCE_DATE_EPOCH,
   node: NODE_REQUIREMENT,
-  supportedWorkflowEngine: SUPPORTED_ENGINE_RANGE,
+  supportedApiVersion: `${SUPPORTED_API_VERSION}.x`,
+  supportedDeploymentRange: SUPPORTED_DEPLOYMENT_RANGE,
+  compatibilityBasis: COMPATIBILITY_BASIS,
   commit: commit(),
   reproducible: "Run `npm run repro`; identical source and SOURCE_DATE_EPOCH produce identical artifact hashes.",
   artifacts: artifacts.map((artifact) => ({

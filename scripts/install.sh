@@ -1,13 +1,18 @@
 #!/bin/sh
 # Coderax CLI installer for Linux and macOS.
 #
-# What this does: downloads one release archive, verifies its SHA-256 checksum,
-# extracts it under a versioned directory, and puts a launcher on PATH.
+# What this does: downloads one release archive, verifies its SHA-256 checksum
+# (and, with --provenance, the release's build provenance), extracts it with a
+# traversal- and symlink-safe extractor, stages it, and swaps the launcher into
+# place atomically. A failed swap restores the previous install.
 #
 # What this does NOT do: install Node.js, Ollama, Docker, local AI runtimes,
 # databases, or background services. Coderax inference and state live in the
 # cloud deployment; the CLI is only the access and control interface. If Node
 # is missing the installer stops and tells you to install it yourself.
+#
+# No token is accepted, stored, or printed here. Run `coderax login` after
+# installing; it prompts with echo disabled and uses the OS credential store.
 set -eu
 
 REPO="Auctivon-CoderaxAI/CoderaxCLI"
@@ -21,6 +26,7 @@ CHECKSUM=""
 BASE_URL="${CODERAX_BASE_URL:-$DEFAULT_BASE_URL}"
 DRY_RUN=0
 SKIP_VERIFY=0
+PROVENANCE=0
 FORCE=0
 TMP=""
 
@@ -32,14 +38,18 @@ Usage: install.sh [options]
   --prefix <dir>      Install root (default: ~/.coderax/cli)
   --bin-dir <dir>     Launcher directory (default: ~/.local/bin)
   --from-file <path>  Install a local standalone .tar.gz (offline install)
-  --checksum <sha256> Expected checksum for --from-file
-  --base-url <url>    Releases base URL (default: GitHub Releases)
+  --checksum <sha256> Expected checksum for --from-file (required)
+  --base-url <url>    Releases base URL (default: GitHub Releases, HTTPS only)
+  --provenance        Also verify the archive's build provenance with `gh`
   --skip-verify       Do not verify the download (not recommended)
-  --force             Replace an existing installation of the same version
+  --force             Atomically replace an existing install of this version
   --dry-run           Print the plan without changing anything
   -h, --help          Show this help
 
-Environment: CODERAX_VERSION, CODERAX_PREFIX, CODERAX_BIN_DIR, CODERAX_BASE_URL
+Environment: CODERAX_VERSION, CODERAX_PREFIX, CODERAX_BIN_DIR, CODERAX_BASE_URL,
+CODERAX_REQUIRE_PROVENANCE=1
+
+Authentication is never an installer argument: run `coderax login` afterwards.
 EOF
 }
 
@@ -61,12 +71,17 @@ while [ "$#" -gt 0 ]; do
     --checksum) need_value "$@"; CHECKSUM="$2"; shift 2 ;;
     --base-url) need_value "$@"; BASE_URL="$2"; shift 2 ;;
     --skip-verify) SKIP_VERIFY=1; shift ;;
+    --provenance) PROVENANCE=1; shift ;;
     --force) FORCE=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown option: $1 (try --help)" 2 ;;
   esac
 done
+
+if [ "${CODERAX_REQUIRE_PROVENANCE:-0}" = "1" ]; then
+  PROVENANCE=1
+fi
 
 # --- prerequisites ---------------------------------------------------------
 if ! command -v node >/dev/null 2>&1; then
@@ -91,6 +106,12 @@ fi
 
 case "$PREFIX" in
   ''|/|"$HOME") die "refusing to use '$PREFIX' as the install prefix" 2 ;;
+esac
+
+case "$BASE_URL" in
+  https://*) ;;
+  http://localhost*|http://127.0.0.1*) ;;
+  *) die "releases URL must use HTTPS (got '$BASE_URL')" 2 ;;
 esac
 
 sha256_file() {
@@ -155,7 +176,7 @@ coderax install plan (dry run, nothing was changed)
   install    $DEST
   launcher   $LAUNCHER
   node       $NODE_VERSION
-  verify     $([ "$SKIP_VERIFY" -eq 1 ] && echo "disabled" || echo "sha256")
+  verify     $([ "$SKIP_VERIFY" -eq 1 ] && echo "disabled" || echo "sha256")$([ "$PROVENANCE" -eq 1 ] && echo " + provenance" || true)
 EOF
   exit 0
 fi
@@ -164,19 +185,16 @@ fi
 if [ -n "$FROM_FILE" ]; then
   [ -f "$FROM_FILE" ] || die "archive not found: $FROM_FILE" 2
   ARCHIVE="$FROM_FILE"
-  if [ -n "$CHECKSUM" ] && [ "$SKIP_VERIFY" -eq 0 ]; then
+  if [ "$SKIP_VERIFY" -eq 0 ]; then
+    [ -n "$CHECKSUM" ] || die "--checksum is required for --from-file (or pass --skip-verify explicitly)" 2
     actual="$(sha256_file "$ARCHIVE" | tr 'A-Z' 'a-z')"
     expected="$(printf '%s' "$CHECKSUM" | tr 'A-Z' 'a-z')"
     [ "$actual" = "$expected" ] || die "checksum mismatch for $ARCHIVE" 3
-  elif [ "$SKIP_VERIFY" -eq 0 ]; then
-    echo "coderax install: note: no --checksum supplied; install an unverified local archive" >&2
+  else
+    echo "coderax install: WARNING: checksum verification disabled" >&2
   fi
 else
-  if [ "$VERSION" = "latest" ]; then
-    release_base="${BASE_URL}/download/latest"
-  else
-    release_base="${BASE_URL}/download/v${VERSION}"
-  fi
+  release_base="${BASE_URL}/download/v${VERSION}"
   ARCHIVE="$TMP/$ASSET"
   fetch "$release_base/$ASSET" "$ARCHIVE"
   if [ "$SKIP_VERIFY" -eq 0 ]; then
@@ -190,28 +208,78 @@ else
   fi
 fi
 
-# --- install ---------------------------------------------------------------
-tar -xzf "$ARCHIVE" -C "$TMP"
-EXTRACTED="$TMP/coderax-cli-$VERSION"
-[ -f "$EXTRACTED/src/cli.js" ] || die "unexpected archive layout: src/cli.js is missing" 3
-
-if [ -e "$DEST" ]; then
-  if [ "$FORCE" -eq 1 ]; then
-    rm -rf "$DEST"
-  else
-    die "version $VERSION is already installed at $DEST (use --force to replace it)" 1
-  fi
+# Authenticated provenance, when the operator asks for it. Checksums prove the
+# bytes match the release file; provenance proves which workflow and commit
+# produced them. `gh` verifies the Sigstore bundle against the repository.
+if [ "$PROVENANCE" -eq 1 ]; then
+  command -v gh >/dev/null 2>&1 || die "--provenance requires the GitHub CLI (gh)" 3
+  gh attestation verify "$ARCHIVE" --repo "$REPO" >/dev/null 2>&1 ||
+    die "provenance verification failed for $ARCHIVE" 3
 fi
 
+# --- extract safely --------------------------------------------------------
+# The extractor is injected at release-build time so this script stays one
+# self-contained download. Extractors never honour absolute paths, `..`,
+# symlinks, duplicates, or overwrites.
+mkdir -p "$TMP/extract/lib"
+base64 -d > "$TMP/extract/lib/archive.mjs" <<'CODERAX_ARCHIVE_EOF'
+@CODERAX_ARCHIVE_B64@
+CODERAX_ARCHIVE_EOF
+base64 -d > "$TMP/extract/lib/safe-extract.mjs" <<'CODERAX_EXTRACT_EOF'
+@CODERAX_EXTRACT_B64@
+CODERAX_EXTRACT_EOF
+STAGING="$TMP/stage"
+mkdir -p "$STAGING"
+node "$TMP/extract/lib/safe-extract.mjs" "$ARCHIVE" "$STAGING" >/dev/null ||
+  die "archive failed safe extraction" 3
+
+# The archive contains a single top-level directory named for the version.
+EXTRACTED="$STAGING/coderax-cli-$VERSION"
+[ -d "$EXTRACTED" ] || die "unexpected archive layout: coderax-cli-$VERSION/ is missing" 3
+[ -f "$EXTRACTED/src/cli.js" ] || die "unexpected archive layout: src/cli.js is missing" 3
+[ -f "$EXTRACTED/bin/coderax" ] || die "unexpected archive layout: bin/coderax is missing" 3
+
+STAGED_VERSION="$(node "$EXTRACTED/src/cli.js" --version 2>/dev/null || true)"
+case "$STAGED_VERSION" in
+  "coderax-cli $VERSION") ;;
+  *) die "staged build did not report the expected version (got '$STAGED_VERSION')" 3 ;;
+esac
+
+# --- commit atomically -----------------------------------------------------
 mkdir -p "$PREFIX" "$BIN_DIR"
-mv "$EXTRACTED" "$DEST"
-ln -sfn "$DEST/bin/coderax" "$LAUNCHER"
+BACKUP=""
+if [ -e "$DEST" ]; then
+  if [ "$FORCE" -ne 1 ]; then
+    die "version $VERSION is already installed at $DEST (use --force to replace it)" 1
+  fi
+  BACKUP="$PREFIX/.rollback-$VERSION-$(date +%s)-$$"
+  mv "$DEST" "$BACKUP" || die "could not move the existing install aside" 1
+fi
+
+if ! mv "$EXTRACTED" "$DEST"; then
+  if [ -n "$BACKUP" ] && [ -e "$BACKUP" ]; then mv "$BACKUP" "$DEST"; fi
+  die "could not move the staged install into place" 1
+fi
+
+# Swap the launcher with rename(2), not a non-atomic unlink+symlink.
+TMP_LINK="$LAUNCHER.tmp.$$"
+if ! ln -s "$DEST/bin/coderax" "$TMP_LINK" || ! mv -f "$TMP_LINK" "$LAUNCHER"; then
+  rm -f "$TMP_LINK"
+  rm -rf "$DEST"
+  if [ -n "$BACKUP" ] && [ -e "$BACKUP" ]; then mv "$BACKUP" "$DEST"; fi
+  die "could not install the launcher; the previous version was restored" 1
+fi
 
 INSTALLED="$("$LAUNCHER" --version 2>/dev/null || true)"
-case "$INSTALLED" in
-  "coderax-cli $VERSION") ;;
-  *) die "installed launcher did not report the expected version (got '$INSTALLED')" 1 ;;
-esac
+if [ "$INSTALLED" != "coderax-cli $VERSION" ]; then
+  rm -rf "$DEST"
+  if [ -n "$BACKUP" ] && [ -e "$BACKUP" ]; then mv "$BACKUP" "$DEST"; fi
+  die "installed launcher did not report the expected version (got '$INSTALLED'); rolled back" 1
+fi
+
+if [ -n "$BACKUP" ]; then
+  echo "coderax install: previous $VERSION kept for rollback at $BACKUP"
+fi
 
 echo "coderax-cli $VERSION installed"
 echo "  program   $DEST"
@@ -221,7 +289,7 @@ case ":${PATH:-}:" in
   *) echo "  PATH      add it: export PATH=\"$BIN_DIR:\$PATH\"" ;;
 esac
 echo ""
-echo "Next: coderax config set --base-url https://your-deployment --token <token>"
+echo "Next: coderax login            (prompts with echo disabled; no token in argv)"
 echo "      coderax doctor && coderax compat"
 echo "No other software was installed: no Node.js runtime, Ollama, containers,"
 echo "databases, or background services. Coderax runs in the cloud deployment."

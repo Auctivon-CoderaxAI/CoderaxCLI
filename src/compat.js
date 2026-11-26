@@ -1,30 +1,57 @@
 /**
- * WorkflowEngine compatibility policy.
+ * Deployment compatibility policy.
  *
- * Coderax CLI is a thin HTTP/SSE client: it only needs the deployment's
- * OpenAPI document shape, bearer authentication, and the Work SSE endpoint.
- * That surface is stable within an engine major line, so a CLI release declares
- * exactly one supported engine range and reports it everywhere an operator
- * looks: `coderax version`, `coderax compat`, and `coderax doctor`.
+ * The previous release hardcoded `>=0.8.0 <1.0.0` and called it the
+ * WorkflowEngine range. That number was not derived from anything: the
+ * reference deployment reports `v0.8.8`, the separate
+ * `Coderax-WorkflowEngine` repository is at `0.1.0`, and the deployment's
+ * `/health` endpoint returns plain text `OK` with no version at all. A range
+ * invented for a service that never reports a version is not a compatibility
+ * check; it is a guess that reads like one.
  *
- * The range is declared policy, not a guess. Its boundaries are covered by
- * `test/compat.test.js` and exercised end to end by `scripts/install-test.mjs`
- * against stub engines immediately below, inside, and above the range.
+ * The authoritative signals are:
+ *
+ * 1. The API-version handshake implemented by the shared SDK
+ *    (`packages/workflow-sdk`). The client sends `x-coderax-api-version: 1`
+ *    and accepts a server-reported version from `/api/meta`, a well-known
+ *    metadata document, or a response header. This is the contract the CLI is
+ *    actually written against.
+ * 2. The deployment's published version from its OpenAPI document
+ *    (`info.version`), which is the only version the deployment actually
+ *    advertises.
+ *
+ * Both are reported separately. Either can be unknown, and unknown is never
+ * reported as compatible. The deployment-version floor is the release this CLI
+ * was validated against (`0.8.8`); the ceiling is the next major line.
  */
+import { API_MAJOR, API_VERSION, SdkError, WorkflowClient } from "../packages/workflow-sdk/src/index.js";
 import { discoverOpenApi } from "./discover.js";
-import { request } from "./client.js";
+import { VERSION } from "./version.js";
 
-export const SUPPORTED_ENGINE_RANGE = ">=0.8.0 <1.0.0";
+/** The API contract this CLI implements, from the shared SDK. */
+export const SUPPORTED_API_VERSION = API_VERSION;
+export const SUPPORTED_API_MAJOR = API_MAJOR;
 
-const MINIMUM = Object.freeze({ major: 0, minor: 8, patch: 0, prerelease: [] });
+/**
+ * Deployment versions the CLI has evidence for. The floor is the reference
+ * deployment release (`package.json` in Auctivon-CoderaxAI/Coderax, `v0.8.8`)
+ * that the contract in `packages/workflow-sdk/src/contract.js` was read from.
+ */
+export const SUPPORTED_DEPLOYMENT_RANGE = ">=0.8.8 <1.0.0";
+
+/** Basis string shown by `version --json`, `compat`, and `doctor`. */
+export const COMPATIBILITY_BASIS =
+  "x-coderax-api-version handshake (shared SDK) + OpenAPI info.version";
+
+const MINIMUM = Object.freeze({ major: 0, minor: 8, patch: 8, prerelease: [] });
 const MAXIMUM_EXCLUSIVE = Object.freeze({ major: 1, minor: 0, patch: 0, prerelease: [] });
 
 const SEMVER = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/;
 
 /**
  * Parse a semantic version. Returns null for anything that is not a full
- * `major.minor.patch` version, because a partial version makes the
- * compatibility answer unknowable and "unknown" must never look like "ok".
+ * `major.minor.patch` version, because a partial version makes the answer
+ * unknowable and "unknown" must never look like "ok".
  */
 export function parseSemver(raw) {
   if (typeof raw !== "string") return null;
@@ -70,125 +97,135 @@ export function compareSemver(left, right) {
   return comparePrerelease(left.prerelease ?? [], right.prerelease ?? []);
 }
 
+/** Normalize `v0.8.8` and `0.8.8` to the same parsed version. */
+export function normalizeVersion(raw) {
+  const parsed = parseSemver(raw);
+  return parsed === null ? null : parsed.raw.replace(/^v/i, "");
+}
+
 /**
- * Evaluate one reported engine version against the supported range.
- *
- * `supported` is deliberately tri-state: `null` means the deployment did not
- * report a usable version. Callers must treat that as "unknown", not "fine".
+ * Evaluate a deployment version against the validated range.
+ * `supported` is tri-state: `null` means unknown, never "fine".
  */
-export function isSupportedEngineVersion(raw) {
+export function isSupportedDeploymentVersion(raw) {
   const parsed = parseSemver(raw);
   if (parsed === null) {
     return {
       supported: null,
       version: null,
-      reason: `"${String(raw)}" is not a semantic version, so compatibility is unknown`,
+      reason: `"${String(raw ?? "")}" is not a semantic version, so compatibility is unknown`,
     };
   }
-  // A stable CLI supports stable engines. Prereleases are opt-in experiments
-  // whose API may change without notice, so they are reported, never trusted.
+  // Prereleases are opt-in experiments whose API may change without notice.
   const prerelease = parsed.prerelease.length > 0;
   const atLeastMinimum = compareSemver(parsed, MINIMUM) >= 0;
   const belowMaximum = compareSemver(parsed, MAXIMUM_EXCLUSIVE) < 0;
   const supported = !prerelease && atLeastMinimum && belowMaximum;
   return {
     supported,
-    version: parsed.raw,
+    version: normalizeVersion(parsed.raw),
     reason: supported
-      ? `within the supported range ${SUPPORTED_ENGINE_RANGE}`
+      ? `within the validated range ${SUPPORTED_DEPLOYMENT_RANGE}`
       : prerelease
-        ? `a prerelease; stable CLI releases support ${SUPPORTED_ENGINE_RANGE}`
+        ? `a prerelease; stable CLI releases support ${SUPPORTED_DEPLOYMENT_RANGE}`
         : atLeastMinimum
-          ? `newer than the supported range ${SUPPORTED_ENGINE_RANGE}`
-          : `older than the supported range ${SUPPORTED_ENGINE_RANGE}`,
+          ? `newer than the validated range ${SUPPORTED_DEPLOYMENT_RANGE}`
+          : `older than the validated range ${SUPPORTED_DEPLOYMENT_RANGE}`,
   };
 }
 
 /**
- * Pull a WorkflowEngine version out of a health payload or an OpenAPI document.
- *
- * A bare `version` field in a health response is ignored on purpose: deployments
- * commonly report the web service version there, and mistaking it for the
- * engine version would produce a confidently wrong compatibility answer.
+ * Ask the deployment for its API version through the shared SDK handshake.
+ * A different major is a definitive incompatibility; an unreported version is
+ * recorded as unverified rather than guessed.
  */
-export function engineVersionFrom(payload) {
-  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return null;
-  const candidates = [
-    payload.workflowEngine?.version,
-    payload.workflowEngineVersion,
-    payload.engine?.version,
-    payload.services?.workflowEngine?.version,
-    payload.capabilities?.workflowEngine,
-    payload.info?.version,
-  ];
-  for (const candidate of candidates) {
-    if (typeof candidate === "string" && parseSemver(candidate) !== null) return candidate;
+export async function detectApiVersion({ baseUrl, token, timeoutMs, fetchImpl, signal } = {}) {
+  const client = new WorkflowClient({
+    baseUrl,
+    token,
+    timeoutMs,
+    fetchImpl,
+    clientVersion: VERSION,
+    signal,
+    strict: false,
+  });
+  try {
+    const state = await client.negotiate();
+    return {
+      apiVersion: state.apiVersion,
+      source: state.metaPath ?? "response header",
+      capabilities: [...state.capabilities].sort(),
+      unsupported: null,
+    };
+  } catch (error) {
+    if (error instanceof SdkError && error.code === "API_VERSION_UNSUPPORTED") {
+      return { apiVersion: null, source: null, capabilities: [], unsupported: error };
+    }
+    throw error;
   }
-  return null;
 }
 
-export const ENGINE_HEALTH_PATHS = Object.freeze(["/health", "/api/health", "/healthz"]);
-
-/**
- * Ask the deployment which WorkflowEngine it runs.
- *
- * Health first because it is the cheapest and usually public; the OpenAPI
- * document is the fallback because `info.version` is part of the published
- * contract. Returns null when nothing usable is reported.
- */
-export async function detectEngineVersion({ baseUrl, token, timeoutMs, fetchImpl } = {}) {
-  let blocking = null;
-  for (const path of ENGINE_HEALTH_PATHS) {
-    try {
-      const response = await request({ baseUrl, token, path, timeoutMs, fetchImpl });
-      const version = engineVersionFrom(response.json);
-      if (version !== null) return { version, source: `health ${path}` };
-    } catch (error) {
-      if (error.code === "HTTP_404" || error.code === "HTTP_405") continue;
-      // Authentication, timeout, or network failures: remember the reason, but
-      // still try the OpenAPI document, which may be readable independently.
-      blocking = error;
-      break;
-    }
-  }
-
+/** Read the deployment's advertised version from its OpenAPI document. */
+export async function detectDeploymentVersion({ baseUrl, token, timeoutMs, fetchImpl } = {}) {
   try {
     const discovery = await discoverOpenApi({ baseUrl, token, timeoutMs, fetchImpl });
-    const version = engineVersionFrom(discovery.document);
-    if (version !== null) return { version, source: `openapi ${discovery.sourcePath}` };
+    const raw = discovery.document?.info?.version;
+    const version = normalizeVersion(raw);
+    return version === null ? null : { version, source: `openapi ${discovery.sourcePath}` };
   } catch (error) {
-    // A missing document is "unknown". An auth or timeout failure is the real
-    // reason and must be surfaced, not disguised as an unreported version.
-    if (blocking === null && ["HTTP_401", "HTTP_403", "REQUEST_TIMEOUT", "REQUEST_FAILED"].includes(error.code)) {
-      blocking = error;
-    }
+    // A missing document means "unknown". Authentication and timeout failures
+    // are the real reason and must surface rather than look like no document.
+    if (["HTTP_401", "HTTP_403", "REQUEST_TIMEOUT", "REQUEST_FAILED"].includes(error.code)) throw error;
+    return null;
   }
-
-  if (blocking !== null) throw blocking;
-  return null;
 }
 
 /**
  * Full compatibility verdict for one deployment.
- * `supported` is true, false, or null (unknown) as described above.
+ *
+ * `supported` is true, false, or null (unknown). A false on either axis wins;
+ * true requires both axes to be affirmatively inside their supported range.
  */
-export async function checkEngineCompatibility({ baseUrl, token, timeoutMs, fetchImpl } = {}) {
-  const detected = await detectEngineVersion({ baseUrl, token, timeoutMs, fetchImpl });
-  if (detected === null) {
-    return {
-      engineVersion: null,
-      engineSource: null,
-      range: SUPPORTED_ENGINE_RANGE,
-      supported: null,
-      reason: "the deployment did not report a WorkflowEngine version",
-    };
-  }
-  const evaluated = isSupportedEngineVersion(detected.version);
+export async function checkCompatibility({ baseUrl, token, timeoutMs, fetchImpl, signal } = {}) {
+  const api = await detectApiVersion({ baseUrl, token, timeoutMs, fetchImpl, signal });
+  const deployment = await detectDeploymentVersion({ baseUrl, token, timeoutMs, fetchImpl });
+
+  const apiVerdict = api.unsupported
+    ? { supported: false, reason: api.unsupported.message }
+    : api.apiVersion === null
+      ? { supported: null, reason: "the deployment did not report an API version" }
+      : Number.parseInt(String(api.apiVersion).split(".")[0], 10) === SUPPORTED_API_MAJOR
+        ? { supported: true, reason: `implements API version ${api.apiVersion} (CLI implements ${SUPPORTED_API_VERSION}.x)` }
+        : {
+            supported: false,
+            reason: `the deployment reports API version ${api.apiVersion}; this CLI implements ${SUPPORTED_API_VERSION}.x`,
+          };
+
+  const deploymentVerdict = deployment === null
+    ? { supported: null, reason: "the deployment did not publish an OpenAPI version" }
+    : isSupportedDeploymentVersion(deployment.version);
+
+  let supported;
+  if (apiVerdict.supported === false || deploymentVerdict.supported === false) supported = false;
+  else if (apiVerdict.supported === true && deploymentVerdict.supported === true) supported = true;
+  else supported = null;
+
+  const reasons = [apiVerdict.reason, deploymentVerdict.reason];
   return {
-    engineVersion: detected.version,
-    engineSource: detected.source,
-    range: SUPPORTED_ENGINE_RANGE,
-    supported: evaluated.supported,
-    reason: evaluated.reason,
+    apiVersion: api.apiVersion,
+    apiSource: api.source,
+    apiSupported: apiVerdict.supported,
+    deploymentVersion: deployment?.version ?? null,
+    deploymentSource: deployment?.source ?? null,
+    deploymentSupported: deploymentVerdict.supported,
+    capabilities: api.capabilities,
+    range: SUPPORTED_DEPLOYMENT_RANGE,
+    apiRange: `${SUPPORTED_API_VERSION}.x`,
+    basis: COMPATIBILITY_BASIS,
+    supported,
+    reason: reasons.join("; "),
   };
 }
+
+/** Backwards-compatible name used by earlier release notes. */
+export const checkEngineCompatibility = checkCompatibility;

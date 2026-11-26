@@ -2,55 +2,61 @@
 
 Coderax CLI never upgrades itself. `coderax update` checks the GitHub release
 feed and prints the commands that apply to your installation method; running
-them is your decision. This is deliberate: a network client that silently
-replaces its own executable is a supply-chain risk and is impossible to audit.
+them is your decision. A network client that silently replaces its own
+executable is a supply-chain risk and impossible to audit.
 
 ## Before you upgrade
 
 ```sh
 coderax version --json > version-before.json
 coderax update                 # current vs latest, plus exact commands
-coderax doctor                 # note reachability and engine compatibility
-
-cp "$HOME/.coderax/config.json" "$HOME/.coderax/config.json.bak"   # optional
+coderax doctor                 # reachability, API version and deployment version
 ```
 
-Read the target release notes (`CHANGELOG.md` in the repository, or the release
-page). Releases follow semantic versioning:
+Releases follow semantic versioning. While the major version is `0`, a minor
+release may change behaviour.
 
 | Change | Version bump |
 | --- | --- |
-| Bug fix, redaction fix, documentation | patch (`0.2.0` → `0.2.1`) |
-| New command, new flag, wider engine range | minor (`0.2.x` → `0.3.0`) |
+| Bug fix, redaction fix, documentation | patch |
+| New command, new flag, wider deployment range | minor |
 | Breaking CLI or config change | major (after `1.0.0`) |
 | Security fix | patch, with an advisory |
 
-The supported WorkflowEngine range is part of each release and reported by
-`coderax version --json` as `supportedWorkflowEngine`.
+`coderax version --json` reports the contract each release implements:
+`supportedApiVersion` and `supportedDeploymentRange`. Both are derived from the
+shared SDK and the published deployment version, not guessed.
 
 ## Standalone installs (Linux, macOS, Windows)
 
-New versions install side by side; the launcher is repointed to the new version
-and the previous one stays on disk.
-
 ```sh
 # Linux / macOS
-sh install.sh --version 0.3.0
+sh install.sh --version 0.3.0 --provenance
 coderax --version
 ```
 
 ```powershell
 # Windows
-powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Version 0.3.0
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Version 0.3.0 -Provenance
 coderax --version
 ```
 
-The installer verifies the release checksum before extracting. If you installed
-to a custom location, pass the same `--prefix`/`--bin-dir` (or `-Prefix`/
-`-BinDir`) values you used originally. `coderax version --json` reports
-`installPath` if you are unsure.
+The upgrade is atomic:
 
-Upgrading does **not** require `--force`; that flag only replaces an existing
+1. the archive is checksum-verified (and provenance-verified with
+   `--provenance`),
+2. it is extracted with the safe extractor into a staging directory,
+3. the staged `coderax` is executed and must report the expected version,
+4. an existing same-version directory is moved to
+   `<prefix>/.rollback-<version>-<timestamp>-<pid>`,
+5. the staged tree is moved into place with a rename,
+6. the launcher is replaced with `rename(2)`, not unlink + symlink.
+
+If step 5 or 6 fails, the previous directory is restored and the installer exits
+non-zero. A failed upgrade therefore cannot leave you without a working CLI.
+
+New versions normally install side by side; the launcher is repointed and the
+old version stays on disk. `--force` is only needed to replace an existing
 installation of the *same* version.
 
 ### Offline upgrades
@@ -61,82 +67,42 @@ sh install.sh --version 0.3.0 \
   --checksum "<sha256 from SHA256SUMS>"
 ```
 
-## npm installs
-
-Once the package is published (see [RELEASE.md](RELEASE.md)):
-
-```sh
-npm install --global coderax-cli@0.3.0     # pin explicitly
-npm view coderax-cli versions --json       # list published versions
-```
-
-For a project-local install, keep the exact version in `package.json`:
-
-```sh
-npm install --save-exact coderax-cli@0.3.0
-```
-
-From a release tarball (works today, no registry required):
+## npm
 
 ```sh
 npm install --global ./coderax-cli-0.3.0.tgz
 ```
 
-## Source checkouts
+Registry publication is not enabled; `package.json` remains `"private": true`
+until the owner authorizes it.
+
+## Source checkout
 
 ```sh
 git fetch --tags
 git checkout v0.3.0
 npm ci --ignore-scripts
-node src/cli.js --version
 ```
 
-`npm ci` is used instead of `npm install` so the lockfile is authoritative and
-no lifecycle scripts run.
+## Credentials survive an upgrade
 
-## Verify after any upgrade
+The config file and OS credential entry are independent of the program
+directory, so a normal upgrade does not require signing in again. If you use a
+custom `CODERAX_CONFIG`, pass the same environment to the new version.
+
+A token is never passed to the installer or to an upgrade command. Authenticate
+after upgrading with `coderax login` (hidden prompt), stdin, `--token-file`, or
+`CODERAX_TOKEN`.
+
+## Verifying the upgrade
 
 ```sh
-coderax version --json     # cliVersion and installMethod are what you expect
-coderax doctor             # node, config, reachability, engine compatibility
-coderax compat             # WorkflowEngine range verdict
-coderax status             # deployment URL, auth, install path
-coderax health             # one authenticated request end to end
+coderax --version
+coderax version --json
+coderax doctor
+coderax compat
 ```
 
-If `doctor` reports the engine check as unsupported, the CLI is newer or older
-than your deployment's engine allows. Check the matrix in
-[COMPATIBILITY.md](COMPATIBILITY.md), then either upgrade the deployment or
-install a CLI release that supports the reported engine version.
-
-## Configuration compatibility
-
-- The config file (`~/.coderax/config.json`, mode `0600`) is written
-  atomically and only gains keys between releases.
-- Unknown keys are preserved on write, so downgrading does not discard settings
-  written by a newer CLI.
-- Environment variables (`CODERAX_BASE_URL`, `CODERAX_TOKEN`,
-  `CODERAX_TIMEOUT_MS`, `CODERAX_CONFIG`) always win over the file.
-- A token is never printed by any command, including `--json` output.
-
-If a release ever needs a config migration, it will be documented here and in
-the release notes with an explicit before/after example.
-
-## Automation
-
-Pin the exact version in CI and upgrade deliberately:
-
-```sh
-npm install --global coderax-cli@0.2.0
-# or, from artifacts
-sh install.sh --version 0.2.0 --prefix "$RUNNER_TEMP/coderax" --bin-dir "$RUNNER_TEMP/bin"
-export PATH="$RUNNER_TEMP/bin:$PATH"
-```
-
-`coderax update` exits `0` even when the release feed is unreachable and says so
-in its output, so it is safe to run as a diagnostic without failing a pipeline.
-
-## Rolling back
-
-See [ROLLBACK.md](ROLLBACK.md). Standalone installs keep prior versions, so a
-rollback is usually a single `ln -sfn` or a reinstall of the old version.
+`installPath` in `version --json` shows which directory is running, and
+`installMethod` distinguishes `standalone`, `npm-global`, `npm-local` and
+`source`.

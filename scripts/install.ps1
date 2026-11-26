@@ -1,9 +1,13 @@
 # Coderax CLI installer for Windows.
 #
-# Downloads one release archive, verifies its SHA-256 checksum, extracts it
-# under a versioned directory, and creates a launcher. It never installs
-# Node.js, Ollama, containers, databases, or background services, and never
-# modifies PATH.
+# Downloads one release archive, verifies its SHA-256 checksum (and, with
+# -Provenance, the release's build provenance), extracts it with a traversal-
+# and symlink-safe extractor, stages it, and swaps the launcher into place with
+# a same-volume move. A failed swap restores the previous install.
+#
+# It never installs Node.js, Ollama, containers, databases, or background
+# services, and never modifies PATH. It never accepts, stores, or prints a
+# token: run `coderax login` afterwards.
 [CmdletBinding()]
 param(
   [string]$Version = $env:CODERAX_VERSION,
@@ -12,6 +16,7 @@ param(
   [string]$FromFile,
   [string]$Checksum,
   [string]$BaseUrl = "https://github.com/Auctivon-CoderaxAI/CoderaxCLI/releases",
+  [switch]$Provenance,
   [switch]$DryRun,
   [switch]$SkipVerify,
   [switch]$Force
@@ -26,6 +31,7 @@ function Fail([string]$Message, [int]$Code = 1) {
 }
 
 if (-not $Version) { $Version = "latest" }
+if ($env:CEDERAX_REQUIRE_PROVENANCE) { $Provenance = $true }
 
 $node = Get-Command node -ErrorAction SilentlyContinue
 if (-not $node) {
@@ -40,6 +46,10 @@ if ($nodeMajor -lt 24) {
 
 if ([string]::IsNullOrWhiteSpace($Prefix) -or $Prefix -eq "/" -or $Prefix -eq $env:USERPROFILE) {
   Fail "refusing to use '$Prefix' as the install prefix" 2
+}
+
+if ($BaseUrl -notmatch '^https://' -and $BaseUrl -notmatch '^http://(localhost|127\.0\.0\.1)') {
+  Fail "releases URL must use HTTPS (got '$BaseUrl')." 2
 }
 
 function Get-Sha256([string]$Path) {
@@ -80,24 +90,26 @@ if ($DryRun) {
   Write-Host "  install    $destination"
   Write-Host "  launcher   $launcher"
   Write-Host "  node       $nodeVersion"
-  Write-Host "  verify     $(if ($SkipVerify) { 'disabled' } else { 'sha256' })"
+  Write-Host "  verify     $(if ($SkipVerify) { 'disabled' } else { 'sha256' })$(if ($Provenance) { ' + provenance' } else { '' })"
   exit 0
 }
 
 $temp = Join-Path ([System.IO.Path]::GetTempPath()) ("coderax-install-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $temp -Force | Out-Null
+$backup = $null
 
 try {
   if ($FromFile) {
     if (-not (Test-Path -LiteralPath $FromFile)) { Fail "archive not found: $FromFile" 2 }
     $archive = $FromFile
-    if ($Checksum -and -not $SkipVerify) {
+    if (-not $SkipVerify) {
+      if (-not $Checksum) { Fail "-Checksum is required for -FromFile (or pass -SkipVerify explicitly)." 2 }
       if ((Get-Sha256 $archive) -ne $Checksum.ToLowerInvariant()) { Fail "checksum mismatch for $archive" 3 }
-    } elseif (-not $SkipVerify) {
-      Write-Warning "no -Checksum supplied; installing an unverified local archive"
+    } else {
+      Write-Warning "checksum verification disabled"
     }
   } else {
-    $releaseBase = if ($Version -eq "latest") { "$BaseUrl/download/latest" } else { "$BaseUrl/download/v$Version" }
+    $releaseBase = "$BaseUrl/download/v$Version"
     $archive = Join-Path $temp $asset
     Save-File "$releaseBase/$asset" $archive
     if (-not $SkipVerify) {
@@ -112,33 +124,80 @@ try {
     }
   }
 
-  Expand-Archive -LiteralPath $archive -DestinationPath $temp -Force
-  $extracted = Join-Path $temp "coderax-cli-$Version"
+  if ($Provenance) {
+    $gh = Get-Command gh -ErrorAction SilentlyContinue
+    if (-not $gh) { Fail "-Provenance requires the GitHub CLI (gh)." 3 }
+    & gh attestation verify $archive --repo $repo | Out-Null
+    if ($LASTEXITCODE -ne 0) { Fail "provenance verification failed for $archive" 3 }
+  }
+
+  # Extractors are injected at release-build time; see scripts/install.sh.
+  $extractDir = Join-Path $temp "extract"
+  New-Item -ItemType Directory -Path (Join-Path $extractDir "lib") -Force | Out-Null
+  $archiveMjs = Join-Path $extractDir "lib\archive.mjs"
+  $extractMjs = Join-Path $extractDir "lib\safe-extract.mjs"
+  [IO.File]::WriteAllBytes($archiveMjs, [Convert]::FromBase64String(@'
+@CODERAX_ARCHIVE_B64@
+'@))
+  [IO.File]::WriteAllBytes($extractMjs, [Convert]::FromBase64String(@'
+@CODERAX_EXTRACT_B64@
+'@))
+
+  $staging = Join-Path $temp "stage"
+  New-Item -ItemType Directory -Path $staging -Force | Out-Null
+  & node $extractMjs $archive $staging | Out-Null
+  if ($LASTEXITCODE -ne 0) { Fail "archive failed safe extraction" 3 }
+
+  $extracted = Join-Path $staging "coderax-cli-$Version"
   if (-not (Test-Path -LiteralPath (Join-Path $extracted "src\cli.js"))) {
     Fail "unexpected archive layout: src\cli.js is missing" 3
   }
+  if (-not (Test-Path -LiteralPath (Join-Path $extracted "bin\coderax.cmd"))) {
+    Fail "unexpected archive layout: bin\coderax.cmd is missing" 3
+  }
 
-  if (Test-Path -LiteralPath $destination) {
-    if ($Force) {
-      Remove-Item -LiteralPath $destination -Recurse -Force
-    } else {
-      Fail "version $Version is already installed at $destination (use -Force to replace it)"
-    }
+  $staged = (& node (Join-Path $extracted "src\cli.js") --version).Trim()
+  if ($staged -ne "coderax-cli $Version") {
+    Fail "staged build did not report the expected version (got '$staged')" 3
   }
 
   New-Item -ItemType Directory -Path $Prefix -Force | Out-Null
   New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
-  Move-Item -LiteralPath $extracted -Destination $destination
+
+  if (Test-Path -LiteralPath $destination) {
+    if (-not $Force) { Fail "version $Version is already installed at $destination (use -Force to replace it)" 1 }
+    $backup = Join-Path $Prefix (".rollback-$Version-" + [guid]::NewGuid().ToString("N"))
+    Move-Item -LiteralPath $destination -Destination $backup
+  }
+
+  try {
+    Move-Item -LiteralPath $extracted -Destination $destination
+  } catch {
+    if ($backup -and (Test-Path -LiteralPath $backup)) { Move-Item -LiteralPath $backup -Destination $destination }
+    Fail "could not move the staged install into place" 1
+  }
 
   # A shim rather than a copied launcher: the shipped launcher resolves paths
   # relative to its own location, so copying it would break.
-  $shim = "@echo off`r`ncall `"$destination\bin\coderax.cmd`" %*`r`nexit /b %ERRORLEVEL%`r`n"
-  Set-Content -LiteralPath $launcher -Value $shim -Encoding ascii -NoNewline
+  try {
+    $shim = "@echo off`r`ncall `"$destination\bin\coderax.cmd`" %*`r`nexit /b %ERRORLEVEL%`r`n"
+    $tmpLauncher = "$launcher.new"
+    Set-Content -LiteralPath $tmpLauncher -Value $shim -Encoding ascii -NoNewline
+    Move-Item -LiteralPath $tmpLauncher -Destination $launcher -Force
+  } catch {
+    Remove-Item -LiteralPath $destination -Recurse -Force -ErrorAction SilentlyContinue
+    if ($backup -and (Test-Path -LiteralPath $backup)) { Move-Item -LiteralPath $backup -Destination $destination }
+    Fail "could not install the launcher; the previous version was restored" 1
+  }
 
   $installed = (& node (Join-Path $destination "src\cli.js") --version).Trim()
   if ($installed -ne "coderax-cli $Version") {
-    Fail "installed launcher did not report the expected version (got '$installed')"
+    Remove-Item -LiteralPath $destination -Recurse -Force -ErrorAction SilentlyContinue
+    if ($backup -and (Test-Path -LiteralPath $backup)) { Move-Item -LiteralPath $backup -Destination $destination }
+    Fail "installed launcher did not report the expected version (got '$installed'); rolled back" 1
   }
+
+  if ($backup) { Write-Host "coderax install: previous $Version kept for rollback at $backup" }
 
   Write-Host "coderax-cli $Version installed"
   Write-Host "  program   $destination"
@@ -147,7 +206,7 @@ try {
     Write-Host "  PATH      add it: [Environment]::SetEnvironmentVariable('Path', `$env:Path + ';$BinDir', 'User')"
   }
   Write-Host ""
-  Write-Host "Next: coderax config set --base-url https://your-deployment --token <token>"
+  Write-Host "Next: coderax login            (prompts with echo disabled; no token in argv)"
   Write-Host "      coderax doctor; coderax compat"
   Write-Host "No other software was installed: no Node.js runtime, Ollama, containers,"
   Write-Host "databases, or background services. Coderax runs in the cloud deployment."

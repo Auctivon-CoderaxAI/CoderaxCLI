@@ -87,7 +87,7 @@ export function createTarGz(entries, { mtime, level = 9 }) {
   return gzipSync(createTar(entries, { mtime }), { level });
 }
 
-export function readTar(buffer) {
+export function readTar(buffer, { includeSpecial = false, duplicates = null } = {}) {
   const entries = new Map();
   let offset = 0;
   while (offset + BLOCK <= buffer.length) {
@@ -111,7 +111,10 @@ export function readTar(buffer) {
     offset += BLOCK;
     const data = buffer.subarray(offset, offset + size);
     offset += size + ((BLOCK - (size % BLOCK)) % BLOCK);
-    if (type === "0" || type === "") entries.set(path, { data: Buffer.from(data), mode });
+    if (type === "0" || type === "" || includeSpecial) {
+      if (entries.has(path) && duplicates !== null) duplicates.push(path);
+      entries.set(path, { data: Buffer.from(data), mode, type });
+    }
   }
   return entries;
 }
@@ -215,7 +218,7 @@ export function createZip(entries, { mtime, level = 9 }) {
   return Buffer.concat([...local, centralBuffer, end]);
 }
 
-export function readZip(buffer) {
+export function readZip(buffer, { duplicates = null } = {}) {
   const minimum = Math.max(0, buffer.length - 65557);
   let end = -1;
   for (let offset = buffer.length - 22; offset >= minimum; offset -= 1) {
@@ -252,6 +255,7 @@ export function readZip(buffer) {
     if (data.length !== size) fail(`zip entry ${name} has the wrong size`);
     if (crc32(data) !== crc) fail(`zip entry ${name} failed its CRC check`);
 
+    if (entries.has(name) && duplicates !== null) duplicates.push(name);
     entries.set(name, { data, mode: (externalAttributes >>> 16) & 0o777 });
     offset += 46 + nameLength + extraLength + commentLength;
   }
