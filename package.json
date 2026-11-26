@@ -1,8 +1,8 @@
 {
   "name": "coderax-cli",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Canonical Coderax CLI: chat, Work mode, products, login, health, OpenAPI discovery, and authenticated calls",
+  "description": "Canonical Coderax CLI: chat, Work mode, capabilities, artifacts, products, login, health, OpenAPI discovery, and authenticated calls",
   "type": "module",
   "bin": {
     "coderax": "src/cli.js"
@@ -13,6 +13,6 @@
   "scripts": {
     "start": "node src/cli.js --help",
     "test": "node --test",
-    "check": "node --check src/config.js && node --check src/client.js && node --check src/discover.js && node --check src/cli.js && node --check src/product-commands.js && node --check src/product-registry.js && node --check src/version.js"
+    "check": "node --check src/capability-catalog.js && node --check src/capability-commands.js && node --check src/capability-registry.js && node --check src/cli.js && node --check src/client.js && node --check src/config.js && node --check src/discover.js && node --check src/exit.js && node --check src/file-transfer.js && node --check src/format.js && node --check src/product-commands.js && node --check src/product-registry.js && node --check src/sdk.js && node --check src/version.js"
   }
 }

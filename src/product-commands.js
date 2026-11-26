@@ -2,30 +2,11 @@ import { PRODUCTS, STATUS_LABELS, getOrderedProducts } from "./product-registry.
 import { CoderaxError, request, streamRequest } from "./client.js";
 import { dirname } from "node:path";
 import { configDir, loadConfig, maskToken, saveConfig } from "./config.js";
+import { EXIT } from "./exit.js";
+import { table } from "./format.js";
 import { VERSION } from "./version.js";
 
-export const EXIT = Object.freeze({
-  OK: 0,
-  ERROR: 1,
-  USAGE: 2,
-  UNAUTHENTICATED: 3,
-  NETWORK: 4,
-  NOT_FOUND: 5,
-  UNAVAILABLE: 6,
-  CANCELLED: 130,
-});
-
-function table(rows, headers) {
-  const widths = headers.map((header, index) =>
-    Math.max(header.length, ...rows.map((row) => String(row[index]).length)),
-  );
-  const line = (cells) =>
-    cells
-      .map((cell, index) => String(cell).padEnd(widths[index]))
-      .join("  ")
-      .trimEnd();
-  return [line(headers), line(widths.map((width) => "\u2500".repeat(width))), ...rows.map(line)];
-}
+export { EXIT };
 
 function requireBase(ctx) {
   if (!ctx.settings.baseUrl) {

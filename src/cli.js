@@ -9,6 +9,15 @@ import {
 } from "./config.js";
 import { CoderaxError, formatJson, redact, request } from "./client.js";
 import { discoverOpenApi, findOperation } from "./discover.js";
+import * as capabilities from "./capability-commands.js";
+import {
+  ARTIFACT_ACTIONS,
+  CAPABILITY_CATALOG,
+  CAPABILITY_COMMANDS,
+  capabilityForCommand,
+  isCapabilityCommand,
+  isExtendedCommand,
+} from "./capability-catalog.js";
 import * as product from "./product-commands.js";
 import { VERSION } from "./version.js";
 
@@ -36,6 +45,33 @@ Usage:
   coderax health [--json]
   coderax openapi [--json]
   coderax call <METHOD> <PATH> [--data <json>] [--json]
+
+Capability commands (availability, options and readiness come from the engine
+capability registry; only an available capability executes):
+  coderax capabilities [--status <state>] [--json]
+  coderax readiness [--json]
+  coderax capability run <id|command> [options] [--json]
+  coderax upload <file> [--project <id>] [--json]
+  coderax analyze-document <file> [--question <text>] [--json]
+  coderax analyze-pdf <file> [--question <text>] [--json]
+  coderax analyze-spreadsheet <file> [--question <text>] [--json]
+  coderax create-presentation <prompt> [--format pptx|pdf] [--json]
+  coderax understand-image <file> [--question <text>] [--json]
+  coderax generate-image <prompt> [--size <size>] [--count <n>] [--json]
+  coderax transcribe <file> [--language <code>] [--format txt|srt|vtt] [--json]
+  coderax speak <text> [--voice <id>] [--format mp3|wav|opus] [--out <path>] [--json]
+  coderax create-software <prompt> [--name <name>] [--project <id>] [--json]
+  coderax create-game <prompt> [--name <name>] [--project <id>] [--json]
+  coderax artifacts list|inspect|download|associate ... [--json]
+
+Capability execution options:
+  --project <id>        Associate the upload, task or artifact with a project
+  --conversation <id>   Run in an existing conversation
+  --wait / --no-wait    Wait for the durable task (default) or return its id
+  --stream              Stream execution events (JSON mode emits NDJSON)
+  --wait-timeout <ms>   Wait limit, 1000-3600000 (default 600000)
+  --out <path>          Explicit download destination
+  --force               Authorize replacing an existing download destination
 
 Global options:
   --base-url <url>   Override the deployment URL (HTTPS, or HTTP on loopback)
@@ -98,7 +134,18 @@ const KNOWN_COMMANDS = new Set([
   "update",
   "help",
   "version",
+  "capabilities",
+  "readiness",
+  "capability",
+  "artifacts",
+  ...CAPABILITY_COMMANDS,
 ]);
+
+const COMMAND_ALIASES = Object.freeze({
+  caps: "capabilities",
+  stt: "transcribe",
+  tts: "speak",
+});
 const KNOWN_FLAGS = new Set([
   "help",
   "version",
@@ -124,6 +171,7 @@ export class UsageError extends Error {
 
 export function parseArgv(argv) {
   const flags = new Map();
+  const dynamic = new Map();
   const positionals = [];
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -150,7 +198,21 @@ export function parseArgv(argv) {
       const equals = body.indexOf("=");
       const name = equals === -1 ? body : body.slice(0, equals);
       if (!KNOWN_FLAGS.has(name)) {
-        throw new UsageError(`unknown option: --${name}`);
+        // Capability and artifact options are published by the engine registry,
+        // so they cannot be known while parsing. They are collected here and
+        // rejected by preflight when the command does not accept them.
+        if (equals !== -1) {
+          dynamic.set(name, body.slice(equals + 1));
+          continue;
+        }
+        const next = argv[index + 1];
+        if (next !== undefined && !next.startsWith("--")) {
+          dynamic.set(name, next);
+          index += 1;
+        } else {
+          dynamic.set(name, true);
+        }
+        continue;
       }
       if (equals !== -1) {
         flags.set(name, body.slice(equals + 1));
@@ -168,7 +230,7 @@ export function parseArgv(argv) {
     positionals.push(arg);
   }
 
-  return { flags, positionals };
+  return { flags, positionals, dynamic };
 }
 
 function emit(write, flags, human, machine) {
@@ -183,12 +245,48 @@ function responseBody(response) {
  * Validate everything that does not need configuration before touching the
  * config file, so a typo reports a usage error instead of a missing base URL.
  */
-function preflight(positionals, flags) {
-  const [command] = positionals;
+function preflight(positionals, flags, dynamic) {
+  const rawCommand = positionals[0];
+  const command = COMMAND_ALIASES[rawCommand] ?? rawCommand;
+  if (command !== rawCommand) positionals[0] = command;
   let call = null;
 
   if (!KNOWN_COMMANDS.has(command)) {
-    throw new UsageError(`unknown command: ${command}. Run \`coderax --help\`.`);
+    throw new UsageError(`unknown command: ${rawCommand}. Run \`coderax --help\`.`);
+  }
+
+  if (dynamic.size > 0 && !isExtendedCommand(command)) {
+    throw new UsageError(`unknown option: --${[...dynamic.keys()][0]}`);
+  }
+
+  if (command === "capability") {
+    const action = positionals[1];
+    if (action !== "run") {
+      throw new UsageError("capability requires: coderax capability run <id|command> [options]");
+    }
+    if (!positionals[2]) {
+      throw new UsageError("capability run requires a capability id or command");
+    }
+  }
+
+  if (command === "artifacts") {
+    const action = positionals[1] ?? "list";
+    if (!ARTIFACT_ACTIONS.includes(action)) {
+      throw new UsageError(`unknown artifacts action: ${action}. Use ${ARTIFACT_ACTIONS.join(", ")}`);
+    }
+    if ((action === "inspect" || action === "download" || action === "associate") && !positionals[2]) {
+      throw new UsageError(`artifacts ${action} requires an artifact id`);
+    }
+    if (action === "associate" && !positionals[2]) {
+      throw new UsageError("artifacts associate requires an artifact id and --project <id>");
+    }
+    if (action === "associate" && !dynamic.has("project")) {
+      throw new UsageError("artifacts associate requires --project <id>");
+    }
+  }
+
+  if ((command === "capabilities" || command === "readiness") && positionals.length > 1) {
+    throw new UsageError(`${command} takes no positional arguments`);
   }
 
   if (command === "config") {
@@ -242,6 +340,23 @@ function preflight(positionals, flags) {
   }
 
   return { call };
+}
+
+function commandHelp(command) {
+  if (command === "artifacts") {
+    return `coderax artifacts <action>\n\nUsage:\n  coderax artifacts list [--project <id>] [--conversation <id>] [--task <id>] [--json]\n  coderax artifacts inspect <artifactId> [--json]\n  coderax artifacts download <artifactId> [--out <path>] [--force] [--json]\n  coderax artifacts associate <artifactId> --project <id> [--json]\n\nArtifacts are owner-scoped engine records shared with Coderax Web. A download\nis verified against its published SHA-256 and never replaces an existing file\nwithout --force.`;
+  }
+  if (command === "capabilities" || command === "readiness") {
+    return `coderax ${command}\n\nReads the engine capability registry and reports each capability as available,\nunavailable, unconfigured, unverified or blocked. Only an available capability\nexecutes; the CLI never presents an unverified capability as operational.`;
+  }
+  const capability = capabilityForCommand(command);
+  if (capability === null) return null;
+  const positional = capability.primary ? ` <${capability.primary}>` : "";
+  const options = capability.inputs
+    .filter((item) => item.name !== capability.primary)
+    .map((item) => `[--${item.name} <${item.type}${item.values ? `: ${item.values.join("|")}` : ""}>]`)
+    .join(" ");
+  return `coderax ${capability.command}${positional} ${options}\n\n${capability.summary}\n\nThe engine capability registry is authoritative for the options, accepted file\ntypes and availability of this command. It runs in an authorized cloud\nexecution environment; no document, inference or artifact work happens locally.`;
 }
 
 async function resolveSettings(flags, deps) {
@@ -423,11 +538,37 @@ async function commandConfig(positionals, context, deps, write, flags) {
   emit(write, flags, `wrote ${saved.path}\nbase URL: ${described.baseUrl ?? "(not set)"}\ntoken: ${described.tokenConfigured ? "configured" : "not configured"}\n`, described);
 }
 
+const LOCAL_INPUT_CODES = new Set([
+  "CONVERSATION_ID_INVALID",
+  "PROJECT_ID_INVALID",
+  "ARTIFACT_ID_INVALID",
+  "ARTIFACT_DESTINATION_EXISTS",
+  "ARTIFACT_DESTINATION_INVALID",
+  "ARTIFACT_DESTINATION_MISSING",
+  "ARTIFACT_DESTINATION_SYMLINK",
+  "CAPABILITY_INPUT_INVALID",
+  "CAPABILITY_UNKNOWN",
+  "UPLOAD_EMPTY",
+  "UPLOAD_FIELD_INVALID",
+  "UPLOAD_NOT_A_FILE",
+  "UPLOAD_NOT_FOUND",
+  "UPLOAD_PATH_REQUIRED",
+  "UPLOAD_SYMLINK_REFUSED",
+  "UPLOAD_TOO_LARGE",
+  "UPLOAD_TYPE_MISMATCH",
+  "UPLOAD_TYPE_NOT_ACCEPTED",
+  "UPLOAD_TYPE_UNSUPPORTED",
+]);
+
 function exitFor(error) {
   if (error instanceof UsageError || error instanceof ConfigError || error.code === "USAGE") {
     return EXIT.usage;
   }
-  if (error.code === "UNAVAILABLE") return EXIT.unavailable;
+  if (LOCAL_INPUT_CODES.has(error.code)) return EXIT.usage;
+  if (error.code === "UNAUTHENTICATED") return EXIT.unauthenticated;
+  if (error.code === "UNAVAILABLE" || error.code === "CAPABILITY_NOT_AVAILABLE") {
+    return EXIT.unavailable;
+  }
   if (error.code === "CANCELLED") return EXIT.cancelled;
   if (error.code === "HTTP_401" || error.code === "HTTP_403") return EXIT.unauthenticated;
   if (error.code === "HTTP_404") return EXIT.notFound;
@@ -443,6 +584,7 @@ export async function runCli(argv, options = {}) {
     stderr: options.stderr ?? ((text) => process.stderr.write(text)),
     configDeps: options.configDeps,
     saveDeps: options.saveDeps,
+    cwd: options.cwd ?? process.cwd(),
     signal: options.signal,
     stdinIsTTY: options.stdinIsTTY ?? Boolean(process.stdin.isTTY),
     readSecret: options.readSecret ?? readStdin,
@@ -450,12 +592,14 @@ export async function runCli(argv, options = {}) {
 
   const write = (text) => deps.stdout(text.endsWith("\n") ? text : `${text}\n`);
   const raw = (text) => deps.stdout(String(text));
+  let outputToken = null;
 
   try {
-    const { flags, positionals } = parseArgv(argv);
+    const { flags, positionals, dynamic } = parseArgv(argv);
 
     if (flags.has("help")) {
-      deps.stdout(USAGE);
+      const target = positionals[0] ? COMMAND_ALIASES[positionals[0]] ?? positionals[0] : null;
+      deps.stdout((target ? commandHelp(target) : null) ?? USAGE);
       return EXIT.ok;
     }
     if (flags.has("version")) {
@@ -467,17 +611,22 @@ export async function runCli(argv, options = {}) {
       return EXIT.ok;
     }
 
-    const { call } = preflight(positionals, flags);
+    const { call } = preflight(positionals, flags, dynamic);
 
     const settings = await resolveSettings(flags, deps);
+    outputToken = settings.token;
     const [command] = positionals;
     const ctx = {
       ...settings,
       settings,
+      command,
       args: positionals.slice(1),
       flags,
+      options: dynamic,
       env: deps.env,
       json: flags.has("json"),
+      stream: dynamic.has("stream") || flags.has("stream"),
+      cwd: deps.cwd,
       out: write,
       raw,
       err: (text) => deps.stderr(`${text}\n`),
@@ -513,6 +662,14 @@ export async function runCli(argv, options = {}) {
         return await product.doctor(ctx);
       case "update":
         return await product.update(ctx);
+      case "capabilities":
+        return await capabilities.capabilities(ctx);
+      case "readiness":
+        return await capabilities.readiness(ctx);
+      case "artifacts":
+        return await capabilities.artifacts(ctx);
+      case "capability":
+        return await capabilities.runCapabilityGeneric({ ...ctx, args: positionals.slice(2) });
       case "help":
         deps.stdout(USAGE);
         return EXIT.ok;
@@ -540,13 +697,16 @@ export async function runCli(argv, options = {}) {
         await commandCall(call, context, deps, write, flags);
         return EXIT.ok;
       default:
+        if (isCapabilityCommand(command)) {
+          return await capabilities.runCapability(command, ctx);
+        }
         throw new UsageError(`unknown command: ${command}. Run \`coderax --help\`.`);
     }
   } catch (error) {
     const known = error instanceof UsageError || error instanceof ConfigError || error instanceof CoderaxError;
     const detail =
       error instanceof UsageError ? error.message : `${error.code ?? "ERROR"}: ${error.message}`;
-    deps.stderr(`coderax: ${known ? detail : "unexpected failure"}\n`);
+    deps.stderr(`coderax: ${redact(known ? detail : "unexpected failure", outputToken)}\n`);
     return exitFor(error);
   }
 }
@@ -574,5 +734,7 @@ export function isEntrypoint(entry = process.argv[1]) {
 }
 
 if (isEntrypoint()) {
-  process.exitCode = await runCli(process.argv.slice(2));
+  const controller = new AbortController();
+  process.once("SIGINT", () => controller.abort());
+  process.exitCode = await runCli(process.argv.slice(2), { signal: controller.signal });
 }

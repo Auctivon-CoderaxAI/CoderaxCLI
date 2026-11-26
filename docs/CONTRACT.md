@@ -1,7 +1,7 @@
 # CLI ↔ deployment contract
 
-Version: CLI `0.1.0`, targeting Coderax deployments that publish an OpenAPI 3.x
-document.
+Version: CLI `0.2.0`, targeting Coderax deployments that publish an OpenAPI 3.x
+document and a WorkflowEngine capability registry (`docs/CAPABILITIES.md`).
 
 ## Authentication
 
@@ -33,6 +33,48 @@ Candidates, tried in order: `/health`, `/api/health`, `/healthz`. A `404` or `40
 moves to the next candidate; any other failure is surfaced immediately, so an
 authentication problem is not mistaken for a missing endpoint.
 
+## Capability registry and execution
+
+The capability surface is versioned separately from the deployment OpenAPI
+document and follows WorkflowEngine contract `1.0.0`:
+
+- `GET /v1/capabilities` — authoritative commands, options, statuses and artifact
+  availability. Only `status: "available"` may execute.
+- `POST /v1/capabilities/{capabilityId}/execute` — accepts
+  `{capabilityId, inputs, projectId?, conversationId?, wait}` and returns the
+  WorkflowEngine `TaskAccepted` shape.
+- `GET /v1/work/{taskId}` — authoritative terminal state and result artifacts.
+- `GET /v1/work/{taskId}/events?after=N` — sequenced SSE progress; duplicate
+  event ids and `seq <= after` are ignored.
+- `POST /v1/files` — multipart upload (`file`, `sha256`, `bytes`, `mimeType`,
+  optional project/conversation), with `x-content-sha256`; the response must echo
+  the byte count and digest.
+- `GET /v1/artifacts`, `GET /v1/artifacts/{id}`,
+  `GET /v1/artifacts/{id}/content`, `POST /v1/artifacts/{id}/project` — the same
+  owner-scoped catalog Coderax Web uses.
+
+A registry that is absent, malformed or from another major version does not
+degrade to a local implementation: every proposed capability is reported
+`blocked` (missing) or the command fails (`CAPABILITY_REGISTRY_INVALID`,
+`CAPABILITY_CONTRACT_INCOMPATIBLE`). Unknown statuses become `unverified`.
+
+Execution is never retried by the CLI. `--no-wait` leaves the durable task
+running; closing the terminal does not cancel it. `--wait-timeout` only stops
+local waiting.
+
+## Uploads and downloads
+
+Uploads are regular files only, non-empty, within the registry limit (50 MiB hard
+cap), with extension and magic bytes in agreement and a MIME type the registry
+accepts. The exact sent bytes are hashed with SHA-256 and the engine must echo
+the same digest and byte count.
+
+Artifact downloads require a published SHA-256 digest. Data is streamed into a
+temporary or exclusively created file, hashed, checked against the digest and
+byte count, and only then moved into place. A mismatch removes the data. Existing
+files are never replaced without `--force`; directories, missing parents and
+symbolic-link destinations are refused.
+
 ## Convenience routes
 
 | Command | Match rule |
@@ -63,8 +105,10 @@ No path is hardcoded. When the match is absent the CLI exits `1` with
 - `3` HTTP 401/403 authentication or authorization failure
 - `4` network failure or timeout
 - `5` HTTP 404 not found
-- `6` Cloud/projects unavailable
-- `130` cancelled
+- `6` Cloud/projects unavailable, or a capability not available/registry missing
+- `2` local capability input, upload or download-destination validation
+- `1` capability task failure, artifact integrity failure, contract mismatch
+- `130` cancelled locally (a durable cloud task continues)
 
 ## Compatibility
 

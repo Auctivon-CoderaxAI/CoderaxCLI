@@ -75,7 +75,7 @@ export function redactValue(value, token) {
  * Append a route beneath the configured deployment prefix. `new URL(path, base)`
  * would discard a prefix such as `https://example.com/coderax`.
  */
-function joinRoute(baseUrl, path) {
+export function joinRoute(baseUrl, path) {
   const base = baseUrl.replace(/\/+$/, "");
   const suffix = path.startsWith("/") ? path : `/${path}`;
   const target = new URL(`${base}${suffix}`);
@@ -90,7 +90,7 @@ function truncate(value, limit = 300) {
   return text.length > limit ? `${text.slice(0, limit)}...` : text;
 }
 
-function detailText(value) {
+export function detailText(value) {
   if (typeof value === "string") return value;
   if (value === null || value === undefined) return "";
   if (typeof value === "object") {
@@ -107,6 +107,44 @@ function detailText(value) {
 }
 
 /**
+ * Map a failed HTTP response to the CLI's typed error, including a
+ * WorkflowEngine `Problem` body (title/detail/code/requestId/retryable).
+ * This is shared by JSON requests, multipart uploads and downloads so every
+ * failure path redacts the token and preserves the stable server code.
+ */
+export function errorFromResponse({ response, text, token, path }) {
+  let parsed = null;
+  if (typeof text === "string" && text.trim() !== "") {
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = null;
+    }
+  }
+  const safeJson = redactValue(parsed, token);
+  const detail = detailText(
+    safeJson?.detail
+      ?? safeJson?.title
+      ?? safeJson?.message
+      ?? safeJson?.error
+      ?? (typeof text === "string" ? redact(text, token).slice(0, 200) : ""),
+  );
+  const problemCode = typeof safeJson?.code === "string" ? safeJson.code : null;
+  const explanation = problemCode
+    ? `${problemCode}${detail ? `: ${truncate(detail)}` : ""}`
+    : truncate(detail);
+  const message = `HTTP ${response.status} from ${path}${explanation ? `: ${explanation}` : ""}`;
+  const failure = new CoderaxError(`HTTP_${response.status}`, message, { status: response.status });
+  if (safeJson !== null && typeof safeJson === "object") {
+    failure.body = safeJson;
+    if (typeof safeJson.code === "string") failure.problemCode = safeJson.code;
+    if (typeof safeJson.requestId === "string") failure.requestId = safeJson.requestId;
+    if (safeJson.retryable === true) failure.retryable = true;
+  }
+  return failure;
+}
+
+/**
  * Single-request helper. No retries, no redirects, no cookie jar, and no token
  * in any error string.
  */
@@ -116,9 +154,12 @@ export async function request({
   path,
   method = "GET",
   body,
+  rawBody,
+  headers: extraHeaders,
   timeoutMs = 15000,
   accept = "application/json",
   includeRaw = false,
+  signal,
   fetchImpl = fetch,
 } = {}) {
   if (!baseUrl) {
@@ -131,12 +172,18 @@ export async function request({
   const displayPath = redact(target.pathname, token);
   const headers = { accept };
   if (token) headers.authorization = `Bearer ${token}`;
+  if (extraHeaders !== undefined) Object.assign(headers, extraHeaders);
 
   let payload;
-  if (body !== undefined) {
+  if (rawBody !== undefined) {
+    payload = rawBody;
+  } else if (body !== undefined) {
     headers["content-type"] = "application/json";
     payload = JSON.stringify(body);
   }
+
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 
   let response;
   try {
@@ -145,9 +192,10 @@ export async function request({
       headers,
       body: payload,
       redirect: "error",
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: combinedSignal,
     });
   } catch (error) {
+    if (signal?.aborted) throw new CoderaxError("CANCELLED", "request cancelled");
     const name = error?.name ?? "";
     if (name === "TimeoutError" || name === "AbortError") {
       throw new CoderaxError(
@@ -176,7 +224,6 @@ export async function request({
   }
 
   const fullText = redact(text, token);
-  const diagnosticText = fullText.slice(0, 2000);
 
   let json = null;
   if (text.trim() !== "") {
@@ -189,11 +236,7 @@ export async function request({
   const safeJson = redactValue(json, token);
 
   if (!response.ok) {
-    const detail = detailText(safeJson?.message ?? safeJson?.error ?? diagnosticText);
-    const message = `HTTP ${response.status} from ${displayPath}${detail ? `: ${truncate(detail)}` : ""}`;
-    const failure = new CoderaxError(`HTTP_${response.status}`, message, { status: response.status });
-    failure.body = safeJson;
-    throw failure;
+    throw errorFromResponse({ response, text, token, path: displayPath });
   }
 
   const result = { status: response.status, headers: response.headers, json: safeJson, text: fullText };
@@ -203,7 +246,7 @@ export async function request({
   return result;
 }
 
-function parseSseEvent(rawEvent) {
+export function parseSseEvent(rawEvent) {
   const dataLines = rawEvent
     .split("\n")
     .filter((line) => line.startsWith("data:"))
