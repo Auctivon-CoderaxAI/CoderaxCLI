@@ -3,7 +3,7 @@
  * Prove the package installs from its own tarball on Linux, macOS and Windows
  * without touching a registry. Used by the CI matrix.
  */
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -17,6 +17,13 @@ function quoteCmdArg(value) {
   // cmd.exe expands percent variables even within quotes.
   if (/["%\r\n]/.test(value)) throw new Error("unsupported character in Windows smoke command");
   return `"${value}"`;
+}
+
+function fail(message) {
+  console.error(message);
+  const annotation = String(message).replace(/\r/g, "").replace(/\n/g, "%0A").slice(0, 900);
+  console.log(`::error title=Install smoke::${annotation}`);
+  process.exit(1);
 }
 
 function run(command, args) {
@@ -33,24 +40,23 @@ function run(command, args) {
     console.error(result.error.message);
   }
   if (result.status !== 0) {
-    console.error(`command failed: ${command} ${args.join(" ")}`);
-    console.error(result.stdout ?? "");
-    console.error(result.stderr ?? "");
-    process.exit(result.status ?? 1);
+    const detail = [
+      `command failed: ${command} ${args.join(" ")}`,
+      (result.stdout ?? "").trim(),
+      (result.stderr ?? "").trim(),
+    ].filter(Boolean).join("\n");
+    fail(detail);
   }
   return result;
 }
 
 try {
-  const pack = run(npm, ["pack", "--json", "--pack-destination", temp]);
-  const parsed = JSON.parse(pack.stdout.trim());
-  const filename = Array.isArray(parsed) ? parsed[0]?.filename : parsed?.filename;
-  if (!filename) {
-    console.error("npm pack did not report a filename");
-    process.exit(1);
+  run(npm, ["pack", "--json", "--pack-destination", temp]);
+  const candidates = (await readdir(temp)).filter((name) => name.endsWith(".tgz"));
+  if (candidates.length !== 1) {
+    fail(`npm pack left ${candidates.length} tarballs in ${temp}: ${candidates.join(", ")}`);
   }
-
-  const tarball = join(temp, filename);
+  const tarball = join(temp, candidates[0]);
   const prefix = join(temp, "prefix");
   run(npm, [
     "install",
@@ -70,14 +76,12 @@ try {
 
   const version = run(bin, ["--version"]);
   if (!/coderax-cli \d+\.\d+\.\d+/.test(version.stdout)) {
-    console.error(`unexpected --version output: ${version.stdout}`);
-    process.exit(1);
+    fail(`unexpected --version output: ${version.stdout}`);
   }
 
   const help = run(bin, ["--help"]);
   if (!help.stdout.includes("coderax work submit")) {
-    console.error("installed binary did not print the expected help");
-    process.exit(1);
+    fail("installed binary did not print the expected help");
   }
 
   console.log(`install smoke passed on ${process.platform}: ${version.stdout.trim()}`);
