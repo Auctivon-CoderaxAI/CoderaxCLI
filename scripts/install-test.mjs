@@ -474,8 +474,12 @@ try {
       assert.equal(status.status, 0, tail(status));
       const reported = JSON.parse(status.stdout);
       assert.equal(reported.authenticated, true);
-      assert.equal(reported.role, "ADMIN");
       assert.equal(reported.token.includes(TOKEN), false);
+
+      const whoami = await cli(["whoami", "--json"]);
+      assert.equal(whoami.status, 0, tail(whoami));
+      assert.equal(JSON.parse(whoami.stdout).role, "ADMIN");
+      assert.equal(whoami.stdout.includes(TOKEN), false);
 
       const configMode = (await stat(configPath)).mode & 0o777;
       if (!IS_WINDOWS) assert.equal(configMode, 0o600, `config mode is ${configMode.toString(8)}`);
