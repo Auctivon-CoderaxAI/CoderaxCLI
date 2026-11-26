@@ -2,17 +2,30 @@
   "name": "coderax-cli",
   "version": "0.1.0",
   "private": true,
-  "description": "Canonical Coderax CLI: chat, Work mode, products, login, health, OpenAPI discovery, and authenticated calls",
+  "description": "Owner-only Coderax cloud client: interactive chat, autonomous Work, durable runs, streaming, replay and diagnostics",
   "type": "module",
   "bin": {
     "coderax": "src/cli.js"
   },
+  "files": [
+    "src",
+    "packages/workflow-sdk/src",
+    "packages/workflow-sdk/package.json",
+    "docs",
+    "README.md",
+    "SECURITY.md",
+    "ARCHITECTURE.md",
+    "BACKEND-DEFECTS.md"
+  ],
   "engines": {
     "node": ">=24"
   },
   "scripts": {
     "start": "node src/cli.js --help",
     "test": "node --test",
-    "check": "node --check src/config.js && node --check src/client.js && node --check src/discover.js && node --check src/cli.js && node --check src/product-commands.js && node --check src/product-registry.js && node --check src/version.js"
+    "test:contract": "node --test test/contract.test.js test/workflow-cli.test.js",
+    "check": "node --check src/config.js && node --check src/client.js && node --check src/discover.js && node --check src/cli.js && node --check src/product-commands.js && node --check src/product-registry.js && node --check src/session.js && node --check src/render.js && node --check src/approval.js && node --check src/workflow-commands.js && node --check src/version.js && node --check packages/workflow-sdk/src/contract.js && node --check packages/workflow-sdk/src/errors.js && node --check packages/workflow-sdk/src/redact.js && node --check packages/workflow-sdk/src/sse.js && node --check packages/workflow-sdk/src/http.js && node --check packages/workflow-sdk/src/client.js && node --check packages/workflow-sdk/src/index.js && node --check scripts/smoke-install.mjs && node --check scripts/verify-cross-surface.mjs",
+    "smoke:install": "node scripts/smoke-install.mjs",
+    "verify:cross-surface": "node scripts/verify-cross-surface.mjs"
   }
 }

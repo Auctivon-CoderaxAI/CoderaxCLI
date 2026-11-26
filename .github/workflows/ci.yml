@@ -4,13 +4,27 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
-    runs-on: ubuntu-latest
+  # The protected branch requires the check context named exactly "test".
+  # Keep that aggregator name while running the suite on free standard runners
+  # for every supported OS. No larger runners, paid actions or secrets are used.
+  verify:
+    name: verify (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     steps:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -22,5 +36,24 @@ jobs:
           node-version: "24"
       - name: Syntax check
         run: npm run check
-      - name: Unit and CLI tests
+      - name: Unit, CLI and contract tests
         run: npm test
+      - name: Cross-platform install smoke
+        run: node scripts/smoke-install.mjs
+
+  test:
+    name: test
+    needs: verify
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every platform to pass
+        shell: bash
+        run: |
+          result="${{ needs.verify.result }}"
+          echo "verify result: $result"
+          if [ "$result" != "success" ]; then
+            echo "One or more platform jobs did not pass."
+            exit 1
+          fi
