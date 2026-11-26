@@ -9,6 +9,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+if ($Version -notmatch '^[0-9A-Za-z._-]+$') { throw "Invalid version: $Version" }
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) { throw "Node.js 24 or newer is required" }

@@ -7,14 +7,17 @@
 # Nothing is published to an external package registry.
 set -eu
 
-VERSION="${CODERAX_VERSION:-1.0.0}"
-INSTALL_ROOT="${CODERAX_HOME:-$HOME/.coderax}"
-RELEASE_BASE="${CODERAX_RELEASE_BASE:-https://github.com/Auctivon-CoderaxAI/CoderaxCLI/releases/download/v${VERSION}}"
-
 fail() {
   printf 'coderax installer: %s\n' "$*" >&2
   exit 1
 }
+
+VERSION="${CODERAX_VERSION:-1.0.0}"
+case "$VERSION" in
+  *[!A-Za-z0-9._-]*|'') fail "invalid CODERAX_VERSION: $VERSION" ;;
+esac
+INSTALL_ROOT="${CODERAX_HOME:-$HOME/.coderax}"
+RELEASE_BASE="${CODERAX_RELEASE_BASE:-https://github.com/Auctivon-CoderaxAI/CoderaxCLI/releases/download/v${VERSION}}"
 
 case "$RELEASE_BASE" in
   https://*) CURL_PROTO="=https" ;;
