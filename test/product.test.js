@@ -57,7 +57,7 @@ test("login verifies and stores a token, then status masks it and logout removes
   const env = { CODERAX_CONFIG: file };
   const fetchImpl = async (url) => {
     assert.match(String(url), /\/api\/user$/);
-    return new Response(JSON.stringify({ email: "dev@coderax.test" }), {
+    return new Response(JSON.stringify({ email: "dev@coderax.test", role: "ADMIN" }), {
       status: 200,
       headers: { "Content-Type": "application/json" },
     });
@@ -65,8 +65,14 @@ test("login verifies and stores a token, then status masks it and logout removes
 
   const loginIo = capture();
   const loginCode = await runCli(
-    ["login", "--base-url", "https://coderax.test", "--token", TOKEN, "--json"],
-    { env, fetchImpl, stdout: loginIo.stdout, stderr: loginIo.stderr, stdinIsTTY: true },
+    ["login", "--base-url", "https://coderax.test", "--json"],
+    {
+      env: { CODERAX_CREDENTIAL_STORE: "file", ...env },
+      fetchImpl,
+      stdout: loginIo.stdout,
+      stderr: loginIo.stderr,
+      readSecret: async () => TOKEN,
+    },
   );
   assert.equal(loginCode, 0);
   assert.equal(loginIo.out().includes(TOKEN), false);
@@ -167,10 +173,10 @@ test("work consumes native cumulative message snapshots without duplicating text
   const fetchImpl = async (url) => {
     assert.equal(new URL(url).pathname, "/api/work/chat");
     return sseResponse([
-      'data: {"created":true,"streamId":"task-id"}\\n\\n',
-      'data: {"message":true,"text":"accepted"}\\n\\n',
-      'data: {"message":true,"text":"accepted and verified"}\\n\\n',
-      'data: {"final":true,"responseMessage":{"text":"accepted and verified"}}\\n\\n',
+      'data: {"created":true,"streamId":"task-id"}\n\n',
+      'data: {"message":true,"text":"accepted"}\n\n',
+      'data: {"message":true,"text":"accepted and verified"}\n\n',
+      'data: {"final":true,"responseMessage":{"text":"accepted and verified"}}\n\n',
     ]);
   };
   const code = await runCli(["work", "implement", "--json"], {
@@ -193,9 +199,9 @@ test("work returns the corrected answer when an engine snapshot replaces earlier
     CODERAX_TOKEN: TOKEN,
   };
   const fetchImpl = async () => sseResponse([
-    'data: {"message":true,"text":"old draft"}\\n\\n',
-    'data: {"message":true,"text":"corrected answer"}\\n\\n',
-    'data: {"final":true,"responseMessage":{"text":"corrected answer"}}\\n\\n',
+    'data: {"message":true,"text":"old draft"}\n\n',
+    'data: {"message":true,"text":"corrected answer"}\n\n',
+    'data: {"final":true,"responseMessage":{"text":"corrected answer"}}\n\n',
   ]);
   const code = await runCli(["work", "implement", "--json"], {
     env,
