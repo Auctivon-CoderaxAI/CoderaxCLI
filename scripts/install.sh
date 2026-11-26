@@ -140,6 +140,10 @@ fetch() {
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/coderax-install.XXXXXX")"
 trap 'if [ -n "$TMP" ] && [ -d "$TMP" ]; then rm -rf "$TMP"; fi' EXIT INT TERM
+# Node resolves the extractor module to its physical path, including on macOS
+# where the system temp directory can be reached through a symlink.
+TMP_PHYSICAL="$(cd -P "$TMP" && pwd)"
+TMP="$TMP_PHYSICAL"
 
 # --- resolve version -------------------------------------------------------
 if [ -n "$FROM_FILE" ] && [ "$VERSION" = "latest" ]; then
