@@ -2,11 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
-import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runCli } from "../src/cli.js";
+import { detectInstallMethod } from "../src/diagnostics.js";
+import { programRemovalCommands } from "../src/maintenance.js";
 import {
   SUPPORTED_API_VERSION,
   SUPPORTED_DEPLOYMENT_RANGE,
@@ -119,6 +121,68 @@ test("version --json reports the install and compatibility contract", async () =
   assert.equal(info.supportedDeploymentRange, SUPPORTED_DEPLOYMENT_RANGE);
   assert.match(info.compatibilityBasis, /x-coderax-api-version/);
   assert.match(info.configPath, /config\.json$/);
+});
+
+test("npm install diagnostics use the supplied layout for removal advice", async (t) => {
+  const prefix = await mkdtemp(join(tmpdir(), "coderax-layout-"));
+  t.after(() => rm(prefix, { recursive: true, force: true }));
+  const root = join(prefix, "node_modules", "coderax-cli");
+  const modulePath = join(root, "src", "diagnostics.js");
+  const localBin = join(prefix, "node_modules", ".bin");
+  const windows = process.platform === "win32";
+  const shim = windows ? "coderax.cmd" : "coderax";
+  await mkdir(join(root, "src"), { recursive: true });
+  await writeFile(modulePath, "");
+
+  function check(path, installPath, scope, command = "npm uninstall coderax-cli") {
+    const installMethod = detectInstallMethod(path);
+    assert.equal(installMethod, `npm-${scope}`);
+    assert.deepEqual(
+      programRemovalCommands({ installMethod, installPath }),
+      [command],
+    );
+  }
+
+  check(modulePath, root, "local"); // bin-links=false
+  if (windows) {
+    await writeFile(join(prefix, shim), "");
+    check(modulePath, root, "global", `npm uninstall --global --prefix "${prefix.replaceAll("\\", "/")}" coderax-cli`);
+
+    // GitHub's Windows runners live under an 8.3 short profile path
+    // (C:/Users/RUNNER~1/...). A tilde in the prefix must not suppress the
+    // command, because it is literal inside double quotes in cmd.exe.
+    const shortPrefix = join(prefix, "RUNNER~1");
+    const shortRoot = join(shortPrefix, "node_modules", "coderax-cli");
+    await mkdir(join(shortRoot, "src"), { recursive: true });
+    await writeFile(join(shortRoot, "src", "diagnostics.js"), "");
+    await writeFile(join(shortPrefix, shim), "");
+    check(
+      join(shortRoot, "src", "diagnostics.js"),
+      shortRoot,
+      "global",
+      `npm uninstall --global --prefix "${shortPrefix.replaceAll("\\", "/")}" coderax-cli`,
+    );
+  }
+  await mkdir(localBin);
+  await writeFile(join(localBin, shim), "");
+  check(modulePath, root, "local");
+
+  if (!windows) {
+    const globalRoot = join(prefix, "lib", "node_modules", "coderax-cli");
+    check(join(globalRoot, "src", "diagnostics.js"), globalRoot, "global", `npm uninstall --global --prefix "${prefix}" coderax-cli`);
+  }
+});
+
+test("global removal advice requires a usable npm prefix", () => {
+  for (const installPath of [
+    join("node_modules", "coderax-cli"),
+    join(tmpdir(), "custom $prefix", ...(process.platform === "win32" ? [] : ["lib"]), "node_modules", "coderax-cli"),
+    join(tmpdir(), "non-npm-layout", "coderax-cli"),
+  ]) {
+    const commands = programRemovalCommands({ installMethod: "npm-global", installPath });
+    assert.match(commands.join("\n"), /verify the npm prefix/i);
+    assert.doesNotMatch(commands.join("\n"), /npm uninstall/);
+  }
 });
 
 test("version works even when the config file is corrupt", async () => {
