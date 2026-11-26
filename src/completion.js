@@ -24,7 +24,8 @@ const VALUE_FLAGS = COMPLETION_FLAGS.filter(([, , takesValue]) => takesValue).ma
 
 // Descriptions are prose and can contain apostrophes. Every generator quotes
 // them with the target shell's own escaping rules.
-const posixQuote = (value) => value.replaceAll("'", "'\\''");
+const zshQuote = (value) =>
+  value.replaceAll("\\", "\\\\").replaceAll('"', '\\"').replaceAll("$", "\\$").replaceAll("`", "\\`");
 const fishQuote = (value) => value.replaceAll("\\", "\\\\").replaceAll("'", "\\'");
 const powershellQuote = (value) => value.replaceAll("'", "''");
 
@@ -90,11 +91,11 @@ complete -F _coderax_complete coderax
 
 function zshScript() {
   const commandLines = COMPLETION_COMMANDS.map(
-    ([name, description]) => `    '${posixQuote(`${name}:${description}`)}'`,
+    ([name, description]) => `    "${zshQuote(`${name}:${description}`)}"`,
   ).join("\n");
   const flagLines = COMPLETION_FLAGS.map(
     ([flag, description, takesValue]) =>
-      `    '${posixQuote(`${flag}[${description}]`)}${takesValue ? ":value:" : ""}' \\`,
+      `    "${zshQuote(`${flag}[${description}]`)}${takesValue ? ":value:" : ""}" \\`,
   ).join("\n");
   return `#compdef coderax
 ${COMPLETION_MARKER}

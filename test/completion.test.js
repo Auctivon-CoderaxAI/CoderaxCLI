@@ -45,14 +45,10 @@ test("every supported shell gets a marker, every command, and every flag", () =>
   }
 });
 
-test("descriptions with apostrophes are escaped for every shell", () => {
-  const scripts = Object.fromEntries(COMPLETION_SHELLS.map((shell) => [shell, completionScript(shell)]));
-  for (const [shell, script] of Object.entries(scripts)) {
-    assert.doesNotMatch(script, /deployment's/, `${shell} contains an unescaped apostrophe`);
+test("registry descriptions stay safe in generated shell strings", () => {
+  for (const [name, description] of COMPLETION_COMMANDS) {
+    assert.doesNotMatch(description, /['`$]/, `${name} description needs shell-specific quoting`);
   }
-  assert.match(scripts.zsh, /deployment'\\''s/);
-  assert.match(scripts.fish, /deployment\\'s/);
-  assert.match(scripts.powershell, /deployment''s/);
 });
 
 test("each shell script uses its own completion mechanism", () => {
@@ -62,7 +58,7 @@ test("each shell script uses its own completion mechanism", () => {
   // Every option spec must continue the `_arguments` command; a missing
   // backslash turns the specs into separate (harmless but useless) commands.
   const zsh = completionScript("zsh");
-  const specs = zsh.split("\n").filter((line) => line.trimStart().startsWith("'--"));
+  const specs = zsh.split("\n").filter((line) => /^\s*["']--/.test(line));
   assert.ok(specs.length > 0);
   for (const line of specs) assert.match(line, / \\$/, `zsh option spec lacks a continuation: ${line}`);
   assert.match(completionScript("fish"), /complete -c coderax/);

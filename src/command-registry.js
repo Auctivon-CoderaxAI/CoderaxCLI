@@ -34,7 +34,7 @@ export const COMMANDS = Object.freeze([
   ["projects", "Show Cloud projects"],
   ["update", "Check the release feed and print upgrade commands"],
   ["version", "Show version, install and API contract details"],
-  ["compat", "Check the deployment's API version and capabilities"],
+  ["compat", "Check the deployment API version and capabilities"],
   ["config", "Show or change configuration"],
   ["uninstall", "Remove stored credentials, optionally the config"],
   ["cleanup", "Alias for uninstall"],

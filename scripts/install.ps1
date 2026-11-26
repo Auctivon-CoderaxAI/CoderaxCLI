@@ -47,7 +47,20 @@ if ([string]::IsNullOrWhiteSpace($Prefix) -or $Prefix -eq "/" -or $Prefix -eq $e
 }
 
 function Get-Sha256([string]$Path) {
-  return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
+  # Use the .NET implementation directly. Get-FileHash lives in a module that
+  # is unavailable in some stripped/constrained Windows PowerShell hosts.
+  $stream = [System.IO.File]::OpenRead($Path)
+  try {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+      $hash = $sha.ComputeHash($stream)
+      return ([System.BitConverter]::ToString($hash) -replace '-', '').ToLowerInvariant()
+    } finally {
+      $sha.Dispose()
+    }
+  } finally {
+    $stream.Dispose()
+  }
 }
 
 function Save-File([string]$Url, [string]$Destination) {
