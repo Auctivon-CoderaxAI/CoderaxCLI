@@ -428,21 +428,102 @@ test("strict chat negotiates before starting a generation", async () => {
   );
 });
 
-test("an interrupted chat POST is not retried and cannot start a second generation", async () => {
+test("chat drains buffered frames before accepting the completion marker", async () => {
+  await withStub(
+    (req, res) => {
+      if (req.url !== "/api/work/chat") return json(res, 404, { message: "not found" });
+      sse(res, [
+        'id: 1\ndata: {"delta":"a"}\n\n',
+        'id: 3\ndata: {"delta":"c"}\n\n',
+        "data: [DONE]\n\n",
+      ]);
+    },
+    async (baseUrl) => {
+      const result = await cli(["chat", "hi", "--json"], await envFor(baseUrl));
+      assert.equal(result.code, 0, result.err);
+      assert.equal(JSON.parse(result.out).text, "ac");
+      assert.match(result.err, /OUT_OF_ORDER_EVENT|never delivered in order/);
+    },
+  );
+});
+
+test("chat honours --chat-path and --url overrides", async () => {
+  const paths = [];
+  await withStub(
+    (req, res) => {
+      paths.push(req.url);
+      if (!["/custom/chat", "/custom/url", "/custom/env"].includes(req.url)) {
+        return json(res, 404, { message: "not found" });
+      }
+      sse(res, ['data: {"delta":"custom"}\n\n', "data: [DONE]\n\n"]);
+    },
+    async (baseUrl) => {
+      const byConfig = await cli(
+        ["chat", "hi", "--chat-path", "/custom/chat", "--json"],
+        await envFor(baseUrl),
+      );
+      assert.equal(byConfig.code, 0, byConfig.err);
+      assert.equal(JSON.parse(byConfig.out).text, "custom");
+      const byUrl = await cli(
+        ["chat", "hi", "--url", "/custom/url", "--json"],
+        await envFor(baseUrl),
+      );
+      assert.equal(byUrl.code, 0, byUrl.err);
+      assert.equal(JSON.parse(byUrl.out).text, "custom");
+      const byEnv = await cli(
+        ["chat", "hi", "--json"],
+        { ...(await envFor(baseUrl)), CODERAX_CHAT_PATH: "/custom/env" },
+      );
+      assert.equal(byEnv.code, 0, byEnv.err);
+      assert.equal(JSON.parse(byEnv.out).text, "custom");
+      assert.deepEqual(paths, ["/custom/chat", "/custom/url", "/custom/env"]);
+    },
+  );
+});
+
+test("an interrupted chat POST is not retried and exposes the conversation for recovery", async () => {
   let chats = 0;
+  let followUp = null;
   await withStub(
     (req, res) => {
       if (req.url !== "/api/work/chat") return json(res, 404, { message: "not found" });
       chats += 1;
+      if (chats > 1) {
+        let body = "";
+        req.on("data", (chunk) => {
+          body += chunk;
+        });
+        req.on("end", () => {
+          followUp = JSON.parse(body);
+          sse(res, [
+            'data: {"final":true,"responseMessage":{"text":"done","conversationId":"conv-interrupted"}}\n\n',
+            "data: [DONE]\n\n",
+          ]);
+        });
+        return;
+      }
       res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write('data: {"conversationId":"conv-interrupted"}\n\n');
       res.write('data: {"delta":"partial"}\n\n');
       setTimeout(() => res.destroy(), 10);
     },
     async (baseUrl) => {
-      const result = await cli(["chat", "hi", "--json"], await envFor(baseUrl));
+      const env = await envFor(baseUrl);
+      const result = await cli(["chat", "hi", "--json"], env);
       assert.equal(result.code, 4);
       assert.equal(chats, 1);
       assert.match(result.err, /failed|network/i);
+      assert.match(result.err, /conv-interrupted/);
+      assert.match(result.err, /coderax tasks/);
+      assert.match(result.err, /not resent/);
+
+      // The accepted conversation id is saved on failure, so the next turn
+      // continues the existing task rather than starting another generation.
+      const resumed = await cli(["chat", "continue", "--json"], env);
+      assert.equal(resumed.code, 0, resumed.err);
+      assert.equal(JSON.parse(resumed.out).text, "done");
+      assert.equal(followUp.conversationId, "conv-interrupted");
+      assert.equal(chats, 2);
     },
   );
 });
@@ -454,7 +535,7 @@ test("failed and suspended runs are reported distinctly", async () => {
       if (url.pathname === "/api/workflows/runs/run-failed/stream") {
         res.writeHead(200, { "content-type": "text/event-stream" });
         res.write(
-          `data: ${JSON.stringify({ run: RUN("run-failed", "failed", { error: "tests failed" }) })}\n\n`,
+          `data: ${JSON.stringify({ run: RUN("run-failed", "failed", { error: `tests failed ${TOKEN}` }) })}\n\n`,
         );
         res.end();
         return;
@@ -470,6 +551,8 @@ test("failed and suspended runs are reported distinctly", async () => {
       assert.match(failed.out, /failed/);
       assert.match(failed.out, /tests failed/);
       assert.match(failed.out, /coderax retry run-failed/);
+      assert.equal(failed.out.includes(TOKEN), false, "run snapshot leaked the bearer token");
+      assert.equal(failed.err.includes(TOKEN), false, "run diagnostics leaked the bearer token");
 
       const suspended = await cli(
         ["run", "run-paused", "--no-follow"],
@@ -593,6 +676,92 @@ test("autonomous Work submits the backend build contract", async () => {
       assert.equal(submitted.agentId, "agent-1");
       assert.deepEqual(submitted.repository, { owner: "acme", name: "app" });
       assert.match(submitted.workspace, /^coderax-acme-app-/);
+    },
+  );
+});
+
+test("work submit --follow --json emits one NDJSON record per line", async () => {
+  await withStub(
+    negotiation((req, res) => {
+      const url = new URL(req.url, "http://localhost");
+      if (url.pathname === "/api/user") {
+        return json(res, 200, { email: "owner@coderax.test", role: "ADMIN" });
+      }
+      if (url.pathname === "/api/workflows/builds" && req.method === "POST") {
+        return json(res, 202, {
+          run: RUN("run-ndjson", "queued"),
+          workflow: { id: "wf-1", name: "Contract workflow" },
+          build: { mode: "autonomous", taskCount: 1, degraded: false },
+        });
+      }
+      if (url.pathname === "/api/workflows/runs/run-ndjson/stream") {
+        sse(res, [
+          `data: ${JSON.stringify({ run: RUN("run-ndjson", "running") })}\n\n`,
+          `data: ${JSON.stringify({ run: RUN("run-ndjson", "completed") })}\n\n`,
+        ]);
+        return;
+      }
+      return json(res, 404, { message: "not found" });
+    }),
+    async (baseUrl) => {
+      const result = await cli(
+        [
+          "work",
+          "submit",
+          "implement the fix",
+          "--repo",
+          "acme/app",
+          "--agent",
+          "agent-1",
+          "--follow",
+          "--json",
+        ],
+        await envFor(baseUrl),
+      );
+      assert.equal(result.code, 0, result.err);
+      const lines = result.out.split("\n").filter((line) => line.trim() !== "");
+      assert.ok(lines.length >= 2, `expected submission and run records, got: ${result.out}`);
+      const records = lines.map((line) => JSON.parse(line));
+      assert.equal(records[0].run.id, "run-ndjson");
+      assert.equal(records[0].build.taskCount, 1);
+      assert.equal(records[records.length - 1].run.status, "completed");
+    },
+  );
+});
+
+test("retry --follow --json also emits consistent NDJSON", async () => {
+  await withStub(
+    negotiation((req, res) => {
+      const url = new URL(req.url, "http://localhost");
+      if (url.pathname === "/api/user") {
+        return json(res, 200, { email: "owner@coderax.test", role: "ADMIN" });
+      }
+      if (url.pathname === "/api/workflows/runs/run-before") {
+        return json(res, 200, { run: RUN("run-before", "failed", { input: { fix: true } }) });
+      }
+      if (url.pathname === "/api/workflows/wf-1/runs" && req.method === "POST") {
+        return json(res, 202, { run: RUN("run-after", "queued") });
+      }
+      if (url.pathname === "/api/workflows/runs/run-after/stream") {
+        sse(res, [
+          `data: ${JSON.stringify({ run: RUN("run-after", "completed") })}\n\n`,
+        ]);
+        return;
+      }
+      return json(res, 404, { message: "not found" });
+    }),
+    async (baseUrl) => {
+      const result = await cli(
+        ["retry", "run-before", "--follow", "--json"],
+        await envFor(baseUrl),
+      );
+      assert.equal(result.code, 0, result.err);
+      const lines = result.out.split("\n").filter((line) => line.trim() !== "");
+      assert.ok(lines.length >= 2, `expected retry and run records, got: ${result.out}`);
+      const records = lines.map((line) => JSON.parse(line));
+      assert.equal(records[0].previous.id, "run-before");
+      assert.equal(records[0].run.id, "run-after");
+      assert.equal(records[records.length - 1].run.status, "completed");
     },
   );
 });
