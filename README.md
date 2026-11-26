@@ -105,9 +105,9 @@ the engine sends a cumulative snapshot and its incremental text together, the
 CLI emits only the unseen suffix (or one replacement when the answer is
 rewritten), so the same words are never printed twice.
 
-`events` and `work` reconnect after a dropped connection or an engine restart
-from the last seen sequence. Replayed events are deduplicated. A 401/403 is not
-retried: an expired token is reported with exit code `3`.
+`events` and `work` reconnect after a dropped connection (including a restarted
+listener) from the last seen sequence. Replayed events are deduplicated. A
+401/403 is not retried: an expired token is reported with exit code `3`.
 
 At an approval request, an interactive `work` detaches and prints the exact
 `approve`/`deny` commands. The task remains paused on the engine; approving it
@@ -162,9 +162,8 @@ are enforced on POSIX and tolerated on Windows.
   engine currently persists leases in MongoDB and task/conversation state in
   memory; restart survival is an engine property, not something this client can
   create.
-- **Chat is not streamed by contract 1.0.0.** The CLI will render SSE frames if
-  a compatible engine sends them, but the published handler returns one JSON
-  reply.
+- **Chat is not streamed by contract 1.0.0.** The versioned `chat` command
+  expects one JSON reply; the legacy `ask` escape hatch still renders SSE.
 - The previously reported `feat/engine-thin-client` commit `d12a8b5` was not
   present in any organization repository. This implementation was reconstructed
   against the authoritative SDK, as recorded in `contracts/PROVENANCE.md`.
