@@ -31,7 +31,7 @@ function Fail([string]$Message, [int]$Code = 1) {
 }
 
 if (-not $Version) { $Version = "latest" }
-if ($env:CEDERAX_REQUIRE_PROVENANCE) { $Provenance = $true }
+if ($env:CODERAX_REQUIRE_PROVENANCE) { $Provenance = $true }
 
 $node = Get-Command node -ErrorAction SilentlyContinue
 if (-not $node) {
@@ -52,12 +52,37 @@ if ($BaseUrl -notmatch '^https://' -and $BaseUrl -notmatch '^http://(localhost|1
   Fail "releases URL must use HTTPS (got '$BaseUrl')." 2
 }
 
+# Get-FileHash is a Utility cmdlet and is not available in every PowerShell
+# session (module autoloading can be disabled by policy). Hash through .NET so
+# verification does not depend on cmdlet discovery, and fall back to certutil.
 function Get-Sha256([string]$Path) {
-  return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
+  try {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+      $bytes = $sha.ComputeHash($stream)
+    } finally {
+      $stream.Dispose()
+      $sha.Dispose()
+    }
+    return ([System.BitConverter]::ToString($bytes) -replace '-', '').ToLowerInvariant()
+  } catch {
+    $out = & certutil.exe -hashfile $Path SHA256 2>$null
+    if ($LASTEXITCODE -ne 0) { throw "could not hash ${Path}: $($_.Exception.Message)" }
+    $hash = $out | Where-Object { $_ -match '^[0-9a-fA-F]{64}$' } | Select-Object -First 1
+    if (-not $hash) { throw "certutil produced no SHA-256 digest for $Path" }
+    return $hash.ToLowerInvariant()
+  }
 }
 
 function Save-File([string]$Url, [string]$Destination) {
-  Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Destination
+  $client = New-Object System.Net.WebClient
+  try {
+    $client.Headers.Add("User-Agent", "coderax-installer")
+    $client.DownloadFile($Url, $Destination)
+  } finally {
+    $client.Dispose()
+  }
 }
 
 if ($FromFile -and $Version -eq "latest") {
