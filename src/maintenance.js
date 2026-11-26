@@ -35,7 +35,10 @@ function globalNpmPrefix(path) {
   // Use forward slashes on Windows so a drive root cannot escape the closing
   // quote. Only emit commands for paths safe inside quotes across shells.
   if (windows && !/^[a-z]:\//i.test(prefix)) return null;
-  return /^[\p{L}\p{M}\p{N} /:._-]+$/u.test(prefix) ? prefix : null;
+  // `~` covers Windows 8.3 short names (C:/Users/RUNNER~1/...), which appear in
+  // temporary and profile paths. It is literal inside double quotes in both
+  // cmd.exe and POSIX sh, so it does not need rejecting.
+  return /^[\p{L}\p{M}\p{N} /:~._-]+$/u.test(prefix) ? prefix : null;
 }
 
 /** Instructions that remove the program, per installation method. */
