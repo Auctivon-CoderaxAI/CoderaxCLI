@@ -31,6 +31,11 @@ version is `0`, a minor release may change behaviour.
 
 ### Fixed
 
+- Windows secure-store hardened and verified ACLs through PowerShell module
+  autoload, which failed when `USERPROFILE` was redirected and could be
+  shadowed by a user-writable `PSModulePath`. The security module is now loaded
+  from the interpreter's own directory, so a Unicode or redirected install path
+  cannot make `login` fail with `CONFIG_PERMISSIONS`.
 - The WorkflowEngine's `/v1/chat` is documented as SSE but implemented as JSON;
   the client accepts both and records the defect in `BACKEND-DEFECTS.md`.
 

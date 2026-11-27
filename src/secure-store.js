@@ -131,6 +131,31 @@ function powershellCandidates(env) {
   return candidates;
 }
 
+/**
+ * The interpreter's own module directory, or null when it cannot be known.
+ *
+ * `$PSHOME\Modules` holds `Microsoft.PowerShell.Security`, which owns
+ * `Get-Acl`/`Set-Acl`. Autoload also consults `PSModulePath`, and a hosted
+ * runner whose `USERPROFILE` is redirected failed to load the security module
+ * even though PowerShell itself ran. Pinning the module path to the
+ * interpreter's own directory makes the call independent of the user profile,
+ * and keeps a user-writable module directory from shadowing a security cmdlet.
+ */
+function powershellModulePath(command, env) {
+  const normalized = String(command ?? "").replace(/[\\/]+$/, "");
+  let home = null;
+  const separator = Math.max(normalized.lastIndexOf("\\"), normalized.lastIndexOf("/"));
+  if (separator >= 0) {
+    home = normalized.slice(0, separator);
+  } else if (/^powershell(\.exe)?$/i.test(normalized)) {
+    const root = env.SystemRoot ?? env.SYSTEMROOT ?? env.windir ?? env.WINDIR;
+    if (typeof root === "string" && root.trim() !== "") {
+      home = `${root.trim().replace(/[\\/]+$/, "")}\\System32\\WindowsPowerShell\\v1.0`;
+    }
+  }
+  return home === null ? null : `${home}\\Modules`;
+}
+
 async function runPowerShell(runCommand, script, env) {
   const args = [
     "-NoProfile",
@@ -143,7 +168,10 @@ async function runPowerShell(runCommand, script, env) {
   let missing = null;
   for (const command of powershellCandidates(env)) {
     try {
-      return await runCommand(command, args, { env });
+      const modulePath = powershellModulePath(command, env);
+      return await runCommand(command, args, {
+        env: modulePath === null ? env : { ...env, PSModulePath: modulePath },
+      });
     } catch (error) {
       if (error?.code === "ENOENT") {
         missing = error;

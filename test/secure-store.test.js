@@ -140,6 +140,10 @@ test("Windows reads the account SID and interpreter from the system directory", 
     "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
   );
   assert.equal(calls[1].args.some((arg) => arg.includes("whoami")), false);
+  assert.equal(
+    calls[1].options.env.PSModulePath,
+    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\Modules",
+  );
 
   const trailing = [];
   await hardenSecurePath("C:\\tmp\\file", {
@@ -148,6 +152,25 @@ test("Windows reads the account SID and interpreter from the system directory", 
     runCommand: windowsRun("", { onCall: (call) => trailing.push(call) }),
   });
   assert.equal(trailing[0].command, "C:\\Windows\\System32\\whoami.exe");
+});
+
+test("Windows pins PowerShell to its system modules instead of a user path", async () => {
+  // A redirected USERPROFILE made Microsoft.PowerShell.Security fail to load on
+  // a hosted Windows runner. The security module lives under the interpreter's
+  // own directory, so a user-writable PSModulePath must not take precedence.
+  const calls = [];
+  await hardenSecurePath("C:\\tmp\\file", {
+    platform: "win32",
+    env: {
+      SystemRoot: "C:\\Windows",
+      PSModulePath: "C:\\Users\\someone\\Documents\\WindowsPowerShell\\Modules",
+    },
+    runCommand: windowsRun("", { onCall: (call) => calls.push(call) }),
+  });
+  assert.equal(
+    calls[1].options.env.PSModulePath,
+    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\Modules",
+  );
 });
 
 test("a missing PowerShell interpreter is reported, not silently ignored", async () => {
