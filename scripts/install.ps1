@@ -157,10 +157,41 @@ try {
   }
 
   if ($Provenance) {
-    $gh = Get-Command gh -ErrorAction SilentlyContinue
-    if (-not $gh) { Fail "-Provenance requires the GitHub CLI (gh)." 3 }
-    & gh attestation verify $archive --repo $repo | Out-Null
-    if ($LASTEXITCODE -ne 0) { Fail "provenance verification failed for $archive" 3 }
+    $legacy = $false
+    if ($FromFile) {
+      $bundle = "$archive.sigstore.json"
+      $legacy = -not (Test-Path -LiteralPath $bundle)
+    } else {
+      $bundle = Join-Path $temp "$asset.sigstore.json"
+      try {
+        Save-File "$releaseBase/$asset.sigstore.json" $bundle
+      } catch {
+        $cause = $_.Exception
+        while ($cause -and $cause -isnot [System.Net.WebException]) {
+          $cause = $cause.InnerException
+        }
+        if ($cause -and $cause.Response -and $cause.Response.StatusCode -eq [System.Net.HttpStatusCode]::NotFound) {
+          $legacy = $true
+        } else {
+          Fail "could not download the provenance bundle for $asset" 3
+        }
+      }
+    }
+    if ($legacy) {
+      $gh = Get-Command gh -CommandType Application -ErrorAction SilentlyContinue
+      if (-not $gh) { Fail "legacy provenance verification requires the GitHub CLI (gh)." 3 }
+      & gh attestation verify $archive --repo $repo | Out-Null
+      if ($LASTEXITCODE -ne 0) { Fail "legacy provenance verification failed for $archive" 3 }
+    } else {
+      $cosign = Get-Command cosign -CommandType Application -ErrorAction SilentlyContinue
+      if (-not $cosign) { Fail "-Provenance requires Cosign for signed bundles." 3 }
+      # Manual releases may be signed from a branch; tag runs must match this version.
+      $tagPattern = [regex]::Escape($Version)
+      $identity = "^https://github[.]com/$repo/[.]github/workflows/release[.]yml@refs/(tags/v$tagPattern|heads/.+)$"
+      & cosign verify-blob --bundle $bundle --certificate-identity-regexp $identity `
+        --certificate-oidc-issuer "https://token.actions.githubusercontent.com" $archive | Out-Null
+      if ($LASTEXITCODE -ne 0) { Fail "provenance verification failed for $archive" 3 }
+    }
   }
 
   # Extractors are injected at release-build time; see scripts/install.sh.
