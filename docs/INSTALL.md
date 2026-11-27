@@ -128,15 +128,18 @@ The installer never edits your shell profile and never accepts a token.
 
 ```powershell
 $version = "0.3.0"
-New-Item -ItemType Directory -Force release | Out-Null
-gh release download "v$version" --repo Auctivon-CoderaxAI/CoderaxCLI --dir release
+$releaseDir = Join-Path ([System.IO.Path]::GetTempPath()) ("coderax-release-" + [guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Force $releaseDir | Out-Null
+gh release download "v$version" --repo Auctivon-CoderaxAI/CoderaxCLI --dir $releaseDir
 
-$expected = (Select-String -Path release\SHA256SUMS -Pattern '  install\.ps1$').Line.Split(' ')[0]
-if ((Get-FileHash release\install.ps1 -Algorithm SHA256).Hash.ToLower() -ne $expected) { throw "checksum mismatch" }
+$checksums = Join-Path $releaseDir 'SHA256SUMS'
+$installer = Join-Path $releaseDir 'install.ps1'
+$expected = (Select-String -Path $checksums -Pattern '  install\.ps1$').Line.Split(' ')[0]
+if ((Get-FileHash $installer -Algorithm SHA256).Hash.ToLower() -ne $expected) { throw "checksum mismatch" }
 
-$archive = "release\coderax-cli-$version-standalone.zip"
-$checksum = (Select-String -Path release\SHA256SUMS -Pattern "  coderax-cli-$version-standalone\.zip$").Line.Split(' ')[0]
-powershell -NoProfile -ExecutionPolicy Bypass -File .\release\install.ps1 -Version $version -FromFile $archive -Checksum $checksum
+$archive = Join-Path $releaseDir "coderax-cli-$version-standalone.zip"
+$checksum = (Select-String -Path $checksums -Pattern "  coderax-cli-$version-standalone\.zip$").Line.Split(' ')[0]
+powershell -NoProfile -ExecutionPolicy Bypass -File $installer -Version $version -FromFile $archive -Checksum $checksum
 ```
 
 Defaults: program in `%LOCALAPPDATA%\Coderax\cli\<version>`, launcher
