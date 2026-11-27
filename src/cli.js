@@ -181,6 +181,7 @@ const KNOWN_FLAGS = new Set([
   "generation",
   "after",
   "retry-submission",
+  "reasoning",
 ]);
 const ALLOWED_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
 const BOOLEAN_FLAGS = new Set([

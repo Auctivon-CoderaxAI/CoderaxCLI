@@ -325,6 +325,7 @@ async function submitCommand(ctx, rest) {
     agent: agentFlag(ctx),
     model: modelFlag(ctx),
     mode: dataMode(ctx),
+    reasoning: ctx.flags.get("reasoning"),
     requireApproval: true,
   });
   const ledger = ledgerFor(ctx);
@@ -366,8 +367,20 @@ async function taskCommand(ctx, rest) {
   } else {
     ctx.out(`task ${status.taskId}  ${status.state}`);
     ctx.out(`conversation ${status.conversationId}`);
+    if (status.reasoning) ctx.out(`reasoning ${status.reasoning}`);
     if (status.result?.summary) ctx.out(status.result.summary);
-    for (const step of status.steps) ctx.out(`  [${step.state}] ${step.title}`);
+    if (status.result?.verification) {
+      const verification = status.result.verification;
+      ctx.out(`verification ${verification.passed ? "passed" : "failed"}: ${verification.reason}`);
+      for (const evidence of verification.evidence) ctx.out(`  evidence ${evidence}`);
+    }
+    for (const step of status.steps) {
+      const detail = [
+        step.dependsOn?.length ? `after ${step.dependsOn.join(",")}` : "",
+        step.attempts ? `attempts ${step.attempts}` : "",
+      ].filter(Boolean).join(", ");
+      ctx.out(`  [${step.state}] ${step.title}${detail ? ` (${detail})` : ""}`);
+    }
   }
   return status.state === "failed" ? EXIT.ERROR : EXIT.OK;
 }
@@ -513,7 +526,8 @@ const USAGE = `coderax v1 - canonical WorkflowEngine /v1 surface
   coderax v1 agents [--json]
   coderax v1 chat <message> [--conversation <id>] [--model <provider/id>] [--agent <id>] [--json]
   coderax v1 submit <objective> [--template <name>] [--agent <id>] [--model <provider/id>]
-                                 [--conversation <id>] [--detach] [--json]
+                                 [--reasoning auto|fast|complex] [--conversation <id>]
+                                 [--detach] [--json]
   coderax v1 task <taskId> [--json]
   coderax v1 watch <taskId> [--after <seq>] [--json]
   coderax v1 tasks [--json]                  tasks submitted from this machine

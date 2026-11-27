@@ -8,17 +8,25 @@ changes without this table being updated.
 | Field | Value |
 | --- | --- |
 | Repository | `Auctivon-CoderaxAI/Coderax-WorkflowEngine` |
-| Commit | `808dfd3797f9b1d7647ebd14bd395806fc4ab9bd` (current `main`) |
+| Commit | `7b7c9d7a88b8e483995ebe445f2bbbdd29050229` (current `main`) |
 | Document | `openapi.json` |
-| SHA-256 | `4be54dc95fe8b9c00d3521e8e289807716a928bc77c61cc173401303a048cf93` |
+| SHA-256 | `66add22a0d38405e9aaa49a62a9e463648df00457ce0b0080e3cca240c9736f4` |
 | HTTP contract | `1.0.0` |
 | SDK | `@coderax/sdk` `1.0.0` (private workspace package) |
 | Event schema | `1` |
 | Operations | 16, all under `/v1` |
 
-Verified against engine `main` on 2026-11-27: the engine's `main` still points at
-`808dfd37`, and the published `openapi.json` hashes to the value above. The pin
-is therefore current, not a stale 1.0.0 that the engine has since replaced.
+Verified against engine `main` on 2026-11-27: `main` points at `7b7c9d7a`, and
+the published `openapi.json` hashes to the value above. The pin is therefore
+current, not a stale 1.0.0 that the engine has since replaced.
+
+The engine kept `info.version` at `1.0.0` while adding optional fields
+(`reasoning` on a Work submission and task status, `dependsOn` and `attempts` on
+a step, and `verification` on a result). Those additions are accepted by the
+strict validators and are covered by `test/v1-client.test.js` and
+`test/v1-submit.test.js`. A version alone would not distinguish the two
+documents, so the pin records the commit and digest as well; see W3 in
+`BACKEND-DEFECTS.md`.
 
 ## Version policy
 

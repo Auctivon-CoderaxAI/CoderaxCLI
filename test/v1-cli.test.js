@@ -110,12 +110,19 @@ async function withServer(run) {
         state: "completed",
         agent: "coderax",
         mode: "cloud",
+        reasoning: "complex",
         generation: 0,
         createdAt: "2026-11-27T00:00:00.000Z",
         updatedAt: "2026-11-27T00:00:03.000Z",
         cancelRequested: false,
-        steps: [],
-        result: { artifacts: [], summary: "done" },
+        steps: [
+          { id: "step_1", title: "Inspect", state: "completed", dependsOn: ["plan"], attempts: 1 },
+        ],
+        result: {
+          artifacts: [],
+          summary: "done",
+          verification: { passed: true, reason: "tests passed", evidence: ["npm test"] },
+        },
       });
     }
     if (url.pathname === "/v1/templates") return json(404, { message: "not found" });
@@ -223,7 +230,10 @@ test("coderax v1 submit detaches, records the task and never resubmits", async (
   await withServer(async (baseUrl, requests) => {
     const io = capture();
     const environment = await env(baseUrl);
-    const code = await runCli(["v1", "submit", "change it", "--detach", "--json"], { env: environment, ...io.deps });
+    const code = await runCli(
+      ["v1", "submit", "change it", "--reasoning", "complex", "--detach", "--json"],
+      { env: environment, ...io.deps },
+    );
     assert.equal(code, 0);
     const first = JSON.parse(io.text());
     assert.equal(first.taskId, "task_1");
@@ -257,6 +267,9 @@ test("coderax v1 task renders an authoritative status", async () => {
     const code = await runCli(["v1", "task", "task_1"], { env: await env(baseUrl), ...io.deps });
     assert.equal(code, 0);
     assert.match(io.text(), /task_1\s+completed/);
+    assert.match(io.text(), /reasoning complex/);
     assert.match(io.text(), /done/);
+    assert.match(io.text(), /verification passed: tests passed/);
+    assert.match(io.text(), /after plan, attempts 1/);
   });
 });

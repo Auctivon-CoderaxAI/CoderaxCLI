@@ -59,7 +59,7 @@ fixes are included rather than overwritten.
 ## Evidence collected locally
 
 - `npm run check`: 94 JavaScript and MJS files pass `node --check`.
-- `npm test`: 363 tests, 361 pass, 0 fail, 2 skipped. The skips are the two
+- `npm test`: 366 tests, 364 pass, 0 fail, 2 skipped. The skips are the two
   Windows-only tests, which require an actual Windows runner. The suite now
   includes the shared `/v1` contract, client, stream, submit, transport,
   interactive-session and CLI suites.
@@ -104,10 +104,13 @@ fixes are included rather than overwritten.
    acceptance job must pass at the exact release-candidate SHA. A green Linux
    run is not evidence for Windows.
 3. **Upstream engine version drift.** The pinned contract is engine commit
-   `808dfd37` and version `1.0.0`. Negotiation accepts any `1.x`; it rejects a
-   different major. If the WorkflowEngine publishes a new minor while this is in
-   review, the pin and provenance must be refreshed with a reviewed contract
-   diff rather than silently widening the accepted shapes.
+   `7b7c9d7a` and version `1.0.0`. This revision added optional `reasoning`,
+   step `dependsOn`/`attempts` and result `verification` without changing the
+   version, so the pin records the commit and digest and the validators were
+   updated from the authoritative document. Negotiation accepts any `1.x`; it
+   rejects a different major. If the WorkflowEngine publishes another contract
+   while this is in review, the pin and provenance must be refreshed with a
+   reviewed diff rather than silently widening the accepted shapes.
 4. **Artifacts and scheduled tasks.** The WorkflowEngine OpenAPI document
    exposes health, readiness, agents, models, chat, work, tasks, events,
    conversations, memory, permissions and notifications. It has no artifact or

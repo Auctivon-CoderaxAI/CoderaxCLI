@@ -22,7 +22,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { SdkError } from "../errors.js";
-import { DATA_MODES } from "./contract.js";
+import { DATA_MODES, WORK_REASONING_MODES } from "./contract.js";
 
 const STALE_SUBMITTING_MS = 300_000;
 
@@ -61,6 +61,7 @@ export function buildWorkRequest({
   model,
   mode = "cloud",
   budget,
+  reasoning,
   requireApproval = true,
 }) {
   if (typeof objective !== "string" || objective.trim() === "") {
@@ -69,11 +70,15 @@ export function buildWorkRequest({
   if (!DATA_MODES.includes(mode)) {
     throw new SdkError("USAGE", `mode must be one of ${DATA_MODES.join(", ")}`);
   }
+  if (reasoning !== undefined && !WORK_REASONING_MODES.includes(reasoning)) {
+    throw new SdkError("USAGE", `reasoning must be one of ${WORK_REASONING_MODES.join(", ")}`);
+  }
   const body = { objective, mode, requireApproval };
   if (conversationId) body.conversationId = conversationId;
   if (agent) body.agent = agent;
   if (model) body.model = parseModelRef(model);
   if (budget) body.budget = budget;
+  if (reasoning !== undefined) body.reasoning = reasoning;
   return body;
 }
 

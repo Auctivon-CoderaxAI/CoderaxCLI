@@ -25,8 +25,13 @@ version is `0`, a minor release may change behaviour.
 - Work templates (`inspect`, `implement`, `test`, `diff`, `pr`, `review`, `ci`)
   as engine objectives, with an explicit tool-capability refusal.
 - Pinned contract artifact `contracts/workflow-engine-1.0.0.openapi.json` with
-  provenance (engine commit `808dfd37`, SHA-256 `4be54dc9…`), verified by
-  `test/v1-contract.test.js`.
+  provenance (engine commit `7b7c9d7a`, SHA-256 `66add22a…`), verified by
+  `test/v1-contract.test.js`. This revision adds optional Work `reasoning`,
+  step `dependsOn`/`attempts` and result `verification`; the engine kept
+  `info.version` at `1.0.0`, so the pin tracks the commit and digest (W3).
+- `coderax v1 submit --reasoning auto|fast|complex`, passed to the engine and
+  shown in authoritative task output alongside step dependencies, attempts and
+  result verification.
 - Exit codes `8` (approval required), `9` (submission uncertain) and `10`
   (conflict/busy), documented alongside the existing taxonomy.
 

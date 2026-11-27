@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  buildWorkRequest,
   createMemoryLedger,
   resolveSubmission,
   submitWork,
@@ -38,6 +39,20 @@ function acceptedClient(taskId = "task_1") {
     },
   };
 }
+
+test("a Work request carries the engine's reasoning mode only when it is valid", () => {
+  const body = buildWorkRequest({
+    objective: "verify the change",
+    mode: "cloud",
+    reasoning: "complex",
+  });
+  assert.equal(body.reasoning, "complex");
+  assert.equal("reasoning" in buildWorkRequest({ objective: "verify", mode: "cloud" }), false);
+  assert.throws(
+    () => buildWorkRequest({ objective: "verify", mode: "cloud", reasoning: "slow" }),
+    (error) => error.code === "USAGE",
+  );
+});
 
 test("one key submits once and is bound to the accepted task", async () => {
   const ledger = createMemoryLedger();

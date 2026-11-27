@@ -148,7 +148,7 @@ not a tenant-scoped role.
 ## WorkflowEngine `/v1` findings
 
 Scope: `Auctivon-CoderaxAI/Coderax-WorkflowEngine` at `main`
-(`808dfd3797f9b1d7647ebd14bd395806fc4ab9bd`). The CLI consumes this contract
+(`7b7c9d7a88b8e483995ebe445f2bbbdd29050229`). The CLI consumes this contract
 through `packages/workflow-sdk/src/v1/` and pins the document in
 `contracts/workflow-engine-1.0.0.openapi.json`.
 
@@ -187,3 +187,23 @@ offers `coderax work resolve <key> <taskId>`.
 **Required engine change.** Honour `Idempotency-Key` on `POST /v1/work` and
 return the original `TaskAccepted` for a repeat, so a client can recover without
 owner reconciliation.
+
+### W3 — additive contract changes do not bump `info.version` *(medium)*
+
+**Observed.** Engine `main` moved from `808dfd37` to `7b7c9d7a` while
+`openapi.json` still reports `info.version` `1.0.0`. The newer document adds
+optional `reasoning` to the Work submission and status, `dependsOn` and
+`attempts` to a step, and `verification` to a result. A client that pinned only
+the version cannot tell the two documents apart.
+
+**Client behaviour.** The CLI pins the engine commit and the exact SHA-256 of
+the document, and fails `test/v1-contract.test.js` on digest drift. The strict
+validators accept the new optional fields and reject an invalid enum or shape.
+
+**Required engine change.** Bump the minor version for additive wire changes,
+or publish a contract revision/digest in `/v1/health`. A version string that
+stays constant while the schema changes makes cache and compatibility decisions
+ambiguous.
+
+**Acceptance test.** Two documents with different schemas never share the same
+reported contract version, and health reports the revision the server serves.

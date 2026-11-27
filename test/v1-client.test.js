@@ -129,6 +129,68 @@ test("work submission sends the idempotency key and validates the acceptance", a
   assert.equal(submit.init.headers["x-coderax-client-request-id"], "key-1");
 });
 
+test("task status accepts the engine's reasoning, dependency, attempt and verification fields", async () => {
+  const status = {
+    taskId: "task_1",
+    conversationId: "conversation_1",
+    state: "completed",
+    agent: "coderax",
+    mode: "cloud",
+    reasoning: "complex",
+    generation: 1,
+    createdAt: "2026-11-27T00:00:00.000Z",
+    updatedAt: "2026-11-27T00:00:03.000Z",
+    cancelRequested: false,
+    steps: [
+      {
+        id: "step_1",
+        title: "Inspect the repository",
+        state: "completed",
+        dependsOn: ["step_0"],
+        attempts: 2,
+      },
+    ],
+    result: {
+      artifacts: [],
+      summary: "done",
+      verification: {
+        passed: true,
+        reason: "all checks passed",
+        evidence: ["npm test: 363 tests"],
+      },
+    },
+  };
+  const { client } = clientWith(() => jsonResponse(status));
+  const value = await client.task("task_1");
+  assert.equal(value.reasoning, "complex");
+  assert.deepEqual(value.steps[0].dependsOn, ["step_0"]);
+  assert.equal(value.steps[0].attempts, 2);
+  assert.equal(value.result.verification.passed, true);
+  assert.deepEqual(value.result.verification.evidence, ["npm test: 363 tests"]);
+});
+
+test("task status refuses a reasoning mode the engine cannot report", async () => {
+  const { client } = clientWith(() =>
+    jsonResponse({
+      taskId: "task_1",
+      conversationId: "conversation_1",
+      state: "running",
+      agent: "coderax",
+      mode: "cloud",
+      reasoning: "auto",
+      generation: 0,
+      createdAt: "2026-11-27T00:00:00.000Z",
+      updatedAt: "2026-11-27T00:00:01.000Z",
+      cancelRequested: false,
+      steps: [],
+    }),
+  );
+  await assert.rejects(
+    () => client.task("task_1"),
+    (error) => error.code === "CONTRACT_VIOLATION",
+  );
+});
+
 test("an owner 401 refreshes the token once and retries", async () => {
   let attempts = 0;
   const provider = {
