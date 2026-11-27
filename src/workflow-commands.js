@@ -1,4 +1,3 @@
-import { createInterface } from "node:readline/promises";
 import { spawn } from "node:child_process";
 import {
   BUILD_MODES,
@@ -31,6 +30,9 @@ export const EXIT = Object.freeze({
   NOT_FOUND: 5,
   UNAVAILABLE: 6,
   CONTRACT: 7,
+  APPROVAL: 8,
+  UNCERTAIN: 9,
+  CONFLICT: 10,
   CANCELLED: 130,
 });
 
@@ -249,7 +251,36 @@ async function streamTurn(ctx, client, mode, text, { session }) {
   return EXIT.OK;
 }
 
+/**
+ * Start the one interactive terminal implementation. Non-interactive commands
+ * keep using the shared WorkflowClient transport directly; the terminal builds
+ * its own bounded, sanitising presentation layer on top of the same settings.
+ */
+async function runTerminal(ctx, mode) {
+  if (!ctx.stdinIsTTY) {
+    throw new SdkError("USAGE", "interactive mode requires a terminal; start a terminal session or pass a prompt");
+  }
+  if (typeof ctx.interactiveRunner !== "function") {
+    throw new SdkError("USAGE", "the interactive terminal is not available in this build");
+  }
+  const resume = ctx.flags.get("resume");
+  const code = await ctx.interactiveRunner({
+    settings: ctx.settings,
+    mode,
+    env: ctx.env,
+    accessible: ctx.flags.has("accessible") === true,
+    noColor: ctx.flags.has("no-color") === true,
+    resume: resume ?? false,
+    noHistory: ctx.flags.has("no-history") === true,
+    fetchImpl: ctx.fetchImpl,
+    signal: ctx.signal,
+  });
+  return Number.isInteger(code) ? code : EXIT.OK;
+}
+
 export async function chatCommand(ctx, positionals) {
+  if (ctx.flags.has("interactive")) return runTerminal(ctx, "chat");
+
   const client = await clientFor(ctx);
   if (ctx.flags.has("new")) resetSession(ctx, ctx.settings.baseUrl);
 
@@ -265,84 +296,7 @@ export async function chatCommand(ctx, positionals) {
       session: sessionFor(ctx, ctx.settings.baseUrl),
     });
   }
-  return interactiveChat(ctx, client);
-}
-
-async function interactiveChat(ctx, client) {
-  const readline = createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    terminal: true,
-  });
-  let session = sessionFor(ctx, ctx.settings.baseUrl);
-
-  ctx.out("Interactive chat. /help for commands, /exit to leave.");
-  if (session.conversationId) ctx.out(`Continuing conversation ${session.conversationId}.`);
-
-  try {
-    while (true) {
-      let line;
-      try {
-        line = await readline.question("coderax> ");
-      } catch {
-        return EXIT.CANCELLED;
-      }
-      const text = line.trim();
-      if (text === "") continue;
-      if (text === "/exit" || text === "/quit") return EXIT.OK;
-      if (text === "/help") {
-        ctx.out(
-          [
-            "/exit, /quit      leave the session",
-            "/new              start a new conversation",
-            "/model <id>       set the model for this session",
-            "/agent <id>       set the agent for this session",
-            "/conversation     show the current conversation id",
-            "/help             show this help",
-          ].join("\n"),
-        );
-        continue;
-      }
-      if (text === "/new") {
-        session = { conversationId: null, parentMessageId: null };
-        resetSession(ctx, ctx.settings.baseUrl);
-        await saveConfig({ sessions: ctx.settings.sessions }, { filePath: ctx.settings.configPath });
-        ctx.out("Started a new conversation.");
-        continue;
-      }
-      if (text === "/conversation") {
-        ctx.out(session.conversationId ?? "(no conversation yet)");
-        continue;
-      }
-      if (text.startsWith("/model ")) {
-        ctx.settings.model = text.slice("/model ".length).trim();
-        ctx.out(`Model set to ${ctx.settings.model || "(default)"}.`);
-        continue;
-      }
-      if (text.startsWith("/agent ")) {
-        ctx.settings.agent = text.slice("/agent ".length).trim();
-        ctx.out(`Agent set to ${ctx.settings.agent || "(default)"}.`);
-        continue;
-      }
-      if (text.startsWith("/")) {
-        ctx.err(`unknown command: ${text}. Type /help.`);
-        continue;
-      }
-
-      try {
-        const code = await streamTurn(ctx, client, "chat", text, { session });
-        session = getSession(ctx.settings, ctx.settings.baseUrl);
-        if (code !== EXIT.OK) continue;
-      } catch (error) {
-        session = getSession(ctx.settings, ctx.settings.baseUrl);
-        if (error instanceof SdkError && error.code === "CANCELLED") return EXIT.CANCELLED;
-        ctx.err(`coderax: ${error.code ?? "ERROR"}: ${error.message}`);
-        if (error?.code === "UNAUTHENTICATED" || error?.code === "FORBIDDEN") return EXIT.UNAUTHENTICATED;
-      }
-    }
-  } finally {
-    readline.close();
-  }
+  return runTerminal(ctx, "chat");
 }
 
 export async function workCommand(ctx, positionals) {
@@ -355,6 +309,10 @@ export async function workCommand(ctx, positionals) {
       "autonomous Work requires `coderax work submit <prompt> --repo <owner/name> --agent <id>`; " +
         "`coderax work <prompt>` is the interactive streaming alias",
     );
+  }
+  if (ctx.flags.has("interactive")) return runTerminal(ctx, "work");
+  if (ctx.stdinIsTTY && messageFrom(ctx, positionals) === "") {
+    return runTerminal(ctx, "work");
   }
   const client = await clientFor(ctx);
   if (ctx.flags.has("new")) resetSession(ctx, ctx.settings.baseUrl);

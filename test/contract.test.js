@@ -562,7 +562,7 @@ test("failed chat rejects credential-bearing conversation and stream IDs", async
   }
 });
 
-test("interactive chat refreshes its session after empty and failed turns", { timeout: 10000 }, async (t) => {
+test("chat refreshes its stored session after an empty and a failed turn", { timeout: 15000 }, async () => {
   const requests = [];
   await withStub(
     async (req, res) => {
@@ -579,28 +579,23 @@ test("interactive chat refreshes its session after empty and failed turns", { ti
       return sse(res, ['data: {"final":true,"responseMessage":{"text":"done"}}\n\n']);
     },
     async (baseUrl) => {
-      const child = spawn(process.execPath, ["--input-type=module", "-e", `
-        import { runCli } from ${JSON.stringify(new URL("../src/cli.js", import.meta.url).href)};
-        process.exitCode = await runCli(["chat"], { stdinIsTTY: true });
-      `], { env: { ...process.env, ...(await envFor(baseUrl)) }, stdio: ["pipe", "pipe", "pipe"] });
-      t.after(() => child.kill());
-      const lines = ["first", "second", "third", "/exit"];
-      const prompt = "coderax> ";
-      let pending = "";
-      let stderr = "";
-      child.stdout.setEncoding("utf8").on("data", (chunk) => {
-        pending += chunk;
-        let index;
-        while ((index = pending.indexOf(prompt)) !== -1) {
-          pending = pending.slice(index + prompt.length);
-          if (lines.length) child.stdin.write(`${lines.shift()}\n`);
-        }
-      });
-      child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk; });
-      const [code] = await once(child, "close");
-      assert.equal(code, 0, stderr);
-      assert.match(stderr, /streamed no text/);
-      assert.match(stderr, /turn failed/);
+      // One stored session, three invocations: an empty response must not lose
+      // the conversation, and a failed turn must persist the id the server
+      // accepted so the next invocation continues it instead of resubmitting.
+      const env = await envFor(baseUrl);
+      const first = await cli(["chat", "first"], env);
+      // A one-shot turn that streams no text is a failure, but the accepted
+      // conversation must still be recorded so the next turn continues it.
+      assert.equal(first.code, 1, first.err);
+      assert.match(first.err, /streamed no text/);
+
+      const second = await cli(["chat", "second"], env);
+      assert.notEqual(second.code, 0);
+      assert.match(second.err, /turn failed/);
+
+      const third = await cli(["chat", "third"], env);
+      assert.equal(third.code, 0, third.err);
+
       assert.deepEqual(requests.map(({ text, conversationId }) => [text, conversationId]), [
         ["first", undefined],
         ["second", "conv-empty"],
@@ -609,7 +604,6 @@ test("interactive chat refreshes its session after empty and failed turns", { ti
     },
   );
 });
-
 test("failed and suspended runs are reported distinctly", async () => {
   await withStub(
     negotiation((req, res) => {

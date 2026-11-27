@@ -11,9 +11,11 @@ import { CoderaxError, formatJson, redact, request } from "./client.js";
 import { discoverOpenApi, findOperation } from "./discover.js";
 import * as product from "./product-commands.js";
 import * as workflow from "./workflow-commands.js";
+import * as v1 from "./v1-commands.js";
 import * as maintenance from "./maintenance.js";
 import { collectVersionInfo, formatVersionInfo } from "./diagnostics.js";
 import { SdkError } from "../packages/workflow-sdk/src/index.js";
+import { CLI_COMMAND_NAMES } from "./commands.js";
 import { VERSION } from "./version.js";
 
 export { VERSION };
@@ -30,6 +32,8 @@ Usage:
   coderax work submit <prompt> --repo <owner/name> --agent <id> [--base-ref <ref>]
                               [--mode turbo15|autonomous|verified] [--workspace <name>]
                               [--follow] [--json]
+  coderax v1 <health|chat|submit|task|watch|tasks|cancel|resume|retry|resolve|...> [--json]
+                                              canonical WorkflowEngine /v1 surface
   coderax tasks [taskId] [--json]              durable Work conversations
   coderax workflows [--json]
   coderax runs --workflow <id> [--json]
@@ -42,6 +46,7 @@ Usage:
   coderax repos [--json]
   coderax agents [--work] [--json]
   coderax models [--work] [--json]
+  coderax history [list|clear|on|off|retention <days>] [--json]
   coderax doctor [--json] / coderax diagnostics [--json]
   coderax version [--json]
   coderax compat [--json]
@@ -69,16 +74,21 @@ Global options:
   --strict           Fail on unverified API version or missing capabilities
   --max-retries <n>  Reconnect attempts for durable run monitoring (0-10)
   --json             Machine-readable output (run monitoring emits NDJSON)
+  --interactive, -i  Start the interactive terminal (Chat/Work)
+  --accessible       Line-oriented, screen-reader-friendly terminal mode
+  --resume [id]      Resume a saved conversation in interactive mode
+  --no-history       Do not read or write prompt history for this run
   --yes, --dry-run   Confirm or preview the uninstall command
   --purge            With uninstall: also remove stored credentials
-  --no-color         Accepted for compatibility
+  --no-color         Disable colour (also honours NO_COLOR)
   -h, --help         Show this help
   -v, --version      Show the version
 
 Environment:
   CODERAX_BASE_URL, CODERAX_TOKEN, CODERAX_TIMEOUT_MS, CODERAX_CONFIG,
   CODERAX_CONFIG_DIR, CODERAX_CHAT_PATH, CODERAX_ENDPOINT, CODERAX_MODEL,
-  CODERAX_AGENT, CODERAX_CREDENTIAL_STORE
+  CODERAX_AGENT, CODERAX_CREDENTIAL_STORE, CODERAX_HISTORY,
+  CODERAX_HISTORY_RETENTION_DAYS, CODERAX_HISTORY_MAX_ENTRIES, CODERAX_SDK
 
 Tokens: passing a token as a command-line argument is refused because it would
 appear in shell history and process listings. Use \`coderax login\` (secure
@@ -111,6 +121,9 @@ const EXIT = Object.freeze({
   notFound: 5,
   unavailable: 6,
   contract: 7,
+  approval: 8,
+  uncertain: 9,
+  conflict: 10,
   cancelled: 130,
 });
 
@@ -121,42 +134,9 @@ const CONFIG_KEYS = Object.freeze(Object.assign(Object.create(null), {
   model: "model",
   agent: "agent",
 }));
-const CONFIG_FLAGS = ["base-url", "timeout", "chat-path", "endpoint", "model", "agent"];
+const CONFIG_FLAGS = ["base-url", "token", "timeout", "chat-path", "endpoint", "model", "agent"];
 
-const KNOWN_COMMANDS = new Set([
-  "config",
-  "health",
-  "openapi",
-  "agents",
-  "models",
-  "call",
-  "products",
-  "chat",
-  "work",
-  "cloud",
-  "projects",
-  "login",
-  "logout",
-  "status",
-  "whoami",
-  "tasks",
-  "workflows",
-  "runs",
-  "run",
-  "cancel",
-  "resume",
-  "retry",
-  "approve",
-  "repos",
-  "doctor",
-  "diagnostics",
-  "update",
-  "compat",
-  "uninstall",
-  "cleanup",
-  "help",
-  "version",
-]);
+const KNOWN_COMMANDS = new Set(CLI_COMMAND_NAMES);
 const KNOWN_FLAGS = new Set([
   "help",
   "version",
@@ -192,6 +172,16 @@ const KNOWN_FLAGS = new Set([
   "dry-run",
   "purge",
   "no-color",
+  "interactive",
+  "accessible",
+  "plain",
+  "resume",
+  "no-history",
+  "template",
+  "generation",
+  "after",
+  "retry-submission",
+  "reasoning",
 ]);
 const ALLOWED_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
 const BOOLEAN_FLAGS = new Set([
@@ -211,6 +201,11 @@ const BOOLEAN_FLAGS = new Set([
   "yes",
   "dry-run",
   "purge",
+  "interactive",
+  "accessible",
+  "plain",
+  "no-history",
+  "retry-submission",
 ]);
 
 export class UsageError extends Error {
@@ -249,6 +244,10 @@ export function parseArgv(argv) {
           "Use `coderax login` (secure prompt), `--token-file <path>`, stdin, or CODERAX_TOKEN.",
       );
     }
+    if (arg === "-i") {
+      flags.set("interactive", true);
+      continue;
+    }
     if (arg.startsWith("--")) {
       const body = arg.slice(2);
       const equals = body.indexOf("=");
@@ -265,6 +264,10 @@ export function parseArgv(argv) {
         continue;
       }
       const value = argv[index + 1];
+      if (name === "resume" && (value === undefined || value.startsWith("--"))) {
+        flags.set(name, true);
+        continue;
+      }
       if (value === undefined || value.startsWith("--")) {
         throw new UsageError(`--${name} requires a value`);
       }
@@ -299,6 +302,29 @@ function preflight(positionals, flags) {
     throw new UsageError(`unknown command: ${command}. Run \`coderax --help\`.`);
   }
 
+  const resumeRequested = flags.has("resume");
+  if (resumeRequested && command !== "chat" && command !== "work") {
+    throw new UsageError("--resume is only available for `chat` and `work`");
+  }
+  const interactive = flags.has("interactive") || resumeRequested;
+  if (resumeRequested && positionals.length > 1) {
+    throw new UsageError("--resume implies an interactive session and does not accept a prompt; start a terminal session and type the message");
+  }
+  if (interactive) {
+    if (command !== "chat" && command !== "work") {
+      throw new UsageError("--interactive is only available for `chat` and `work`");
+    }
+    if (command === "work" && positionals[1] === "submit") {
+      throw new UsageError("autonomous `work submit` is not interactive; run `coderax work --interactive` for a chat session");
+    }
+    if (positionals.length > 1) {
+      throw new UsageError("--interactive does not accept a prompt; start a terminal session and type the message");
+    }
+    if (flags.has("json")) {
+      throw new UsageError("--interactive cannot be combined with --json; start a terminal session and type the message");
+    }
+  }
+
   if (command === "config") {
     const action = positionals[1] ?? "show";
     if (!["show", "list", "get", "set"].includes(action)) {
@@ -322,6 +348,16 @@ function preflight(positionals, flags) {
       if (key && key in CONFIG_KEYS && !hasFlags && !positionals[3]) {
         throw new UsageError(`config set ${key} requires a value`);
       }
+    }
+  }
+
+  if (command === "history") {
+    const action = positionals[1] ?? "list";
+    if (!["list", "clear", "on", "off", "retention"].includes(action)) {
+      throw new UsageError(`unknown history action: ${action}`);
+    }
+    if (action === "retention" && !/^\d+$/.test(positionals[2] ?? "")) {
+      throw new UsageError("history retention requires a number of days");
     }
   }
 
@@ -553,6 +589,19 @@ function exitFor(error) {
   ) {
     return EXIT.unavailable;
   }
+  if (
+    error.code === "APPROVAL_REQUIRED" ||
+    error.code === "PERMISSION_REQUIRED" ||
+    error.code === "permission_required"
+  ) {
+    return EXIT.approval;
+  }
+  if (error.code === "SUBMISSION_UNCERTAIN" || error.code === "SUBMISSION_IN_PROGRESS") {
+    return EXIT.uncertain;
+  }
+  if (error.code === "CONFLICT" || error.code === "HTTP_409" || error.code === "conflict" || error.code === "busy") {
+    return EXIT.conflict;
+  }
   if (error.code === "CANCELLED") return EXIT.cancelled;
   if (
     error.code === "UNAUTHENTICATED" ||
@@ -574,6 +623,16 @@ function exitFor(error) {
   return EXIT.failure;
 }
 
+async function defaultInteractiveRunner(options = {}) {
+  const { runInteractive } = await import("./interactive.js");
+  return runInteractive({
+    ...options,
+    settings: { ...options.settings, fetchImpl: options.fetchImpl },
+    stdin: options.stdin ?? process.stdin,
+    stdout: options.stdout ?? process.stdout,
+  });
+}
+
 export async function runCli(argv, options = {}) {
   const deps = {
     env: options.env ?? process.env,
@@ -586,6 +645,7 @@ export async function runCli(argv, options = {}) {
     stdinIsTTY: options.stdinIsTTY ?? Boolean(process.stdin.isTTY),
     readSecret: options.readSecret ?? readStdin,
     confirm: options.confirm ?? defaultConfirm,
+    interactiveRunner: options.interactiveRunner ?? defaultInteractiveRunner,
   };
 
   const write = (text) => deps.stdout(text.endsWith("\n") ? text : `${text}\n`);
@@ -635,6 +695,7 @@ export async function runCli(argv, options = {}) {
       readSecret: deps.readSecret,
       confirm: deps.confirm,
       install: deps.install ?? collectVersionInfo({ env: deps.env }),
+      interactiveRunner: deps.interactiveRunner,
     };
 
     if (command === "config") {
@@ -651,6 +712,8 @@ export async function runCli(argv, options = {}) {
         return await product.projects(ctx);
       case "status":
         return await product.status(ctx);
+      case "history":
+        return await product.history(ctx);
       case "login":
         return await product.login(ctx);
       case "logout":
@@ -661,6 +724,8 @@ export async function runCli(argv, options = {}) {
         return await workflow.chatCommand(ctx, ctx.args);
       case "work":
         return await workflow.workCommand(ctx, ctx.args);
+      case "v1":
+        return await v1.v1Command(ctx, ctx.args);
       case "tasks":
         return await workflow.tasksCommand(ctx, ctx.args);
       case "workflows":
