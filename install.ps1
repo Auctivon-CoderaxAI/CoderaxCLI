@@ -53,9 +53,10 @@ try {
   $bin = Join-Path $InstallRoot "bin"
   New-Item -ItemType Directory -Path $bin -Force | Out-Null
   $launcher = Join-Path $bin "coderax.cmd"
-  $contents = "@echo off`r`nnode `"$dest\src\cli.js`" %*`r`n"
+  $contents = "@echo off`r`nnode `"%~dp0..\cli\$Version\src\cli.js`" %*`r`n"
   Set-Content -Path $launcher -Value $contents -Encoding ASCII
-  & node (Join-Path $dest "src\cli.js") --version
+  & $launcher --version
+  if ($LASTEXITCODE -ne 0) { throw "Installed launcher failed its version check (exit $LASTEXITCODE)" }
   Write-Host ""
   Write-Host "Installed Coderax CLI $Version in $dest"
   Write-Host "Add this directory to PATH if needed:"

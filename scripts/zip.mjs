@@ -1,6 +1,7 @@
 import { createWriteStream } from "node:fs";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
+import { pipeline } from "node:stream/promises";
 
 const CRC_TABLE = new Uint32Array(256);
 for (let index = 0; index < 256; index += 1) {
@@ -103,13 +104,6 @@ export async function createZip(sourceDirectory, outputFile) {
   end.writeUInt32LE(offset, 16);
   end.writeUInt16LE(0, 20);
 
-  const stream = createWriteStream(outputFile);
-  for (const chunk of [...chunks, ...central, end]) {
-    if (!stream.write(chunk)) await new Promise((resolve) => stream.once("drain", resolve));
-  }
-  await new Promise((resolve, reject) => {
-    stream.end(resolve);
-    stream.once("error", reject);
-  });
+  await pipeline([...chunks, ...central, end], createWriteStream(outputFile));
   return outputFile;
 }

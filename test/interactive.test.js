@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { startFixtureEngine } from "./fixtures/engine-server.js";
 import { runCli } from "../src/cli.js";
@@ -80,7 +82,10 @@ test("an interactive Work submission streams to completion and updates the sessi
     assert.equal(code, 0, err);
     assert.match(out, /completed in/);
     assert.match(out, /Inspect the cloud workspace/);
-    assert.equal(engine.conversations.size >= 1, true);
+    assert.equal(engine.tasks.size, 1);
+    const [task] = engine.tasks.values();
+    const persisted = JSON.parse(await readFile(join(env.CODERAX_CONFIG_DIR, "state.json"), "utf8"));
+    assert.equal(persisted.active.workConversationId, task.conversationId);
   } finally {
     await engine.close();
   }

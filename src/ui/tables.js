@@ -14,8 +14,8 @@ export function renderTable({
     const values = [header, ...rows.map((row) => String(row[index] ?? ""))];
     return Math.min(maxColumnWidth, Math.max(3, ...values.map((value) => visibleLength(value))));
   });
-  const available = Math.max(20, width);
-  const borderWidth = (columns - 1) * 3 + 2;
+  const available = Math.max(1, Math.floor(width));
+  const borderWidth = columns * 3 + 1;
   let excess = widths.reduce((sum, value) => sum + value, 0) + borderWidth - available;
   while (excess > 0) {
     let widest = 0;
@@ -25,6 +25,13 @@ export function renderTable({
     if (widths[widest] <= 4) break;
     widths[widest] -= 1;
     excess -= 1;
+  }
+  if (excess > 0) {
+    const clip = (text) => visibleLength(text) > available ? truncate(text, available) : text;
+    if (rows.length === 0) return headers.map((header) => clip(String(header))).join("\n");
+    return rows.map((row) => headers.map((header, index) => (
+      clip(`${header}: ${row[index] ?? ""}`)
+    )).join("\n")).join("\n\n");
   }
 
   const fit = (value, index) => {
