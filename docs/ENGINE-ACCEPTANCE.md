@@ -23,7 +23,7 @@ $ node scripts/verify-engine-contract.mjs --engine <engine-checkout>
 ok: true, contract 1.2.0, 40 operations, SDK 1.2.0 (40144 bytes)
 
 $ npm run test:engine
-tests 24, pass 24, fail 0
+tests 25, pass 25, fail 0
 
 $ node scripts/run-engine-acceptance.mjs --engine <engine-checkout>
 ✔ the engine publishes the pinned 1.2.0 contract
@@ -32,7 +32,7 @@ $ node scripts/run-engine-acceptance.mjs --engine <engine-checkout>
 tests 3, pass 3, fail 0
 
 $ npm test
-tests 185, pass 182, fail 0, skipped 3
+tests 186, pass 183, fail 0, skipped 3
 ```
 
 The three skipped checks are the acceptance tests when

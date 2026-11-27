@@ -81,8 +81,8 @@ deployments. `coderax engine status` is the authoritative check on `/v1`.
 
 | Evidence | What it proves |
 | --- | --- |
-| `npm test` — 185 checks | parser, SSE, redaction, legacy task sync, engine contract, client, durable sync, release policy |
-| `npm run test:engine` — 24 checks | route/fingerprint pin, handshake, Problem mapping, SSE, dedupe, gaps, truncation, idempotency, partition, privacy |
+| `npm test` — 186 checks | parser, SSE, redaction, legacy task sync, engine contract, client, durable sync, release policy |
+| `npm run test:engine` — 25 checks | route/fingerprint pin, operation coverage, handshake, Problem mapping, SSE, dedupe, gaps, truncation, idempotency, partition, privacy |
 | `node scripts/run-engine-acceptance.mjs` — 3 checks | real WorkflowEngine HTTP application: pin, idempotent submit, durable replay, second client, notifications |
 | GitHub Actions `engine-acceptance` | builds the pinned engine commit and runs the acceptance suite against its real HTTP application on a hosted runner |
 | `npm run install-test` — 23 checks | real install, launchers, checksums, completions, stub auth, upgrade/rollback, uninstall |

@@ -6,7 +6,7 @@ import {
   CONTRACT_VERSION,
   ROUTES,
 } from "../src/engine-contract.js";
-import { EngineClient } from "../src/engine-client.js";
+import { EngineClient, SDK_METHOD_COVERAGE } from "../src/engine-client.js";
 
 function handshake(overrides = {}) {
   return {
@@ -85,6 +85,19 @@ function readBody(request) {
     request.on("end", () => resolve(body));
   });
 }
+
+test("the client implements every operation in the published catalogue", () => {
+  assert.equal(Object.keys(SDK_METHOD_COVERAGE).length, ROUTES.length);
+  for (const route of ROUTES) {
+    const method = SDK_METHOD_COVERAGE[route.operationId];
+    assert.ok(method, `no client method for ${route.operationId}`);
+    assert.equal(
+      typeof EngineClient.prototype[method],
+      "function",
+      `${method} does not implement ${route.operationId}`,
+    );
+  }
+});
 
 test("negotiates the 1.2.0 contract and validates the published catalogue", async () => {
   await withServer(
