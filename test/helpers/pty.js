@@ -24,7 +24,7 @@ function shellQuote(value) {
   return `'${String(value).replaceAll("'", `'\\''`)}'`;
 }
 
-export function runPty({ fixture, input = "", timeoutMs = 15000, env = {} }) {
+export function runPty({ fixture, input = "", steps = [], timeoutMs = 15000, env = {} }) {
   const support = ptySupport();
   if (!support.supported) {
     throw new Error(`PTY unavailable: ${support.reason}`);
@@ -46,6 +46,7 @@ export function runPty({ fixture, input = "", timeoutMs = 15000, env = {} }) {
 
     let output = "";
     let sent = false;
+    let stepIndex = 0;
     let settled = false;
 
     const stop = () => {
@@ -65,12 +66,26 @@ export function runPty({ fixture, input = "", timeoutMs = 15000, env = {} }) {
       resolve({ status: null, output, timedOut: true });
     }, timeoutMs);
 
+    // Send each staged input once its pattern has been seen, so a test can
+    // answer a prompt and then wait for the command to prompt again.
+    const pump = () => {
+      while (stepIndex < steps.length) {
+        const step = steps[stepIndex];
+        const matched =
+          step.when instanceof RegExp ? step.when.test(output) : output.includes(String(step.when));
+        if (!matched) return;
+        stepIndex += 1;
+        if (step.input) child.stdin.write(step.input);
+      }
+    };
+
     const collect = (buffer) => {
       output += buffer.toString("utf8");
       if (!sent && output.includes("READY")) {
         sent = true;
         if (input !== "") child.stdin.write(input);
       }
+      pump();
     };
 
     child.stdout.on("data", collect);

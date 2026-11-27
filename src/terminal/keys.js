@@ -14,6 +14,12 @@ import { StringDecoder } from "node:string_decoder";
  *
  * A decoder instance buffers a trailing CR and an incomplete escape sequence
  * across chunks, so a split UTF-8 or CRLF sequence is never misread.
+ *
+ * Interactive readers pass `chunkEol: true`: a terminal delivers Enter as a
+ * lone CR with nothing after it, so the CR must be resolved at the end of each
+ * chunk instead of waiting for the next keystroke. A CRLF split across chunks
+ * then reads as Enter plus a soft newline, which an input buffer handles as an
+ * empty line.
  */
 export const KEY_TYPES = Object.freeze({
   TEXT: "text",
@@ -68,7 +74,7 @@ function isEscapeComplete(sequence) {
   return true;
 }
 
-export function createKeyDecoder({ bracketedPaste = true } = {}) {
+export function createKeyDecoder({ bracketedPaste = true, chunkEol = false } = {}) {
   const utf8 = new StringDecoder("utf8");
   let pendingCR = false;
   let escape = "";
@@ -174,6 +180,10 @@ export function createKeyDecoder({ bracketedPaste = true } = {}) {
     const text = typeof chunk === "string" ? chunk : utf8.write(chunk);
     const events = [];
     for (const char of text) processChar(char, events);
+    if (chunkEol && pendingCR) {
+      pendingCR = false;
+      events.push({ type: KEY_TYPES.ENTER });
+    }
     if (final) events.push(...flush());
     return events;
   };

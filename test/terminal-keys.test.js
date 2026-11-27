@@ -34,6 +34,19 @@ test("a lone CR followed by text is Enter then the text", () => {
   assert.deepEqual(decoder.push("x"), [{ type: KEY_TYPES.ENTER }, { type: KEY_TYPES.TEXT, text: "x" }]);
 });
 
+test("chunkEol resolves a lone Enter at the end of the chunk", () => {
+  const decoder = createKeyDecoder({ chunkEol: true });
+  assert.deepEqual(decoder.push("hi\r"), [
+    { type: KEY_TYPES.TEXT, text: "hi" },
+    { type: KEY_TYPES.ENTER },
+  ]);
+  assert.deepEqual(decoder.push("\r"), [{ type: KEY_TYPES.ENTER }]);
+
+  const streaming = createKeyDecoder({ chunkEol: true });
+  assert.deepEqual(streaming.push("a\r"), [{ type: KEY_TYPES.TEXT, text: "a" }, { type: KEY_TYPES.ENTER }]);
+  assert.deepEqual(streaming.push("\nb"), [{ type: KEY_TYPES.SOFT_NEWLINE }, { type: KEY_TYPES.TEXT, text: "b" }]);
+});
+
 test("a trailing CR is flushed as Enter", () => {
   const decoder = createKeyDecoder();
   assert.deepEqual(decoder.push("ab\r"), [{ type: KEY_TYPES.TEXT, text: "ab" }]);

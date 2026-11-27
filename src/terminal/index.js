@@ -4,6 +4,11 @@ export {
   decodeKeys,
 } from "./keys.js";
 export {
+  PromptCancelledError,
+  createInteractiveReader,
+  supportsRawInput,
+} from "./input.js";
+export {
   clearLine,
   formatPrompt,
   renderPromptLine,
