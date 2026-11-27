@@ -19,9 +19,10 @@ const platform = argument("platform", process.platform === "win32" ? "windows" :
 const arch = argument("arch", process.arch);
 const outDir = join(root, argument("out", "dist"));
 const base = `coderax-cli-${version}-${platform}-${arch}`;
-const stage = join(outDir, `stage-${platform}-${arch}`, "package");
+const stagingRoot = join(outDir, `stage-${platform}-${arch}`);
+const stage = join(stagingRoot, "package");
 
-await rm(join(outDir, `stage-${platform}-${arch}`), { recursive: true, force: true });
+await rm(stagingRoot, { recursive: true, force: true });
 await mkdir(stage, { recursive: true });
 
 const include = [
@@ -47,13 +48,13 @@ await chmod(join(stage, "src/cli.js"), 0o755);
 
 const tarPath = join(outDir, `${base}.tar.gz`);
 const zipPath = join(outDir, `${base}.zip`);
-const tar = spawnSync("tar", ["-czf", tarPath, "-C", join(outDir, `stage-${platform}-${arch}`), "package"], {
+const tar = spawnSync("tar", ["-czf", tarPath, "-C", stagingRoot, "package"], {
   encoding: "utf8",
 });
 if (tar.status !== 0) {
   throw new Error(`tar failed: ${(tar.stderr || tar.stdout || "").trim() || tar.error?.message || "unknown error"}`);
 }
-await createZip(stage, zipPath);
+await createZip(stagingRoot, zipPath);
 
 function sha256(buffer) {
   return createHash("sha256").update(buffer).digest("hex");

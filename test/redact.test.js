@@ -63,6 +63,16 @@ test("a stream redactor flushes an incomplete prefix", () => {
   assert.equal(stream.flush(), "abc");
 });
 
+test("a held suffix cannot split a complete secret already in the buffer", () => {
+  const secret = "abcdefghijklmnab";
+  const redactor = createRedactor([secret]);
+  for (const chunks of [[`${secret}c`], ["abcdef", "ghijklmnabc"]]) {
+    const stream = redactor.stream();
+    const output = chunks.map((chunk) => stream.push(chunk)).join("") + stream.flush();
+    assert.equal(output, `${redactor.marker}c`);
+  }
+});
+
 test("environment secrets are credential-shaped values only", () => {
   const secrets = environmentSecrets({
     CODERAX_TOKEN: "token-value-123456",

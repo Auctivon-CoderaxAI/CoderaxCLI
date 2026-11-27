@@ -44,6 +44,18 @@ test("an explicit task id works from a fresh terminal with no local state", asyn
   });
 });
 
+test("work resolve binds the supplied submission key to the supplied task", async () => {
+  await withEngine({}, async ({ env }) => {
+    const detached = await cli(env, ["work", "run", "Resolve this task", "--detach", "--json"]);
+    assert.equal(detached.code, 0, detached.io.err());
+    const { taskId } = detached.json().data.task;
+    const resolved = await cli(env, ["work", "resolve", "recovered-key", taskId, "--json"]);
+    assert.equal(resolved.code, 0, resolved.io.out() + resolved.io.err());
+    assert.equal(resolved.json().data.submission.key, "recovered-key");
+    assert.equal(resolved.json().data.submission.taskId, taskId);
+  });
+});
+
 test("work run completes, renders Markdown and returns a machine result", async () => {
   await withEngine({}, async ({ env }) => {
     const { code, io, json } = await cli(env, ["work", "run", "Inspect the repository", "--json"]);

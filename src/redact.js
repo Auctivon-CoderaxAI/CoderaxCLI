@@ -37,12 +37,16 @@ export function normalizeSecrets(input) {
   return [...unique].sort((a, b) => b.length - a.length || a.localeCompare(b));
 }
 
+function secretPattern(secrets) {
+  return secrets.length === 0
+    ? null
+    : new RegExp(secrets.map((secret) => secret.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "g");
+}
+
 export function createRedactor(input) {
   const secrets = normalizeSecrets(input);
   const marker = markerDisjoint(secrets);
-  const pattern = secrets.length === 0
-    ? null
-    : new RegExp(secrets.map((secret) => secret.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "g");
+  const pattern = secretPattern(secrets);
 
   const redactText = (text) => {
     if (typeof text !== "string" || pattern === null) return text;
@@ -117,8 +121,11 @@ export function redactValue(value, token) {
  * across SSE deltas is removed as a whole instead of leaking in two pieces.
  */
 export class StreamRedactor {
+  #pattern;
+
   constructor(secrets, redactText) {
     this.secrets = normalizeSecrets(secrets);
+    this.#pattern = secretPattern(this.secrets);
     this.redactText = redactText;
     this.pending = "";
     this.maxLength = this.secrets.reduce((max, secret) => Math.max(max, secret.length), 0);
@@ -129,7 +136,18 @@ export class StreamRedactor {
     if (typeof text !== "string" || text.length === 0) return "";
     this.pending += text;
     const hold = this.#holdLength();
-    const safeEnd = this.pending.length - hold;
+    let safeEnd = this.pending.length - hold;
+    if (hold > 0 && safeEnd > 0) {
+      // Use the same match order as redactText. A partial suffix can begin
+      // inside a complete match, which must stay intact for redaction.
+      for (const match of this.pending.matchAll(this.#pattern)) {
+        if (match.index >= safeEnd) break;
+        if (match.index + match[0].length > safeEnd) {
+          safeEnd = match.index;
+          break;
+        }
+      }
+    }
     const safe = this.pending.slice(0, safeEnd);
     this.pending = this.pending.slice(safeEnd);
     return this.redactText(safe);

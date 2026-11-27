@@ -573,8 +573,7 @@ async function resumeCommand(runtime, positionals, { retry = false } = {}) {
 }
 
 async function resolveCommand(runtime, positionals) {
-  const key = positionals[1];
-  const taskId = positionals[2];
+  const [key, taskId] = positionals;
   if (!key || !taskId) throw new UsageError("work resolve requires <submission-key> <task-id>");
   const client = await runtime.getEngine();
   const result = await resolveSubmission({ client, state: runtime.state, key, taskId, signal: linkedController(runtime).signal });
