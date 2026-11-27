@@ -1,3 +1,5 @@
+import vm from "node:vm";
+
 /**
  * The CLI is a cloud client. Installing it must not bring local inference, a
  * database driver, a background daemon, Docker or Ollama. These checks are
@@ -54,20 +56,30 @@ export const FORBIDDEN_PACKAGES = [
   "bullmq",
 ];
 
+export const PROCESS_HELPERS = new Set(["src/credentials.js", "src/secure-store.js", "src/workflow-commands.js"]);
+
 const LIFECYCLE_SCRIPTS = ["preinstall", "install", "postinstall", "prepare", "prepack", "postpack"];
 
-function importSpecifiers(source) {
+export function importSpecifiers(source, path = "") {
   const specifiers = new Set();
-  const patterns = [
-    /(?:^|\n)\s*import\s+(?:[^'"]*?\s+from\s+)?["']([^"']+)["']/g,
-    /(?:^|\n)\s*export\s+[^'"]*?\s+from\s+["']([^"']+)["']/g,
-    /\brequire\(\s*["']([^"']+)["']\s*\)/g,
-    /\bimport\(\s*["']([^"']+)["']\s*\)/g,
-  ];
-  for (const pattern of patterns) {
-    for (const match of source.matchAll(pattern)) specifiers.add(match[1]);
+  // Parse static declarations without evaluating code or linking modules.
+  if (path.endsWith(".cjs")) {
+    new vm.Script(source, { filename: path });
+  } else {
+    const module = new vm.SourceTextModule(source, { identifier: path });
+    for (const specifier of module.dependencySpecifiers) specifiers.add(specifier);
+  }
+  const calls = /\b(?:require|import)(?:\s|\/\*[\s\S]*?\*\/)*\(\s*(?:"((?:\\[\s\S]|[^"\\])*)"|'((?:\\[\s\S]|[^'\\])*)')/g;
+  for (const match of source.matchAll(calls)) {
+    const value = match[1] ?? match[2];
+    specifiers.add(value.includes("\\") ? "(escaped module specifier)" : value);
   }
   return specifiers;
+}
+
+export function isOptionalCanonicalSdk(path, specifier) {
+  // Explicit opt-in to an externally provided SDK; never installed by this CLI.
+  return path === "src/sdk.js" && specifier === "@coderax/sdk";
 }
 
 function checkDependencies(deps, kind, add) {
@@ -76,7 +88,7 @@ function checkDependencies(deps, kind, add) {
   }
 }
 
-export function checkIsolation({ packageJson, lockfile, sources }) {
+export function checkIsolation({ packageJson, lockfile, sources, allowedBuiltins }) {
   const violations = [];
   const add = (code, message) => violations.push({ code, message });
 
@@ -99,23 +111,31 @@ export function checkIsolation({ packageJson, lockfile, sources }) {
   const packages = Object.entries(lockfile?.packages ?? {}).filter(([key]) => key !== "");
   for (const [path, entry] of packages) {
     if (entry?.hasInstallScript) add("INSTALL_SCRIPT", `${path} runs an install script`);
-    if (entry?.dev === false || entry?.optional === false) {
-      add("RUNTIME_DEPENDENCY", `${path} is a locked runtime dependency`);
-    }
+    add("RUNTIME_DEPENDENCY", `${path} is a locked dependency; only the root entry is allowed`);
   }
   if (lockfile && lockfile.lockfileVersion !== 3) {
     add("LOCKFILE_STALE", `lockfileVersion is ${lockfile.lockfileVersion}; use lockfileVersion 3`);
   }
 
   for (const source of sources ?? []) {
-    for (const specifier of importSpecifiers(source.text)) {
-      if (FORBIDDEN_MODULES.has(specifier)) {
+    let specifiers;
+    try {
+      specifiers = importSpecifiers(source.text, source.path);
+    } catch (error) {
+      add("UNSCANNABLE_SOURCE", `${source.path}: ${error.message}`);
+      continue;
+    }
+    for (const specifier of specifiers) {
+      if (isOptionalCanonicalSdk(source.path, specifier)) continue;
+      if (FORBIDDEN_MODULES.has(specifier) &&
+          !(specifier === "node:child_process" && PROCESS_HELPERS.has(source.path))) {
         add("LOCAL_EXECUTION_SURFACE", `${source.path} imports ${specifier}, which can run local services or processes`);
       }
       if (FORBIDDEN_PACKAGES.includes(specifier)) {
         add("LOCAL_EXECUTION_SURFACE", `${source.path} imports ${specifier}, which is not allowed in a cloud client`);
       }
-      if (!specifier.startsWith("./") && !specifier.startsWith("../") && !specifier.startsWith("node:")) {
+      if (!specifier.startsWith("./") && !specifier.startsWith("../") &&
+          !(allowedBuiltins ? allowedBuiltins.has(specifier) : specifier.startsWith("node:"))) {
         add("UNEXPECTED_IMPORT", `${source.path} imports "${specifier}"; only relative and node: builtins are allowed`);
       }
     }

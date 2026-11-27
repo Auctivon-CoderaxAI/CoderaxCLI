@@ -1,6 +1,13 @@
-# Check out the same bytes on every hosted runner, so the entrypoint keeps a
-# usable shebang on Windows and release artifacts are identical across OSes.
+# A CRLF shebang breaks `#!/usr/bin/env node` on POSIX, so source and shell
+# scripts are always LF in the repository and in release archives.
 * text=auto eol=lf
-
+*.sh text eol=lf
+*.mjs text eol=lf
+*.js text eol=lf
 *.cmd text eol=crlf
 *.bat text eol=crlf
+*.ps1 text eol=crlf
+*.png binary
+*.jpg binary
+*.gz binary
+*.zip binary

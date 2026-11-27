@@ -37,7 +37,7 @@ if (files.length === 0) {
 console.log(`tests: ${suite} suite, ${files.length} files`);
 for (const file of files) console.log(`  ${relative(root, file)}`);
 
-const child = spawn(process.execPath, ["--test", ...files], {
+const child = spawn(process.execPath, ["--experimental-vm-modules", "--test", ...files], {
   stdio: ["ignore", "pipe", "pipe"],
 });
 

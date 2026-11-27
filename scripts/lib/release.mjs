@@ -1,30 +1,21 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createDeterministicTarball } from "./tar.mjs";
 
-/** Files a release needs to run; tests, workflows and local config stay out. */
-const FIXED_FILES = ["package.json", "README.md", "SECURITY.md", "docs/CONTRACT.md"];
+import { packageFiles, normalizeText, isExecutable } from "./package-files.mjs";
 
 export function sha256(buffer) {
   return createHash("sha256").update(buffer).digest("hex");
 }
 
 export async function collectEntries(root) {
-  const entries = [];
-  const add = async (file, mode) => {
-    entries.push({
-      path: `package/${file}`,
-      content: await readFile(join(root, file)),
-      mode,
-    });
-  };
-
-  for (const file of FIXED_FILES) await add(file, 0o644);
-  const sourceFiles = (await readdir(join(root, "src"))).filter((name) => name.endsWith(".js")).sort();
-  for (const name of sourceFiles) await add(`src/${name}`, name === "cli.js" ? 0o755 : 0o644);
-
-  return entries.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  const pkg = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
+  return Promise.all((await packageFiles(root, pkg)).map(async (file) => ({
+    path: `package/${file}`,
+    content: normalizeText(file, await readFile(join(root, file))),
+    mode: isExecutable(file) ? 0o755 : 0o644,
+  })));
 }
 
 export async function buildArtifact(root) {

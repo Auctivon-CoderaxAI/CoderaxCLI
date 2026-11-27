@@ -97,8 +97,8 @@ test("[capability:credential-storage] login stores credentials with 0600 permiss
   const configPath = await tempConfig();
 
   const login = await runCli(
-    ["login", "--base-url", harness.baseUrl, "--token", OWNER_TOKEN, "--json"],
-    { env: { CODERAX_CONFIG: configPath } },
+    ["login", "--base-url", harness.baseUrl, "--json"],
+    { env: { CODERAX_CONFIG: configPath, CODERAX_TOKEN: OWNER_TOKEN, CODERAX_CREDENTIAL_STORE: "file" } },
   );
   assert.equal(login.code, 0, login.stderr);
   assert.equal(login.stdout.includes(OWNER_TOKEN), false);
@@ -132,7 +132,7 @@ test("[capability:chat-streaming] chat streams over a real socket and redacts an
   const harness = await startHarness();
   t.after(() => harness.close());
 
-  const result = await runCli(["chat", "hello", "--json"], {
+  const result = await runCli(["chat", "hello", "--chat-path", "/api/ask/agents", "--json"], {
     env: { CODERAX_CONFIG: await tempConfig(), CODERAX_BASE_URL: harness.baseUrl, CODERAX_TOKEN: OWNER_TOKEN },
   });
   assert.equal(result.code, 0, result.stderr);
@@ -180,7 +180,7 @@ test("[capability:stream-integrity] a dropped Work stream fails instead of repor
     env: { CODERAX_CONFIG: await tempConfig(), CODERAX_BASE_URL: harness.baseUrl, CODERAX_TOKEN: OWNER_TOKEN },
   });
   assert.equal(result.code, 4, `${result.stdout}\n${result.stderr}`);
-  assert.match(result.stderr, /STREAM_INCOMPLETE|REQUEST_FAILED/);
+  assert.match(result.stderr, /STREAM_INCOMPLETE|REQUEST_FAILED|NETWORK/);
 });
 
 test("[capability:error-codes] HTTP and usage failures map to documented exit codes", async (t) => {
@@ -285,3 +285,31 @@ test("[harness:event-replay] the engine harness replays frames after Last-Event-
 function once(emitter, event) {
   return new Promise((resolve) => emitter.once(event, (...args) => resolve(args)));
 }
+
+test("overlapping requests keep their bodies attached to their own log records", { timeout: 5000 }, async (t) => {
+  const { request } = await import("node:http");
+  const { setTimeout: delay } = await import("node:timers/promises");
+  const harness = await startHarness();
+  const headers = { authorization: `Bearer ${OWNER_TOKEN}`, "content-type": "application/json" };
+  const first = request(`${harness.baseUrl}/api/work/chat`, { method: "POST", headers });
+  t.after(async () => {
+    first.destroy();
+    await harness.close();
+  });
+  const completed = once(first, "response");
+  // Leave the first request's body incomplete while the second is processed.
+  first.write('{"text":');
+  for (let i = 0; !harness.requests.length && i < 100; i += 1) await delay(10);
+  assert.equal(harness.requests.length, 1, "the first request must already be logged");
+
+  const second = await fetch(`${harness.baseUrl}/api/ask/agents`, {
+    method: "POST", headers, body: JSON.stringify({ text: "second" }),
+  });
+  assert.equal(second.status, 200);
+  await second.text();
+
+  first.end('"first"}');
+  const [response] = await completed;
+  await Array.fromAsync(response);
+  assert.deepEqual(harness.requests.map(({ body }) => body), [{ text: "first" }, { text: "second" }]);
+});

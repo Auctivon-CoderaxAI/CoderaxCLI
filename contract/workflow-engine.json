@@ -3,7 +3,7 @@
   "contract": "workflow-engine",
   "sharedClient": {
     "module": "src/client.js",
-    "version": "0.1.0"
+    "version": "0.3.0"
   },
   "api": {
     "versionField": "info.version",
@@ -87,13 +87,13 @@
       "id": "api-version-compatibility",
       "status": "supported",
       "description": "required operations and a supported API version are enforced before CI passes",
-      "verifiedBy": ["test/contract.test.js"]
+      "verifiedBy": ["test/legacy-contract.test.js"]
     },
     {
       "id": "release-artifact-integrity",
       "status": "supported",
       "description": "byte-reproducible release tarballs, checksums, and extracted content verification",
-      "verifiedBy": ["test/release.test.js"]
+      "verifiedBy": ["test/package-artifact.test.js"]
     },
     {
       "id": "dependency-security",

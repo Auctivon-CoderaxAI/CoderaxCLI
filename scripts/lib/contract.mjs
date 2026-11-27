@@ -1,5 +1,6 @@
 import { readFile, readdir } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const HTTP_METHODS = new Set(["get", "post", "put", "patch", "delete", "head", "options"]);
 
@@ -55,7 +56,7 @@ export async function readTestSources(root) {
 export function evaluateContract({
   contract,
   packageJson,
-  versionModule,
+  runtimeVersion,
   docsText,
   document,
   testSources,
@@ -74,7 +75,7 @@ export function evaluateContract({
     );
   }
 
-  const moduleVersion = /export const VERSION = "([^"]+)"/.exec(versionModule ?? "")?.[1];
+  const moduleVersion = runtimeVersion;
   if (moduleVersion !== version) {
     add(
       "SDK_VERSION_STALE",
@@ -205,7 +206,7 @@ export async function loadContractInputs(root) {
   return {
     contract: await readJson("contract/workflow-engine.json"),
     packageJson: await readJson("package.json"),
-    versionModule: await readFile(join(root, "src/version.js"), "utf8"),
+    runtimeVersion: (await import(pathToFileURL(join(root, "src/version.js")))).VERSION,
     docsText: await readFile(join(root, "docs/CONTRACT.md"), "utf8"),
     testSources: await readTestSources(root),
   };

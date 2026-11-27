@@ -64,5 +64,7 @@ export function createDeterministicTar(entries) {
 
 export function createDeterministicTarball(entries) {
   // gzip -n equivalent: no name and no timestamp in the header.
-  return gzipSync(createDeterministicTar(entries), { level: 9 });
+  const gzip = gzipSync(createDeterministicTar(entries), { level: 9 });
+  gzip[9] = 255; // RFC 1952: OS unknown, independent of the build host.
+  return gzip;
 }

@@ -114,7 +114,8 @@ export async function startHarness({ apiVersion = API_VERSION } = {}) {
   async function handle(req, res) {
     const url = new URL(req.url, "http://127.0.0.1");
     const path = url.pathname;
-    requests.push({ method: req.method, path, headers: req.headers, query: url.searchParams });
+    const request = { method: req.method, path, headers: req.headers, query: url.searchParams };
+    requests.push(request);
 
     if (path === "/health") {
       sendJson(res, 200, { status: "ok", service: "coderax", apiVersion });
@@ -133,7 +134,7 @@ export async function startHarness({ apiVersion = API_VERSION } = {}) {
       }
 
       if (path === "/api/user") {
-        sendJson(res, 200, { email: "owner@coderax.test", role: "owner" });
+        sendJson(res, 200, { email: "owner@coderax.test", role: "ADMIN" });
         return;
       }
       if (path === "/api/models") {
@@ -159,7 +160,7 @@ export async function startHarness({ apiVersion = API_VERSION } = {}) {
       }
       if (path === "/api/ask/agents" && req.method === "POST") {
         const body = await readBody(req);
-        requests.at(-1).body = body;
+        request.body = body;
         startSse(res);
         writeFrame(res, 1, { delta: "hello " });
         writeFrame(res, 2, { delta: `from the owner ${auth.token}` });
@@ -169,7 +170,7 @@ export async function startHarness({ apiVersion = API_VERSION } = {}) {
       }
       if (path === "/api/work/chat" && req.method === "POST") {
         const body = await readBody(req);
-        requests.at(-1).body = body;
+        request.body = body;
         const text = typeof body?.text === "string" ? body.text : "";
 
         if (text.includes("reject")) {

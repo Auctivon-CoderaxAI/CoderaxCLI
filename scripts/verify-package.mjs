@@ -22,18 +22,32 @@ function run(file, args, options = {}) {
   return spawnSync(file, args, { encoding: "utf8", ...options });
 }
 
+// cmd.exe /s strips the outer pair, leaving each path quoted. Verbatim
+// arguments keep Node from applying the unrelated Windows C argv escaping.
+function runCmd(file, args, options) {
+  const quote = (value) => {
+    if (/["%\r\n]/.test(value)) throw new Error("Unsupported character in cmd.exe argument");
+    return `"${value}"`;
+  };
+  const command = `"${[file, ...args].map(quote).join(" ")}"`;
+  return run(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/v:off", "/c", command], {
+    ...options,
+    windowsVerbatimArguments: true,
+  });
+}
+
 function runNpm(args, options = {}) {
   const npmCli = process.env.npm_execpath;
   if (npmCli && existsSync(npmCli)) {
     return run(process.execPath, [npmCli, ...args], options);
   }
   if (isWindows) {
-    return run(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", `npm ${args.join(" ")}`], options);
+    return runCmd("npm", args, options);
   }
   return run("npm", args, options);
 }
 
-const workDir = await mkdtemp(join(tmpdir(), "coderax-package-"));
+const workDir = await mkdtemp(join(tmpdir(), "coderax package é-"));
 const installDir = join(workDir, "install");
 
 console.log(`package: platform ${process.platform}, node ${process.versions.node}`);
@@ -80,10 +94,9 @@ check("bin shim exists", existsSync(shim), shim);
 
 function runShim(args, options = {}) {
   // POSIX runs the shim itself, proving the shebang and executable bit.
-  // Windows .cmd shims need a shell; let Node build the cmd.exe command line
-  // instead of hand-quoting it.
+  // Windows .cmd shims need a shell.
   if (!isWindows) return run(shim, args, options);
-  return run(shim, args, { ...options, shell: true });
+  return runCmd(shim, args, options);
 }
 
 const version = runShim(["--version"]);
