@@ -22,12 +22,18 @@ package is deprecated; it is replaced by this implementation.
 
 ## Install
 
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:f594ac1f9164be3e99b93e6d4f0c12c6d8b283a3ead2bea8ca48a5ef279615f4 -->
+
 | Method | Command | Notes |
 | --- | --- | --- |
-| Linux / macOS | `sh install.sh --version 0.3.0` | Verifies SHA-256, installs atomically to `~/.coderax/cli/0.3.0` |
-| Windows | `powershell -File install.ps1 -Version 0.3.0` | Installs atomically to `%LOCALAPPDATA%\Coderax\cli\0.3.0` |
+| Linux / macOS | [Authenticated standalone install](docs/INSTALL.md#option-a--standalone-installer-linux-and-macos) | Downloads and verifies version 0.3.0 before running the local installer |
+| Windows | [Authenticated standalone install](docs/INSTALL.md#option-b--standalone-installer-windows) | Downloads and verifies version 0.3.0 before running the local installer |
 | Offline npm tarball | `npm install --global ./coderax-cli-0.3.0.tgz` | Use an authenticated release download; registry publication is disabled |
 | Source | `npm ci --ignore-scripts && node src/cli.js --help` | For development |
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 Release downloads require GitHub authentication. Full instructions, checksum and
 provenance verification, offline installs and PATH setup:

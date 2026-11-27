@@ -74,26 +74,39 @@ without either verified form of evidence stop installation.
 
 ## Option A — standalone installer (Linux and macOS)
 
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:cc77f4485f44777508275f8700275f99cc09da51a30205b575c31748c8a6e1cd -->
+
 ```sh
-version=0.3.0
-mkdir -p release
-gh release download "v$version" \
-  --repo Auctivon-CoderaxAI/CoderaxCLI \
-  --dir release
+(
+  set -e
+  version=0.3.0
+  mkdir -p release
+  gh release download "v$version" \
+    --repo Auctivon-CoderaxAI/CoderaxCLI \
+    --dir release
 
-(cd release && grep '  install.sh$' SHA256SUMS | sha256sum -c -)
-checksum="$(awk '$2 == "coderax-cli-'"$version"'-standalone.tar.gz" { print $1 }' release/SHA256SUMS)"
-
-sh release/install.sh --version "$version" \
-  --from-file "release/coderax-cli-$version-standalone.tar.gz" \
-  --checksum "$checksum"
+  cd release
+  installer_checksum="$(grep '  install.sh$' SHA256SUMS)"
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s\n' "$installer_checksum" | sha256sum -c -
+  else
+    printf '%s\n' "$installer_checksum" | shasum -a 256 -c -
+  fi
+  archive="coderax-cli-$version-standalone.tar.gz"
+  checksum="$(awk -v archive="$archive" '$2 == archive { print $1 }' SHA256SUMS)"
+  sh install.sh --version "$version" --from-file "$archive" --checksum "$checksum"
+)
 ```
 
-The installer downloads `coderax-cli-$version-standalone.tar.gz`, verifies it
-against the release `SHA256SUMS`, extracts it with a traversal-safe extractor to
-a staging directory, proves the staged launcher reports the expected version,
+The installer verifies the local archive against the release `SHA256SUMS`,
+extracts it with a traversal-safe extractor to a staging directory, proves the
+staged launcher reports the expected version,
 and only then moves it to `~/.coderax/cli/$version` and atomically repoints
 `~/.local/bin/coderax`.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 | Option | Default | Meaning |
 | --- | --- | --- |

@@ -87,15 +87,28 @@ default so that the hashes in the manifest and checksums match what CI built.
    approval at the PR head, or a tag whose required exact-head checks did not
    succeed.
 
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:be502e59685efbec66e08bee39340d6ff7ee01959aa0da8f944f1cee38e24297 -->
+
 5. **The `release` workflow runs** on the tag:
-   - checks that the tag equals `v` + `package.json` version
-   - refuses a direct/unapproved tag and verifies the merged PR, independent
-     approval, and exact-head `test`, `changed-commits`, and `dependency audit`
-   - certifies Linux, Windows, and macOS through the reusable verify workflow
-   - builds and verifies the artifacts without rerunning the full test matrix
-   - signs every asset, creates a private GitHub Release, and attaches the
-     `release-authorization.json` record
-   - refuses to reuse an existing tag or release
+   - reads authorization policy from `main` and checks that the tag matches
+     the candidate's `package.json` version
+   - requires a merged PR, independent human approval with repository write
+     access, and successful exact-head `test`, `changed-commits`, and
+     `dependency audit` checks
+   - certifies the authorized commit on Linux, Windows, and macOS
+   - builds and verifies artifacts from that same commit without rerunning
+     the full test matrix and signs every asset
+   - checks that the remote tag still points to the authorized commit before
+     publishing the assets and the `release-authorization.json` record
+   - refuses to overwrite an existing release
+
+   Keep release tags fixed. GitHub's release creation command checks that an
+   existing tag is present, and the workflow's separate SHA check cannot
+   prevent tag changes between that check and publication.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 6. **Confirm the published release**:
    - assets are present and `SHA256SUMS` matches `release-manifest.json`

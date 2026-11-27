@@ -17,7 +17,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -34,10 +34,10 @@ jobs:
       sha: ${{ steps.meta.outputs.sha }}
       version: ${{ steps.meta.outputs.version }}
     steps:
-      - name: Check out the release tag
+      - name: Check out release policy from main and fetch tags
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: refs/heads/main
           fetch-depth: 0
           persist-credentials: false
       - name: Set up Node
@@ -56,14 +56,18 @@ jobs:
             v[0-9]*.[0-9]*.[0-9]*) ;;
             *) echo "::error::invalid release tag: $tag"; exit 1 ;;
           esac
-          version="$(node -p 'require("./package.json").version')"
+          sha="$(git rev-parse --verify "refs/tags/$tag^{commit}")"
+          if [ "$GITHUB_EVENT_NAME" = push ] && [ "$sha" != "$(git rev-parse --verify "$GITHUB_SHA^{commit}")" ]; then
+            echo "::error::tag $tag no longer points to the triggering commit"
+            exit 1
+          fi
+          version="$(git show "$sha:package.json" | node -p 'JSON.parse(require("node:fs").readFileSync(0, "utf8")).version')"
           if [ "$tag" != "v$version" ]; then
             echo "::error::tag $tag does not match package.json version $version"
             exit 1
           fi
-          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Require an approved pull request and exact-head checks
         env:
@@ -88,7 +92,7 @@ jobs:
     uses: ./.github/workflows/verify.yml
     with:
       os: ${{ matrix.os }}
-      ref: ${{ needs.authorize.outputs.tag }}
+      ref: ${{ needs.authorize.outputs.sha }}
 
   release:
     name: build and publish the private GitHub Release
@@ -99,10 +103,10 @@ jobs:
       contents: write # create the release and upload assets
       id-token: write # Sigstore keyless signing for provenance
     steps:
-      - name: Check out the authorized tag
+      - name: Check out the authorized commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.authorize.outputs.tag }}
+          ref: ${{ needs.authorize.outputs.sha }}
           fetch-depth: 0
           persist-credentials: false
       - name: Set up Node
@@ -147,9 +151,19 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.authorize.outputs.tag }}
+          SHA: ${{ needs.authorize.outputs.sha }}
         run: |
+          set -euo pipefail
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "::error::release $TAG already exists; cut a new version instead of reusing a tag"
+            exit 1
+          fi
+          tag_ref="refs/tags/$TAG"
+          refs="$(git -c credential.helper= -c 'credential.helper=!gh auth git-credential' \
+            ls-remote --exit-code "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$tag_ref" "$tag_ref^{}")"
+          remote_sha="$(awk -v ref="$tag_ref" '$2 == ref { direct = $1 } $2 == ref "^{}" { peeled = $1 } END { print (peeled ? peeled : direct) }' <<< "$refs")"
+          if [ "$remote_sha" != "$SHA" ]; then
+            echo "::error::tag $TAG no longer points to the authorized commit $SHA"
             exit 1
           fi
           gh release create "$TAG" dist/* release-authorization/release-authorization.json \

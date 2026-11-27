@@ -66,25 +66,30 @@ for (const review of reviews) {
   if (!["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(review.state)) continue;
   latest.set(review.user.login, review);
 }
-const approvals = [...latest.values()].filter(
-  (review) => review.state === "APPROVED" && review.commit_id === headSha,
-);
-if (approvals.length < 1) {
-  fail(`pull request #${approvedPull.number} has no independent human approval at ${headSha}`);
-}
 if ([...latest.values()].some((review) => review.state === "CHANGES_REQUESTED")) {
   fail(`pull request #${approvedPull.number} has an unresolved changes-requested review`);
+}
+const approvals = [];
+for (const review of latest.values()) {
+  if (review.state !== "APPROVED" || review.commit_id !== headSha) continue;
+  const login = encodeURIComponent(review.user.login);
+  const { permission } = await get(`/repos/${repository}/collaborators/${login}/permission`);
+  if (["admin", "maintain", "write"].includes(permission)) approvals.push(review.user.login);
+}
+if (approvals.length === 0) {
+  fail(`pull request #${approvedPull.number} has no independent human approval with write access at ${headSha}`);
 }
 
 const checks = await get(
   `/repos/${repository}/commits/${headSha}/check-runs?filter=latest&per_page=100`,
 );
 if (!Array.isArray(checks.check_runs)) fail("unexpected check-run response");
+if (checks.check_runs.length >= 100) fail(`cannot fully read check runs at ${headSha}`);
 const acceptedChecks = {};
 for (const name of requiredChecks) {
   const candidates = checks.check_runs
     .filter((check) => check.name === name && check.app?.slug === "github-actions")
-    .sort((a, b) => String(b.completed_at || "").localeCompare(String(a.completed_at || "")));
+    .sort((a, b) => b.id - a.id);
   const check = candidates[0];
   if (!check || check.status !== "completed" || check.conclusion !== "success") {
     fail(`required check ${name} did not succeed at ${headSha}`);
@@ -104,7 +109,7 @@ const record = {
   pull_request: approvedPull.number,
   pull_request_url: approvedPull.html_url,
   pull_request_head: headSha,
-  independent_approval: approvals.map((review) => review.user.login).sort(),
+  independent_approval: approvals.sort(),
   required_checks: acceptedChecks,
   authorized_at: new Date().toISOString(),
   limitation:
