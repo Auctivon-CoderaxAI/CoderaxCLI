@@ -76,27 +76,28 @@ without either verified form of evidence stop installation.
 
 <!-- coderabbit-ai-generated:v1 -->
 
-<!-- coderabbit-ai-generated-section:v1:887804190d1fc74f56fab46e0f10b25df55593b9d2b0677b39bd9e3c47a43aeb -->
+<!-- coderabbit-ai-generated-section:v1:ae262277175a4f14ade6768f3a363a759959c5166e1f9da88ba5e479803c61f6 -->
 
 ```sh
 (
   set -e
   version=0.3.0
-  mkdir -p release
+  release_dir="$(mktemp -d "${TMPDIR:-/tmp}/coderax-release.XXXXXX")"
+  release_dir="$(cd "$release_dir" && pwd -P)"
   gh release download "v$version" \
     --repo Auctivon-CoderaxAI/CoderaxCLI \
-    --dir release --clobber
+    --dir "$release_dir"
 
-  cd release
-  installer_checksum="$(grep '  install.sh$' SHA256SUMS)"
+  cd "$release_dir"
+  installer_checksum="$(grep '  install.sh$' "$release_dir/SHA256SUMS")"
   if command -v sha256sum >/dev/null 2>&1; then
     printf '%s\n' "$installer_checksum" | sha256sum -c -
   else
     printf '%s\n' "$installer_checksum" | shasum -a 256 -c -
   fi
   archive="coderax-cli-$version-standalone.tar.gz"
-  checksum="$(awk -v archive="$archive" '$2 == archive { print $1 }' SHA256SUMS)"
-  sh install.sh --version "$version" --from-file "$archive" --checksum "$checksum"
+  checksum="$(awk -v archive="$archive" '$2 == archive { print $1 }' "$release_dir/SHA256SUMS")"
+  sh "$release_dir/install.sh" --version "$version" --from-file "$release_dir/$archive" --checksum "$checksum"
 )
 ```
 
