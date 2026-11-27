@@ -54,8 +54,23 @@ jobs:
       # On Windows this runs the Windows-only ACL, console and wide-character
       # tests. On every platform it runs the terminal, session, SDK, permission
       # and secure-store suites.
+      #
+      # The output is tee'd and, on Windows, a failed run republishes the failing
+      # test names as check annotations. Job logs need repository admin rights,
+      # so without this a Windows-only failure is visible as "exit code 1" and
+      # nothing else. `shell: bash` keeps pipefail, so the step still fails.
       - name: Unit, CLI, security and contract tests
-        run: npm test
+        shell: bash
+        run: npm test 2>&1 | tee test-output.log
+      - name: Publish failing test names
+        if: failure() && runner.os == 'Windows'
+        shell: bash
+        run: |
+          if [ -f test-output.log ]; then
+            grep -E '^✖ |^  ✖ |AssertionError|^not ok ' test-output.log | head -20 | while IFS= read -r line; do
+              echo "::error::${line}"
+            done
+          fi
       - name: Build release artifacts
         run: npm run build
       - name: Verify checksums, contents, installers and safety
