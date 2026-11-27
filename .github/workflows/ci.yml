@@ -17,10 +17,10 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
+# Concurrency is per job, not per workflow. A workflow-level group with
+# cancel-in-progress can cancel the verify jobs and leave the required `test`
+# gate evaluating a cancelled run. Each job cancels only its own prior attempt;
+# the gate stays outside any group so it always reports a result.
 jobs:
   # Hosted standard runners only. This repository is being prepared for private
   # operation, so pull requests run Linux only; the full OS matrix runs on main
@@ -29,6 +29,9 @@ jobs:
   # acceptance at the exact release SHA before a release.
   verify:
     name: verify (${{ matrix.os }})
+    concurrency:
+      group: ci-${{ github.workflow }}-${{ github.ref }}-verify-${{ matrix.os }}
+      cancel-in-progress: true
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     permissions:
@@ -112,6 +115,9 @@ jobs:
   # exit. `script` is available on both hosted POSIX images.
   pty:
     name: real PTY (${{ matrix.os }})
+    concurrency:
+      group: ci-${{ github.workflow }}-${{ github.ref }}-pty-${{ matrix.os }}
+      cancel-in-progress: true
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     permissions:
@@ -136,6 +142,9 @@ jobs:
         run: npm run test:pty
 
   # The protected branch requires a check context named exactly "test".
+  # GitHub accepts a skipped job as passing, so evaluate the result even after
+  # verify fails or is cancelled, and keep this gate outside concurrency
+  # groups so it cannot block verification for a newer run.
   test:
     name: test
     needs: [verify, pty]
@@ -157,6 +166,9 @@ jobs:
 
   dependencies:
     name: dependency audit
+    concurrency:
+      group: ci-${{ github.workflow }}-${{ github.ref }}-dependencies
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     permissions:
       contents: read
