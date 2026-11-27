@@ -167,9 +167,11 @@ test("Windows pins PowerShell to its system modules instead of a user path", asy
     },
     runCommand: windowsRun("", { onCall: (call) => calls.push(call) }),
   });
+  // Prepend, so the interpreter's own module wins over a user-writable path
+  // while the rest of PowerShell's module path remains available.
   assert.equal(
     calls[1].options.env.PSModulePath,
-    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\Modules",
+    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\Modules;C:\\Users\\someone\\Documents\\WindowsPowerShell\\Modules",
   );
 });
 

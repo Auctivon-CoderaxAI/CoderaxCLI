@@ -153,7 +153,13 @@ function powershellModulePath(command, env) {
       home = `${root.trim().replace(/[\\/]+$/, "")}\\System32\\WindowsPowerShell\\v1.0`;
     }
   }
-  return home === null ? null : `${home}\\Modules`;
+  if (home === null) return null;
+  const ownModules = `${home}\\Modules`;
+  // Prepend, do not replace. The interpreter's own Modules directory must win
+  // over a user-writable path, but PowerShell's other built-in modules may
+  // live elsewhere on the existing path and `Get-Acl` depends on them.
+  const existing = typeof env.PSModulePath === "string" ? env.PSModulePath.trim() : "";
+  return existing === "" ? ownModules : `${ownModules};${existing}`;
 }
 
 async function runPowerShell(runCommand, script, env) {
@@ -168,7 +174,7 @@ async function runPowerShell(runCommand, script, env) {
   let missing = null;
   for (const command of powershellCandidates(env)) {
     try {
-      const modulePath = powershellModulePath(command, env);
+          const modulePath = powershellModulePath(command, env);
       return await runCommand(command, args, {
         env: modulePath === null ? env : { ...env, PSModulePath: modulePath },
       });
