@@ -32,6 +32,8 @@ export const API_PREFIX = "/v1";
 export const SDK_NAME = "@coderax/sdk";
 export const SDK_VERSION = "1.0.0";
 
+const VENDORED_DOCUMENT_SHA256 = "66add22a0d38405e9aaa49a62a9e463648df00457ce0b0080e3cca240c9736f4";
+
 /**
  * Provenance of the vendored OpenAPI document. `contracts/PROVENANCE.md` and
  * `test/v1-contract.test.js` verify the digest offline; `scripts/check.js`
@@ -41,7 +43,7 @@ export const CONTRACT_SOURCE = Object.freeze({
   repository: "Auctivon-CoderaxAI/Coderax-WorkflowEngine",
   commit: "7b7c9d7a88b8e483995ebe445f2bbbdd29050229",
   document: "openapi.json",
-  openapiSha256: "66add22a0d38405e9aaa49a62a9e463648df00457ce0b0080e3cca240c9736f4",
+  openapiSha256: VENDORED_DOCUMENT_SHA256,
 });
 
 /** Published `/v1` operations. A route outside this catalogue is not invented. */

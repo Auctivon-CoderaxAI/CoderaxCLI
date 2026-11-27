@@ -34,7 +34,7 @@ test("prompts that look sensitive are detected", () => {
   assert.equal(isSensitivePrompt("please summarize this file"), false);
   assert.equal(isSensitivePrompt("password=hunter2"), true);
   assert.equal(isSensitivePrompt("Authorization: Bearer abcdefghijklmnop"), true);
-  assert.equal(isSensitivePrompt("token: 1234567890abcdef1234567890abcdef"), true);
+  assert.equal(isSensitivePrompt(`token: ${"1234567890abcdef".repeat(2)}`), true);
   assert.equal(isSensitivePrompt("-----BEGIN OPENSSH PRIVATE KEY-----"), true);
   assert.equal(isSensitivePrompt("read @src/index.js"), true);
   assert.equal(isSensitivePrompt("mail me at dev@example.com"), false);

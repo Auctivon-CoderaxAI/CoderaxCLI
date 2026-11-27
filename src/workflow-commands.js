@@ -1,3 +1,4 @@
+import { createInterface } from "node:readline/promises";
 import { spawn } from "node:child_process";
 import {
   BUILD_MODES,
@@ -19,6 +20,13 @@ import {
   truncate,
 } from "./render.js";
 import { APPROVAL_POLICIES, approveOrExplain } from "./approval.js";
+import {
+  PromptCancelledError,
+  createInteractiveReader,
+  createWaitIndicator,
+  resolveTerminalProfile,
+  supportsRawInput,
+} from "./terminal/index.js";
 import { VERSION } from "./version.js";
 
 export const EXIT = Object.freeze({
@@ -268,7 +276,7 @@ async function runTerminal(ctx, mode) {
     settings: ctx.settings,
     mode,
     env: ctx.env,
-    accessible: ctx.flags.has("accessible") === true,
+    accessible: ctx.flags.has("accessible") === true || String(ctx.env.TERM ?? "").toLowerCase() === "dumb",
     noColor: ctx.flags.has("no-color") === true,
     resume: resume ?? false,
     noHistory: ctx.flags.has("no-history") === true,
@@ -296,7 +304,158 @@ export async function chatCommand(ctx, positionals) {
       session: sessionFor(ctx, ctx.settings.baseUrl),
     });
   }
-  return runTerminal(ctx, "chat");
+  if (["accessible", "resume", "no-history"].some((flag) => ctx.flags.has(flag)) ||
+      String(ctx.env.TERM ?? "").toLowerCase() === "dumb") {
+    return runTerminal(ctx, "chat");
+  }
+  return interactiveChat(ctx, client);
+}
+
+async function interactiveChat(ctx, client) {
+  // A stream that cannot enter raw mode keeps the readline path exactly as it
+  // was; the key decoder needs raw input to distinguish Enter from Ctrl+J.
+  if (!supportsRawInput(process.stdin)) return interactiveChatWithReadline(ctx, client);
+
+  const reader = createInteractiveReader({
+    input: process.stdin,
+    output: process.stdout,
+    profile: resolveTerminalProfile({
+      platform: process.platform,
+      env: { ...ctx.env, ...(ctx.flags.has("no-color") ? { NO_COLOR: "1" } : {}) },
+      isTTY: Boolean(process.stdout.isTTY),
+      columns: process.stdout.columns ?? null,
+    }),
+    label: "coderax",
+  });
+  const indicator = createWaitIndicator({
+    stream: process.stderr,
+    isTTY: Boolean(process.stderr.isTTY),
+    profile: resolveTerminalProfile({
+      platform: process.platform,
+      env: { ...ctx.env, ...(ctx.flags.has("no-color") ? { NO_COLOR: "1" } : {}) },
+      isTTY: Boolean(process.stderr.isTTY),
+      columns: process.stderr.columns ?? null,
+    }),
+    label: "working",
+  });
+
+  try {
+    return await interactiveChatLoop(ctx, client, {
+      nextLine: () => reader.readLine(),
+      signal: ctx.signal ? AbortSignal.any([ctx.signal, reader.interruptSignal]) : reader.interruptSignal,
+      beginTurn: () => indicator.start(),
+      endTurn: () => indicator.stop(),
+    });
+  } finally {
+    indicator.stop();
+    reader.close();
+  }
+}
+
+async function interactiveChatWithReadline(ctx, client) {
+  const readline = createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    terminal: true,
+  });
+  try {
+    return await interactiveChatLoop(ctx, client, {
+      nextLine: () => readline.question("coderax> "),
+    });
+  } finally {
+    readline.close();
+  }
+}
+
+async function interactiveChatLoop(ctx, client, { nextLine, signal = ctx.signal, beginTurn = () => {}, endTurn = () => {} }) {
+  let session = sessionFor(ctx, ctx.settings.baseUrl);
+
+  ctx.out("Interactive chat. /help for commands, /exit to leave.");
+  if (session.conversationId) ctx.out(`Continuing conversation ${session.conversationId}.`);
+
+  try {
+    while (true) {
+      let line;
+      try {
+        line = await nextLine();
+      } catch {
+        return EXIT.CANCELLED;
+      }
+      const text = line.trim();
+      if (text === "") continue;
+      if (text === "/exit" || text === "/quit") return EXIT.OK;
+      if (text === "/help") {
+        ctx.out(
+          [
+            "/exit, /quit      leave the session",
+            "/new              start a new conversation",
+            "/model <id>       set the model for this session",
+            "/agent <id>       set the agent for this session",
+            "/conversation     show the current conversation id",
+            "/help             show this help",
+          ].join("\n"),
+        );
+        continue;
+      }
+      if (text === "/new") {
+        session = { conversationId: null, parentMessageId: null };
+        resetSession(ctx, ctx.settings.baseUrl);
+        await saveConfig({ sessions: ctx.settings.sessions }, { filePath: ctx.settings.configPath });
+        ctx.out("Started a new conversation.");
+        continue;
+      }
+      if (text === "/conversation") {
+        ctx.out(session.conversationId ?? "(no conversation yet)");
+        continue;
+      }
+      if (text.startsWith("/model ")) {
+        ctx.settings.model = text.slice("/model ".length).trim();
+        ctx.out(`Model set to ${ctx.settings.model || "(default)"}.`);
+        continue;
+      }
+      if (text.startsWith("/agent ")) {
+        ctx.settings.agent = text.slice("/agent ".length).trim();
+        ctx.out(`Agent set to ${ctx.settings.agent || "(default)"}.`);
+        continue;
+      }
+      if (text.startsWith("/")) {
+        ctx.err(`unknown command: ${text}. Type /help.`);
+        continue;
+      }
+
+      // The wait indicator paints on stderr and is cleared as soon as the turn
+      // writes its first byte, so piped stdout is never touched.
+      beginTurn();
+      const turnCtx = {
+        ...ctx,
+        signal,
+        raw: (chunk) => {
+          endTurn();
+          ctx.raw(chunk);
+        },
+        out: (chunk) => {
+          endTurn();
+          ctx.out(chunk);
+        },
+      };
+      try {
+        const code = await streamTurn(turnCtx, client, "chat", text, { session });
+        if (signal?.aborted) return EXIT.CANCELLED;
+        session = getSession(ctx.settings, ctx.settings.baseUrl);
+        if (code !== EXIT.OK) continue;
+      } catch (error) {
+        session = getSession(ctx.settings, ctx.settings.baseUrl);
+        if (error instanceof SdkError && error.code === "CANCELLED") return EXIT.CANCELLED;
+        if (signal?.aborted || error instanceof PromptCancelledError) return EXIT.CANCELLED;
+        ctx.err(`coderax: ${error.code ?? "ERROR"}: ${error.message}`);
+        if (error?.code === "UNAUTHENTICATED" || error?.code === "FORBIDDEN") return EXIT.UNAUTHENTICATED;
+      } finally {
+        endTurn();
+      }
+    }
+  } finally {
+    endTurn();
+  }
 }
 
 export async function workCommand(ctx, positionals) {

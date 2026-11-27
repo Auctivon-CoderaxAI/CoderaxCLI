@@ -7,7 +7,8 @@ workflows or stores response content.
 ## Starting a session
 
 ```sh
-coderax chat                                   # chooses interactive when stdin is a TTY
+coderax chat                                   # compact chat prompt on a TTY
+coderax chat --interactive                     # full terminal with history and menus
 coderax chat "one-shot prompt"                 # non-interactive streaming
 coderax work --interactive --model gpt-4.1 --agent reviewer
 coderax chat --accessible                      # line-oriented mode
@@ -18,6 +19,8 @@ coderax chat --no-history                      # no reads or writes this run
 `--base-url` can point at a local gateway. `CODERAX_SDK` selects the transport:
 `workflow` (default, the shared `packages/workflow-sdk`), `legacy` (compatibility
 adapter), `auto`, or `canonical`. See [CONTRACT.md](CONTRACT.md).
+
+The input, rendering, permissions and history features below describe the full terminal.
 
 ## Input
 
