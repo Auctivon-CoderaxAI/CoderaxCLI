@@ -6,8 +6,9 @@ SDK and one task authority, and states the order in which the work can land.
 ```
 Coderax-WorkflowEngine PR #7   (contracts 1.2.0 + @coderax/sdk 1.2.0)
         │
-        ├── PR #14  durable execution events / crash recovery (rebased onto #2)
-        ├── PR #9   durable schedules
+        ├── PR #2   native intelligence core (open, base main)
+        │     └── PR #14  durable execution events / crash recovery (base #2)
+        ├── PR #9   durable schedules (open, base main)
         ▼
 Coderax-WorkflowEngine main    (currently 808dfd3, contract 1.0.0)
         │
@@ -25,14 +26,17 @@ Coderax (Web) /v1 consumer
    `a048a0283e6aa32531f7a6c1b74034843230ab0f`. This is the authority for
    `openapi.json` 1.2.0, the route catalogue, the fingerprint and
    `@coderax/sdk` 1.2.0. Nothing else should define a competing HTTP contract.
-2. **WorkflowEngine #14** — `feat/durable-recovery-rebased`, head
-   `3f12b6de…`. Adds the durable event log and crash recovery that make replay
-   survive a process restart. The CLI's cursor protocol already matches the
-   schema; this PR supplies the persistence side.
-3. **WorkflowEngine #9** — `feat/durable-scheduling`. Adds the schedule
-   operations the CLI client already covers.
-4. **WorkflowEngine main** — merge order #7 → #14 → #9. After #7, `main` serves
-   1.2.0 and the CLI pin no longer references an open PR.
+2. **WorkflowEngine #2** — `feat/intelligence-core`, head `b6278865…`, open
+   against `main`. The engine's native tool loop and durable approvals; PR #14
+   is based on this branch, not on `main`.
+3. **WorkflowEngine #14** — `feat/durable-recovery-rebased`, head
+   `3f12b6de…`, base `feat/intelligence-core`. Adds the durable event log and
+   crash recovery that make replay survive a process restart. The CLI's cursor
+   protocol already matches the schema; this PR supplies the persistence side.
+4. **WorkflowEngine #9** — `feat/durable-scheduling`, head `38168306…`, open
+   against `main`. Adds the schedule operations the CLI client already covers.
+5. **WorkflowEngine main** — merge order #7, then #2 → #14, with #9 independent.
+   After #7, `main` serves 1.2.0 and the CLI pin no longer references an open PR.
 
 The engine owner (`@nnabdelshahid`, per `.github/CODEOWNERS`) must confirm the
 contract and SDK pin. Until then, compatibility is verified, not owner-signed.
@@ -67,11 +71,10 @@ contract and SDK pin. Until then, compatibility is verified, not owner-signed.
 
 ## Base branch divergence
 
-At the time of writing, `main` is `c09ab89…` and this branch is 18 commits ahead
-and 22 behind: `main` contains the #8–#14 fixes (diagnostics prefix detection,
-uninstall launcher removal, private-CI safety, dependabot) while this branch
-contains the reconciled release tooling (command registry, completions,
-installers, SBOM, task synchronization). The PR must be reviewed against `main`
+At the time of writing, `main` is `c09ab89…`; this branch is ahead with the
+reconciled release tooling (command registry, completions, installers, SBOM,
+task synchronization) and behind `main`'s #8–#14 fixes (diagnostics prefix
+detection, uninstall launcher removal, private-CI safety, dependabot). The PR must be reviewed against `main`
 and rebased/merged by the owner; it is not force-pushed and does not modify
 `main` directly. The engine consolidation is additive, so it can also be
 cherry-picked onto a fresh `main` branch if the owner prefers to land the release

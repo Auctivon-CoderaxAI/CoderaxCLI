@@ -157,7 +157,8 @@ auth and SSE; deterministic model gateway) and runs
 ```
 
 It does not mirror legacy Coderax handlers. It requires a built engine checkout
-(`npm ci && npm run build`); it needs no database, credential or deployment.
+(`npm ci && npm run build`); it needs no database, credential or deployment. The
+recorded run is in [`ENGINE-ACCEPTANCE.md`](ENGINE-ACCEPTANCE.md).
 The `engine-acceptance` job in `.github/workflows/ci.yml` performs the same run
 on a GitHub-hosted ubuntu runner, checking out the pinned engine commit and
 building it before the suite. It uses no secret and no paid runner, and the
