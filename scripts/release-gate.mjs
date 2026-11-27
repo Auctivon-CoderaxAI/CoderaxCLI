@@ -101,8 +101,59 @@ for (const name of requiredChecks) {
   };
 }
 
+// A check on the PR can cover a synthetic merge; require separate evidence
+// from the expected workflows which actually checked out the main push SHA.
+async function requireMainPushJob(workflow, name) {
+  const query = new URLSearchParams({ branch: "main", event: "push", head_sha: sha, per_page: "1" });
+  const { workflow_runs: runs } = await get(
+    `/repos/${repository}/actions/workflows/${workflow}/runs?${query}`,
+  );
+  const run = runs?.[0];
+  if (
+    run?.head_sha !== sha ||
+    run.head_branch !== "main" ||
+    run.event !== "push" ||
+    run.path !== `.github/workflows/${workflow}` ||
+    run.status !== "completed" ||
+    !Number.isSafeInteger(run.id) ||
+    !Number.isSafeInteger(run.run_attempt)
+  ) {
+    fail(`no completed main push run of ${workflow} for ${sha}`);
+  }
+
+  const { total_count, jobs } = await get(
+    `/repos/${repository}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100`,
+  );
+  if (!Array.isArray(jobs) || jobs.length !== total_count) {
+    fail(`cannot fully read jobs for ${workflow} run ${run.id}`);
+  }
+  const matches = jobs.filter((job) => job.name === name);
+  const job = matches[0];
+  if (
+    matches.length !== 1 ||
+    job.head_sha !== sha ||
+    job.status !== "completed" ||
+    job.conclusion !== "success"
+  ) {
+    fail(`required main push job ${name} did not succeed at ${sha}`);
+  }
+  return {
+    workflow,
+    run_id: run.id,
+    run_attempt: run.run_attempt,
+    job_id: job.id,
+    conclusion: job.conclusion,
+    completed_at: job.completed_at,
+  };
+}
+
+const releaseCommitChecks = {};
+for (const [workflow, name] of [["ci.yml", "dependency audit"], ["secret-scan.yml", "changed-commits"]]) {
+  releaseCommitChecks[name] = await requireMainPushJob(workflow, name);
+}
+
 const record = {
-  schema: 1,
+  schema: 2,
   repository,
   tag,
   commit: sha,
@@ -111,9 +162,10 @@ const record = {
   pull_request_head: headSha,
   independent_approval: approvals.sort(),
   required_checks: acceptedChecks,
+  release_commit_checks: releaseCommitChecks,
   authorized_at: new Date().toISOString(),
   limitation:
-    "This proves the tag points at an approved pull-request merge with passing exact-head checks. It does not prevent a repository writer from changing the release workflow.",
+    "This proves the tag points at an approved pull-request merge with passing PR-head checks and security jobs on the exact main push commit. It does not prevent a repository writer from changing the release workflow.",
 };
 writeFileSync("release-authorization.json", `${JSON.stringify(record, null, 2)}\n`);
 console.log(`Authorized ${repository} ${tag} at ${sha} from pull request #${approvedPull.number}.`);

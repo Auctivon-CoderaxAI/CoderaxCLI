@@ -45,8 +45,10 @@ anonymous `releases/download` URL.
 
 A tag is publishable only if it points at the merge commit of an independently
 approved pull request into `main`, and the pull-request head has successful
-`test`, `changed-commits`, and `dependency audit` checks. The authorization job
-records the PR, head SHA, approval, checks, and timestamp in
+`test`, `changed-commits`, and `dependency audit` checks. The dependency audit
+and changed-commit secret scan must also pass on the push to `main` for the
+tagged commit. The authorization job records the PR, head SHA, approval,
+checks for both revisions, and timestamp in
 `release-authorization.json`, which becomes a release asset. The full Linux,
 Windows, and macOS matrix must pass before the release job starts.
 

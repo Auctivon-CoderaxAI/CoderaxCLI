@@ -5,10 +5,11 @@ coverage or publishing an owner-only package.
 
 ## CI and cost
 
-- Pull requests and `main` pushes run the reusable Linux verification workflow.
-- A weekly schedule and every release run the complete Linux, Windows, and macOS
-  matrix through the same reusable workflow.
-- The PR/main Linux path covers syntax, unit/CLI/contract tests, build,
+- Pull requests run the Linux verification job and separate Linux and macOS
+  PTY tests. Pushes to `main` and `rc/**` and weekly CI run verification on
+  Linux, Windows, and macOS. Releases use the reusable workflow for certification
+  on all three platforms.
+- The Linux verification job covers syntax, unit/CLI/contract tests, build,
   artifact/installer verification, hosted installation, authentication,
   upgrade/rollback, and uninstall.
 - Dependency audit is a separate required check.
@@ -24,7 +25,9 @@ coverage or publishing an owner-only package.
 - `package.json` remains `"private": true` and has no `publishConfig`.
 - The release workflow has no npm publication job.
 - A tag must be the merge commit of an independently approved PR with green
-  exact-head `test`, `changed-commits`, and `dependency audit` checks.
+  `test`, `changed-commits`, and `dependency audit` checks on the PR head.
+  The tagged commit also needs a green dependency audit and changed-commit secret
+  scan from its push to `main`.
 - Release certification runs Linux, Windows, and macOS before publication.
 - Artifacts are covered by `SHA256SUMS`, an SBOM, a manifest, and keyless
   Sigstore bundles.

@@ -199,7 +199,9 @@ Every release publishes a private GitHub Release with an npm-compatible tarball,
 a POSIX standalone tarball, a Windows zip, `SHA256SUMS`, a release manifest, an
 SPDX SBOM, and the signed release-authorization record. A tag is publishable only
 when it is the merge commit of an independently approved pull request with
-successful exact-head `test`, `changed-commits`, and `dependency audit` checks.
+successful `test`, `changed-commits`, and `dependency audit` checks on the PR head.
+The tagged commit also needs successful dependency audit and changed-commit
+secret scan jobs from its push to `main`.
 
 Builds are reproducible: fixed metadata, sorted entries, fixed compression and a
 fixed `SOURCE_DATE_EPOCH`; `npm run repro` rebuilds twice and compares hashes.

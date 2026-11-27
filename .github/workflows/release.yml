@@ -27,6 +27,7 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+      actions: read
       checks: read
       pull-requests: read
     outputs:
@@ -69,7 +70,7 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
-      - name: Require an approved pull request and exact-head checks
+      - name: Require PR approval and checks on the PR head and release commit
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.meta.outputs.tag }}

@@ -69,13 +69,15 @@ default so that the hashes in the manifest and checksums match what CI built.
 
 3. **Open a pull request and use cloud verification**:
 
-   Do not run builds or tests on the owner's computer. Open a PR; the reusable
-   `verify.yml` workflow runs the syntax, unit, contract, build, artifact,
-   reproducibility, and installation checks on GitHub-hosted Linux. The weekly
-   schedule and the release workflow repeat the complete matrix on Linux,
-   Windows, and macOS.
+   Use GitHub-hosted CI for syntax, unit, contract, build, artifact,
+   reproducibility, and installation checks. Pull requests run the Linux
+   verification job and separate Linux and macOS PTY tests. Pushes to `main` and
+   `rc/**` and weekly CI verify on Linux, Windows, and macOS. The release workflow
+   uses `verify.yml` for certification on all three platforms.
 
-4. **Merge only after review and green exact-head checks, then tag the merge**:
+4. **Merge after review and green PR checks. Wait for both workflows on the merge
+   commit’s push to `main` to finish and confirm that the dependency audit and
+   changed-commit secret scan passed, then tag it**:
 
    ```sh
    git tag -a v0.3.0 -m "coderax-cli 0.3.0"
@@ -84,19 +86,23 @@ default so that the hashes in the manifest and checksums match what CI built.
 
    The tag must point at the merge commit of the approved PR. `release.yml`
    refuses a tag created by a direct push, a tag without an independent human
-   approval at the PR head, or a tag whose required exact-head checks did not
-   succeed.
+   approval at the PR head, or a tag whose required checks on either revision
+   did not succeed. If a required main push job fails or is cancelled, rerun
+   that workflow on the same push. A manual CI run does not replace main push
+   evidence.
 
 <!-- coderabbit-ai-generated:v1 -->
 
-<!-- coderabbit-ai-generated-section:v1:be502e59685efbec66e08bee39340d6ff7ee01959aa0da8f944f1cee38e24297 -->
+<!-- coderabbit-ai-generated-section:v1:3dbc46cebc72bb7479bd5f2be195e132985676a88ee270304f82c59371d7e7e4 -->
 
 5. **The `release` workflow runs** on the tag:
    - reads authorization policy from `main` and checks that the tag matches
      the candidate's `package.json` version
    - requires a merged PR, independent human approval with repository write
-     access, and successful exact-head `test`, `changed-commits`, and
-     `dependency audit` checks
+     access, and successful `test`, `changed-commits`, and `dependency audit`
+     checks on the PR head
+   - records successful dependency audit and changed-commit secret scan jobs
+     from the latest runs for the tagged commit’s push to `main`
    - certifies the authorized commit on Linux, Windows, and macOS
    - builds and verifies artifacts from that same commit without rerunning
      the full test matrix and signs every asset
@@ -119,8 +125,8 @@ default so that the hashes in the manifest and checksums match what CI built.
 
 | Workflow | Trigger | Token permissions | Secrets |
 | --- | --- | --- | --- |
-| `ci.yml` | push to `main`, pull requests, weekly schedule | `contents: read` | none |
-| `release.yml` `authorize` job | version tag, manual dispatch | `contents: read`, `checks: read`, `pull-requests: read` | `GITHUB_TOKEN` only |
+| `ci.yml` | push to `main` and `rc/**`, pull requests, weekly schedule, manual dispatch | `contents: read` | none |
+| `release.yml` `authorize` job | version tag, manual dispatch | `contents: read`, `actions: read`, `checks: read`, `pull-requests: read` | `GITHUB_TOKEN` only |
 | `release.yml` `certify` job | after authorization | `contents: read` | none |
 | `release.yml` `release` job | after authorization and certification | `contents: write`, `id-token: write` | `GITHUB_TOKEN` only |
 
@@ -166,4 +172,4 @@ for local archive verification.
 | `checksum mismatch` in `npm run verify` | Build raced an edit, or `SOURCE_DATE_EPOCH` differed | Rebuild from a clean checkout |
 | `dist/` hashes differ in `npm run repro` | Non-deterministic input (untracked file, locale, zlib difference) | Build with the same Node version; check `git status` |
 | Hosted runner cannot start | Organization billing or spending limit | Check the organization's Actions policy and the $0 budget |
-| Release authorization refuses the tag | Direct push, unmerged tag, missing approval, or a stale/missing exact-head check | Tag the merge commit of an independently approved green PR |
+| Release authorization refuses the tag | Direct push, unmerged tag, missing approval, or a stale or missing check on the PR head or release commit | Verify both revisions and tag the merge commit of an independently approved green PR |
