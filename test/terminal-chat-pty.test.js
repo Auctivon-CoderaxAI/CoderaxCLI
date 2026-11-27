@@ -17,7 +17,7 @@ test("the interactive chat prompt, key decoder and wait indicator are used in a 
     { when: /coderax> /, input: "hello\nworld\r" },
     { when: /echo "hello/, input: "/exit\r" },
   ];
-  const result = await runPty({ fixture: FIXTURE, steps, env: { TERM: "xterm-256color" } });
+  const result = await runPty({ fixture: FIXTURE, steps, env: { TERM: "xterm-256color", NO_COLOR: "", FORCE_COLOR: "1" } });
 
   t.diagnostic(`pty exit ${result.status}; output ${JSON.stringify(result.output)}`);
   assert.equal(result.timedOut, false, "the interactive session must exit on /exit");
@@ -37,6 +37,22 @@ test("the interactive chat prompt, key decoder and wait indicator are used in a 
     "the submitted message must contain the Ctrl+J newline",
   );
   assert.equal(result.output.includes("[Revised response]"), false);
+});
+
+test("Ctrl+C cancels a streaming chat turn and resets bracketed paste", { skip }, async () => {
+  const result = await runPty({
+    fixture: FIXTURE,
+    steps: [
+      { when: "coderax> ", input: "interrupt me\r" },
+      { when: "TURN STARTED", input: "\u0003" },
+    ],
+    env: { TERM: "xterm-256color" },
+  });
+  assert.equal(result.timedOut, false);
+  assert.equal(result.status, 130);
+  assert.match(result.output, /\u001b\[\?2004h.*coderax> /s);
+  assert.ok(result.output.includes("\u001b[?2004l"));
+  assert.doesNotMatch(result.output, /echo "interrupt me"/);
 });
 
 test("a non-TTY chat stays a single piped turn with no prompt, spinners or ANSI", async () => {

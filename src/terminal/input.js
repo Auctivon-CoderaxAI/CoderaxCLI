@@ -4,7 +4,7 @@ import {
   renderPromptLine,
   resolveTerminalProfile,
   stringWidth,
-  truncateToWidth,
+  stripAnsi,
 } from "./prompt.js";
 
 /**
@@ -34,6 +34,17 @@ export function supportsRawInput(stream) {
   );
 }
 
+function trailingViewport(value, columns) {
+  const text = stripAnsi(value).replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
+  let start = text.length;
+  for (const char of [...text].reverse()) {
+    columns -= stringWidth(char);
+    if (columns < 0) break;
+    start -= char.length;
+  }
+  return text.slice(start);
+}
+
 function dropLastWord(value) {
   const trimmed = value.replace(/\s+$/, "");
   const cut = trimmed.search(/\S+$/);
@@ -61,7 +72,10 @@ export function createInteractiveReader({
   const decoder = createKeyDecoder({ chunkEol: true });
 
   let buffer = "";
-  let queued = null;
+  const queued = [];
+  const interrupt = new AbortController();
+  let eof = Boolean(input?.readableEnded);
+  let pasteEnabled = false;
   let pending = null;
   let closed = false;
   let previousRaw = null;
@@ -76,13 +90,9 @@ export function createInteractiveReader({
     // Only the last physical line is echoed; the full multi-line buffer is
     // still what Enter submits.
     const tail = buffer.slice(buffer.lastIndexOf("\n") + 1);
-    const room = Math.max(1, width - stringWidth(promptText));
+    const room = Math.max(0, width - stringWidth(promptText));
     write(
-      `${renderPromptLine({ label, marker, profile: resolved, columns: width })}${truncateToWidth(
-        tail,
-        room,
-        "",
-      )}`,
+      `${renderPromptLine({ label, marker, profile: resolved, columns: width })}${trailingViewport(tail, room)}`,
     );
   };
 
@@ -92,7 +102,7 @@ export function createInteractiveReader({
     if (pending === null) {
       // Type-ahead: a complete line submitted before the caller asked for one
       // is kept for the next readLine instead of being dropped.
-      if (!error && queued === null) queued = value;
+      if (!error) queued.push(value);
       return;
     }
     const { resolve, reject } = pending;
@@ -134,14 +144,19 @@ export function createInteractiveReader({
           break;
         case KEY_TYPES.CTRL_C:
           write(resolved.eol);
-          settle(new PromptCancelledError("interrupted"));
-          break;
+          {
+            const error = new PromptCancelledError("interrupted");
+            settle(error);
+            interrupt.abort(error);
+            return;
+          }
         case KEY_TYPES.CTRL_D:
           // Ctrl+D leaves a non-empty line alone; on an empty line it ends the
           // session, matching shell and readline behaviour.
           if (buffer === "") {
             write(resolved.eol);
-            settle(new PromptCancelledError("end of input"));
+            onEnd();
+            return;
           }
           break;
         default:
@@ -152,34 +167,40 @@ export function createInteractiveReader({
   };
 
   const onData = (chunk) => {
-    if (closed) return;
+    if (closed || eof || interrupt.signal.aborted) return;
     handle(decoder.push(chunk));
   };
 
   const onEnd = () => {
-    if (!closed) settle(new PromptCancelledError("end of input"));
+    if (closed || eof) return;
+    eof = true;
+    settle(new PromptCancelledError("end of input"));
   };
 
   input?.on?.("data", onData);
   input?.on?.("end", onEnd);
+  input?.on?.("error", onEnd);
 
   /** Resolve with the submitted line, or reject with PromptCancelledError. */
-  const readLine = () => {
-    if (closed) return Promise.reject(new PromptCancelledError("reader closed"));
-    if (pending !== null) return Promise.reject(new Error("readLine() is not re-entrant"));
-    if (queued !== null) {
-      const line = queued;
-      queued = null;
-      return Promise.resolve(line);
-    }
+  const readLine = async () => {
+    if (closed) throw new PromptCancelledError("reader closed");
+    if (interrupt.signal.aborted) throw interrupt.signal.reason;
+    if (pending !== null) throw new Error("readLine() is not re-entrant");
+    // Completed submissions remain available after EOF.
+    if (queued.length > 0) return queued.shift();
+    if (eof) throw new PromptCancelledError("end of input");
     if (supportsRawInput(input) && previousRaw === null) {
       previousRaw = Boolean(input.isRaw);
       input.setRawMode(true);
+      if (resolved.ansi && typeof output?.write === "function") {
+        pasteEnabled = true;
+        write("\u001b[?2004h");
+      }
     }
-    input?.resume?.();
     return new Promise((resolve, reject) => {
       pending = { resolve, reject };
       paint();
+      input?.resume?.();
     });
   };
 
@@ -189,9 +210,17 @@ export function createInteractiveReader({
     const active = pending;
     pending = null;
     buffer = "";
-    queued = null;
+    queued.length = 0;
     input?.removeListener?.("data", onData);
     input?.removeListener?.("end", onEnd);
+    input?.removeListener?.("error", onEnd);
+    if (pasteEnabled) {
+      try {
+        write("\u001b[?2004l");
+      } catch {
+        // Output may already have closed; still restore the input stream.
+      }
+    }
     if (previousRaw !== null) {
       try {
         input.setRawMode(Boolean(previousRaw));
@@ -214,6 +243,7 @@ export function createInteractiveReader({
     get pending() {
       return pending !== null;
     },
+    interruptSignal: interrupt.signal,
     readLine,
     close,
   };

@@ -83,6 +83,17 @@ else. No administrator rights, services, daemons, or open ports.
 | `chat` / `work` streaming with SSE parsing and redaction | ✅ implemented, tested |
 | Autonomous Work submission, durable runs, resume/retry/cancel | ✅ implemented, contract-tested |
 | `tasks`, `workflows`, `runs`, `approve`, `repos`, `whoami` | ✅ implemented, contract-tested |
+| `login` / `logout` / `status` with token masking | ✅ implemented, tested |
+| Interactive Chat/Work terminal (markdown, highlighting, multiline editing) | ✅ implemented, tested |
+| Keyboard shortcuts, command completion, model/agent and conversation selection | ✅ implemented, tested |
+| Prompt history with retention, clearing, disabling and private storage | ✅ implemented, tested |
+| Explicit, per-send approval for local file attachments | ✅ implemented, tested |
+| Terminal output sanitisation (ANSI, OSC 52, control sequences) | ✅ implemented, tested |
+| Server-bound permission approvals | ✅ implemented, fails closed on the legacy transport |
+| Shared workflow SDK transport | ✅ default for the legacy deployment contract (`packages/workflow-sdk`) |
+| Canonical WorkflowEngine `/v1` transport | ✅ implemented in the shared SDK; `CODERAX_SDK=v1` selects it and fails closed |
+| Artifact upload/download | ⛔ not in contract 1.0.0; `/v1` publishes no transfer route |
+| Scheduled task management | ⛔ not in contract 1.0.0; `/v1` publishes no schedule route |
 | `products`, `cloud` and `projects` status | ✅ implemented, tested |
 | `doctor` diagnostics, `version`, `compat`, `uninstall` | ✅ implemented, tested |
 | Reproducible artifacts, SHA-256 checksums, SPDX SBOM | ✅ implemented, verified |
@@ -199,6 +210,89 @@ npm run release:check
 The release check includes syntax validation, tests, build verification,
 reproducibility checks and installation tests.
 
+## Interactive terminal
+
+Run `coderax chat` or `coderax work` with no prompt in a real terminal (or pass
+`--interactive`) to open the interactive session:
+
+```sh
+coderax chat
+coderax work --interactive --model gpt-4.1 --agent reviewer
+coderax chat --resume <conversation-id>
+```
+
+Responses stream as markdown with syntax-highlighted code, tool activity,
+progress and permission requests. The session keeps only a bounded tail of the
+last response; long answers and long sessions do not grow terminal memory
+without limit.
+
+| Key | Action |
+| --- | --- |
+| `Enter` | Send the prompt |
+| `Ctrl+J` / `Alt+Enter` | Insert a newline |
+| `Tab` | Complete a slash command or selection value |
+| `Up` / `Down` | Prompt history (or move between input lines) |
+| `Ctrl+A` / `Ctrl+E` | Start / end of line |
+| `Ctrl+W` | Delete the previous word |
+| `Ctrl+K` / `Ctrl+U` | Kill to end / start of line |
+| `Ctrl+L` | Redraw the screen |
+| `Esc` / `Ctrl+C` | Cancel a streaming response (or clear input) |
+| `Ctrl+D` | Exit on an empty prompt |
+
+Commands: `/help`, `/mode`, `/model`, `/agent`, `/resume`, `/retry`, `/cancel`,
+`/clear`, `/new`, `/history`, `/permissions`, `/status`, `/quit`.
+
+`--accessible` uses a line-oriented input mode with numbered choices instead of
+cursor addressing, for screen readers and minimal terminals. `NO_COLOR` and
+`--no-color` disable colour; `TERM=dumb` is respected.
+
+### Privacy
+
+Prompt history is stored beside the config (`history.json`) with platform ACL
+verification, never includes responses, and skips prompts that look like secrets
+or reference local files. Retention, clearing and disabling are available in
+the session and from the CLI:
+
+```sh
+coderax history list
+coderax history retention 7
+coderax history off       # also removes conversation metadata
+coderax history clear
+coderax history on
+```
+
+`--no-history` disables reading and writing for one run. Local files referenced
+with `@path` are never read automatically: each file is shown with its exact
+path, size and hash and must be approved for that one send. Symlinks are refused
+unless explicitly enabled, sensitive paths are always refused, and nothing is
+sent without approval.
+
+### SDK transport
+
+The terminal talks to one facade. `CODERAX_SDK=v1` selects the authoritative
+WorkflowEngine `/v1` transport in `packages/workflow-sdk/src/v1`; it verifies
+the contract, streams with `Last-Event-ID`/`after`, deduplicates by `eventId`,
+detects sequence gaps, reconnects with a bounded budget, and submits Work
+at-most-once from a durable ledger. There is no silent fallback: a deployment
+that does not serve `/v1` fails with a contract error.
+
+The legacy deployment contract is an explicit migration mode:
+`CODERAX_SDK=workflow` (the default for existing installations) or
+`CODERAX_SDK=legacy` (the compatibility SSE adapter). `CODERAX_SDK=canonical`
+requires a verified `@coderax/sdk` contract and `CODERAX_SDK=auto` uses that SDK
+only after its own handshake succeeds.
+
+For a `/v1`-only deployment, authenticate without the legacy `/api/user` route:
+
+```sh
+CODERAX_SDK=v1 coderax v1 login --token-file ~/.coderax/token
+coderax v1 whoami
+coderax v1 chat "Summarize this repository" --agent coderax
+coderax v1 submit "Inspect the repository" --template inspect --agent coderax
+```
+
+See [docs/TERMINAL.md](docs/TERMINAL.md) and [docs/CONTRACT.md](docs/CONTRACT.md).
+
 ## Exit codes
 
 | Code | Meaning |
@@ -211,6 +305,9 @@ reproducibility checks and installation tests.
 | `5` | not found |
 | `6` | unavailable (backend capability/API version, Cloud, projects) |
 | `7` | contract violation (including incomplete streams) |
+| `8` | approval required and not granted |
+| `9` | submission uncertain; do not blindly resubmit |
+| `10` | conflict or busy |
 | `130` | cancelled |
 
 Errors print as `coderax: <CODE>: <message>` for typed failures, with the token
@@ -230,6 +327,8 @@ The following development commands are intended for a cloud workspace:
 npm ci --ignore-scripts
 npm test
 npm run check
+npm run verify:contract
+npm run verify:isolation
 npm run build
 npm run verify
 npm run install-test
@@ -241,6 +340,8 @@ npm run repro
 | `npm ci --ignore-scripts` | Install the locked dependency tree |
 | `npm test` | Unit, CLI, contract, release and redaction tests |
 | `npm run check` | Syntax check for every module |
+| `npm run verify:contract` | Fail on a stale SDK version or an operation the deployment does not publish |
+| `npm run verify:isolation` | Fail if the CLI gains local inference, a database, a daemon, Docker or Ollama |
 | `npm run build` | Generate deterministic artifacts in `dist/` |
 | `npm run verify` | Verify checksums, archive contents and extractor integrity |
 | `npm run install-test` | Verify installation, authentication, compatibility, upgrade and uninstall |

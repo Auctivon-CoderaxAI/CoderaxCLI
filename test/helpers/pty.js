@@ -47,6 +47,7 @@ export function runPty({ fixture, input = "", steps = [], timeoutMs = 15000, env
     let output = "";
     let sent = false;
     let stepIndex = 0;
+    let matchEnd = 0;
     let settled = false;
 
     const stop = () => {
@@ -71,9 +72,18 @@ export function runPty({ fixture, input = "", steps = [], timeoutMs = 15000, env
     const pump = () => {
       while (stepIndex < steps.length) {
         const step = steps[stepIndex];
-        const matched =
-          step.when instanceof RegExp ? step.when.test(output) : output.includes(String(step.when));
-        if (!matched) return;
+        if (matchEnd > output.length) return;
+        const remaining = output.slice(matchEnd);
+        if (step.when instanceof RegExp) {
+          const match = new RegExp(step.when).exec(remaining);
+          if (!match) return;
+          matchEnd += match.index + Math.max(1, match[0].length);
+        } else {
+          const pattern = String(step.when);
+          const index = remaining.indexOf(pattern);
+          if (index === -1) return;
+          matchEnd += index + Math.max(1, pattern.length);
+        }
         stepIndex += 1;
         if (step.input) child.stdin.write(step.input);
       }
@@ -99,7 +109,7 @@ export function runPty({ fixture, input = "", steps = [], timeoutMs = 15000, env
       clearTimeout(timer);
       reject(error);
     });
-    child.on("exit", (status) => {
+    child.on("close", (status) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);

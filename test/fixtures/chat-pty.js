@@ -29,6 +29,7 @@ function serve() {
     let raw = "";
     for await (const chunk of req) raw += chunk;
     const text = JSON.parse(raw === "" ? "{}" : raw).text ?? "";
+    realWrite("TURN STARTED\r\n");
     const answer = `echo ${JSON.stringify(text)}`;
 
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });

@@ -133,3 +133,42 @@ test("close restores raw mode, detaches listeners and cancels a pending line", a
   assert.equal(input.listenerCount("end"), 0);
   await assert.rejects(reader.readLine(), { code: "CANCELLED" });
 });
+
+test("the prompt shows a wide-character suffix while submitting the full line", async () => {
+  const { input, output, reader } = makeReader({ reader: { columns: 13 } });
+  const pending = reader.readLine();
+  input.emit("data", Buffer.from("ab界猫x"));
+  assert.match(output.output(), /猫x$/);
+  assert.doesNotMatch(output.output(), /界/);
+  input.emit("data", Buffer.from("\r"));
+  assert.equal(await pending, "ab界猫x");
+  reader.close();
+});
+
+test("EOF drains completed lines in order and discards the unfinished line", async () => {
+  const { input, reader } = makeReader();
+  const first = reader.readLine();
+  input.emit("data", Buffer.from("first\rsecond\rthird\runfinished"));
+  input.emit("end");
+  assert.equal(await first, "first");
+  assert.equal(await reader.readLine(), "second");
+  assert.equal(await reader.readLine(), "third");
+  await assert.rejects(reader.readLine(), { message: "end of input" });
+  reader.close();
+});
+
+test("an interrupt between reads is observable and takes precedence over queued lines", async () => {
+  const { input, reader, output } = makeReader();
+  const first = reader.readLine();
+  assert.ok(output.output().startsWith("\u001b[?2004h"));
+  input.emit("data", Buffer.from("first\rsecond\r\u0003"));
+  assert.equal(await first, "first");
+  assert.equal(reader.interruptSignal.reason?.code, "CANCELLED");
+  await assert.rejects(reader.readLine(), { message: "interrupted" });
+  reader.close();
+  reader.close();
+  assert.equal(output.output().split("\u001b[?2004l").length, 2);
+  const unused = makeReader();
+  unused.reader.close();
+  assert.equal(unused.output.output(), "");
+});
