@@ -1,0 +1,7 @@
+# Code owners for Auctivon-CoderaxAI/CoderaxCLI
+#
+# Every path in this repository needs an approving review from a human
+# maintainer before it can merge. Bot accounts (CodeRabbit, Codex, Dependabot)
+# are deliberately not code owners: a bot review is advisory only.
+
+* @nnabdelshahid

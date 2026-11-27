@@ -74,9 +74,13 @@ foreach ($target in $targets) {
   Remove-Item -LiteralPath $target -Recurse -Force
 }
 
-# Only remove the launcher when it came from this prefix.
+# Only remove the launcher when it came from this prefix. The Windows shim
+# keeps its entrypoint base64-encoded so paths with spaces and Unicode survive
+# cmd.exe, so inspect both the literal text and the embedded payload.
 if (Test-Path -LiteralPath $launcher) {
-  if (Test-LauncherBelongsToPrefix $launcher $Prefix) {
+  $prefixPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Prefix)
+  if (Test-LauncherBelongsToPrefix $launcher $prefixPath) {
+
     Remove-Item -LiteralPath $launcher -Force
   } else {
     Write-Warning "leaving $launcher (it does not reference $Prefix)"
