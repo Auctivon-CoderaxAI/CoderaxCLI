@@ -82,3 +82,10 @@ test("a heading separator and quote are visual, not literal Markdown", () => {
   assert.equal(output.includes("> quoted"), false);
   assert.match(output, /─{3,}/);
 });
+
+test("fence-like code stays literal until a matching closing fence", () => {
+  const output = render("````js\n```\n~~~~\n````more\nconst x = 1;\n`````  \nafter\n");
+  assert.match(output, /│ ```\n.*│ ~~~~\n.*│ ````more\n.*│ const x = 1;\n.*└─.*\nafter/s);
+  const tilde = render("~~~text\n```\n~~~\nafter\n");
+  assert.match(tilde, /│ ```\n.*└─.*\nafter/s);
+});

@@ -2,6 +2,7 @@
 import { readFile, readdir, stat } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { spawnSync } from "node:child_process";
+import { VERSION } from "../src/version.js";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
@@ -45,11 +46,12 @@ function checkImports(file, source) {
 }
 
 const sourceFiles = await walk(join(root, "src"));
+const packageFiles = await walk(join(root, "packages"));
 const scriptFiles = await walk(join(root, "scripts"));
 const testFiles = await walk(join(root, "test"));
 
-for (const file of [...sourceFiles, ...scriptFiles, ...testFiles]) checkSyntax(file);
-for (const file of sourceFiles) {
+for (const file of [...sourceFiles, ...packageFiles, ...scriptFiles, ...testFiles]) checkSyntax(file);
+for (const file of [...sourceFiles, ...packageFiles]) {
   const source = await readFile(file, "utf8");
   checkImports(file, source);
   if (/\brequire\s*\(/.test(source)) failures.push(`${relative(root, file)}: CommonJS require() is not allowed in an ESM runtime`);
@@ -73,8 +75,7 @@ else {
     failures.push(`bin target ${bin} does not exist`);
   }
 }
-const versionSource = await readFile(join(root, "src/version.js"), "utf8");
-const version = versionSource.match(/VERSION\s*=\s*["']([^"']+)["']/)?.[1];
+const version = VERSION;
 if (!version || version !== packageJson.version) {
   failures.push(`package.json version ${packageJson.version} does not match src/version.js ${version}`);
 }

@@ -27,6 +27,7 @@ await mkdir(stage, { recursive: true });
 const include = [
   "src",
   "contracts",
+  "packages",
   "docs",
   "README.md",
   "ARCHITECTURE.md",

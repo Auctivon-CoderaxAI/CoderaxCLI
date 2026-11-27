@@ -121,7 +121,8 @@ export class MarkdownRenderer {
     const normalized = line.replace(/\t/g, "  ");
 
     if (this.code) {
-      if (/^\s*```/.test(normalized)) {
+      const closing = normalized.match(/^\s*(`{3,}|~{3,})\s*$/);
+      if (closing && closing[1][0] === this.code.marker && closing[1].length >= this.code.length) {
         this.#codeClose();
         this.code = null;
         return;
@@ -136,9 +137,9 @@ export class MarkdownRenderer {
     }
     this.#flushTable();
 
-    const fence = normalized.match(/^\s*```\s*([\w+-]*)\s*$/);
+    const fence = normalized.match(/^\s*(`{3,}|~{3,})\s*([\w+-]*)\s*$/);
     if (fence) {
-      this.code = { language: (fence[1] || "text").toLowerCase(), lines: 0 };
+      this.code = { marker: fence[1][0], length: fence[1].length, language: (fence[2] || "text").toLowerCase(), lines: 0 };
       const label = this.code.language;
       this.#line(`${" ".repeat(this.indent)}${this.style.dim(`\u250c\u2500 ${label}`)}`);
       return;

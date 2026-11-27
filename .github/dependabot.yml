@@ -1,0 +1,22 @@
+version: 2
+
+# Free on GitHub Free. The project has no runtime dependencies by design, so
+# the updates that matter are the pinned GitHub Actions used by CI and release.
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      npm:
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns: ["*"]

@@ -77,5 +77,5 @@ test("the pinned versions match the client constants", () => {
   assert.equal(CONTRACT_VERSION, "1.0.0");
   assert.equal(SDK_VERSION, "1.0.0");
   assert.equal(EVENT_SCHEMA_VERSION, 1);
-  assert.equal(CONTRACT_SOURCE.commit, "808dfd3797f9b1d7647ebd14bd395806fc4ab9bd");
+  assert.equal(CONTRACT_SOURCE.commit, "7b7c9d7a88b8e483995ebe445f2bbbdd29050229");
 });

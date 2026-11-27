@@ -308,6 +308,10 @@ async function startWatch({
 }
 
 export async function submitCommand(runtime, positionals, { command = "work.submit" } = {}) {
+  const reasoning = runtime.flags.get("reasoning");
+  if (reasoning !== undefined && !["auto", "fast", "complex"].includes(reasoning)) {
+    throw new UsageError("--reasoning must be auto, fast, or complex");
+  }
   const { text, template } = await resolveObjective(runtime, positionals);
   const client = await runtime.getEngine();
   const agent = taskAgent(runtime);
@@ -327,6 +331,7 @@ export async function submitCommand(runtime, positionals, { command = "work.subm
   if (model) request.model = model;
   const budget = budgetFromFlags(runtime);
   if (budget) request.budget = budget;
+  if (reasoning !== undefined) request.reasoning = reasoning;
 
   const idempotencyKey = runtime.flags.get("idempotency-key") ?? newSubmissionKey();
   const submitted = await submitWork({

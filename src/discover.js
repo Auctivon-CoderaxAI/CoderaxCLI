@@ -1,4 +1,4 @@
-import { CoderaxError, request } from "./client.js";
+import { CoderaxError, request } from "./legacy-client.js";
 
 /**
  * Candidate locations for the deployment's OpenAPI document. The CLI resolves

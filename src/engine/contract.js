@@ -22,9 +22,9 @@ export const SDK_VERSION = "1.0.0";
  */
 export const CONTRACT_SOURCE = Object.freeze({
   repository: "Auctivon-CoderaxAI/Coderax-WorkflowEngine",
-  commit: "808dfd3797f9b1d7647ebd14bd395806fc4ab9bd",
+  commit: "7b7c9d7a88b8e483995ebe445f2bbbdd29050229",
   document: "openapi.json",
-  openapiSha256: "4be54dc95fe8b9c00d3521e8e289807716a928bc77c61cc173401303a048cf93",
+  openapiSha256: "66add22a0d38405e9aaa49a62a9e463648df00457ce0b0080e3cca240c9736f4", // gitleaks:allow — published OpenAPI SHA-256 digest
 });
 
 export const AGENT_IDS = Object.freeze(["coderax", "opencode", "freebuff"]);
@@ -338,7 +338,7 @@ export function assertTaskStatus(value, path = "task") {
   object(value, path, [
     "taskId", "conversationId", "state", "agent", "mode", "generation",
     "createdAt", "updatedAt", "cancelRequested", "steps",
-  ], ["model", "leaseExpiresAt", "result", "usage", "failure"]);
+  ], ["model", "leaseExpiresAt", "result", "usage", "failure", "reasoning"]);
   identifier(value.taskId, `${path}.taskId`);
   identifier(value.conversationId, `${path}.conversationId`);
   oneOf(value.state, TASK_STATES, `${path}.state`);
@@ -350,14 +350,24 @@ export function assertTaskStatus(value, path = "task") {
   iso(value.updatedAt, `${path}.updatedAt`);
   optional(value.leaseExpiresAt, `${path}.leaseExpiresAt`, iso);
   boolean(value.cancelRequested, `${path}.cancelRequested`);
+  optional(value.reasoning, `${path}.reasoning`, (v, p) => oneOf(v, ["fast", "complex"], p));
   array(value.steps, `${path}.steps`, (entry, entryPath) => {
-    object(entry, entryPath, ["id", "title", "state"]);
+    object(entry, entryPath, ["id", "title", "state"], ["dependsOn", "attempts"]);
     string(entry.id, `${entryPath}.id`, { min: 1, max: 80 });
     string(entry.title, `${entryPath}.title`, { max: 200 });
     oneOf(entry.state, TASK_STATES, `${entryPath}.state`);
+    optional(entry.dependsOn, `${entryPath}.dependsOn`, (v, p) =>
+      array(v, p, (id, item) => string(id, item, { min: 1, max: 80 }), { max: 64 }));
+    optional(entry.attempts, `${entryPath}.attempts`, (v, p) => integer(v, p, { min: 0 }));
   });
   optional(value.result, `${path}.result`, (entry, entryPath) => {
-    object(entry, entryPath, ["artifacts"], ["summary"]);
+    object(entry, entryPath, ["artifacts"], ["summary", "verification"]);
+    optional(entry.verification, `${entryPath}.verification`, (v, p) => {
+      object(v, p, ["passed", "reason", "evidence"]);
+      boolean(v.passed, `${p}.passed`);
+      string(v.reason, `${p}.reason`, { max: 1000 });
+      array(v.evidence, `${p}.evidence`, (item, itemPath) => string(item, itemPath, { max: 500 }), { max: 20 });
+    });
     optional(entry.summary, `${entryPath}.summary`, (v, p) => string(v, p, { max: 20_000 }));
     array(entry.artifacts, `${entryPath}.artifacts`, (artifact, artifactPath) => {
       object(artifact, artifactPath, ["path"], ["bytes", "digest"]);

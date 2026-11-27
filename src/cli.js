@@ -62,6 +62,9 @@ Usage:
   coderax completion bash|zsh|fish
   coderax update
 
+  coderax compat | uninstall | cleanup
+  coderax legacy <command>         Compatibility commands for older deployments
+
   Deployment surface (OpenAPI discovery):
   coderax deploy health|openapi|agents|models|call
   coderax health                   Alias for 'coderax engine health'
@@ -103,7 +106,7 @@ Exit codes:
   9 submission uncertain  10 conflict/busy   130 cancelled
 
 Security:
-  The owner token is stored in the operating system credential store, never in
+  Owner tokens are stored in the operating system credential store, never in
   config.json. Provider keys are never read, printed or inherited by a child
   process. Remote URLs must use HTTPS. The CLI never enables anonymous access.
 `;
@@ -120,7 +123,7 @@ const VALUE_FLAGS = new Set([
   "base-url", "engine-url", "token", "timeout", "config", "state", "model", "agent",
   "conversation", "template", "after", "generation", "reason", "request", "limit",
   "mode", "budget-requests", "budget-input", "budget-output", "idempotency-key",
-  "objective", "message", "max-reconnects", "task", "url", "data", "endpoint",
+  "objective", "reasoning", "message", "max-reconnects", "task", "url", "data", "endpoint",
   "chat-path", "refresh-command", "credential-store", "theme", "output",
 ]);
 
@@ -438,10 +441,20 @@ export async function runCli(argv, options = {}) {
   let command = null;
   let signals = null;
   try {
+    // Select compatibility mode explicitly; never fall back after an engine error.
+    if (argv[0] === "legacy" || ["compat", "uninstall", "cleanup"].includes(argv[0])) {
+      const { runCli: runLegacyCli } = await import("./legacy-cli.js");
+      return await runLegacyCli(argv[0] === "legacy" ? argv.slice(1) : argv, options);
+    }
     const { flags, positionals } = parseArgv(argv);
 
     if (flags.has("help") || positionals[0] === "help") {
       (options.stdout ?? ((text) => process.stdout.write(text)))(USAGE);
+      return EXIT.OK;
+    }
+    if (positionals[0] === "version" && flags.has("json")) {
+      const { collectVersionInfo } = await import("./diagnostics.js");
+      (options.stdout ?? ((text) => process.stdout.write(text)))(JSON.stringify(collectVersionInfo({ env: options.env }), null, 2) + "\n");
       return EXIT.OK;
     }
     if (flags.has("version") || positionals[0] === "version") {

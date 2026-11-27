@@ -12,7 +12,7 @@ export class ConfigError extends CoderaxError {
 
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
 export const DEFAULT_TIMEOUT_MS = 30_000;
-export const DEFAULT_CHAT_PATH = "/api/ask/agents";
+export const DEFAULT_CHAT_PATH = "/api/work/chat";
 export const DEFAULT_ENDPOINT = "agents";
 export const CREDENTIAL_STORES = Object.freeze(["auto", "keychain", "file", "memory"]);
 export const CONFIG_KEYS = Object.freeze({

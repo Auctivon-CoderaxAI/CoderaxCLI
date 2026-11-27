@@ -24,7 +24,7 @@ export function childEnvironment(env = process.env) {
     "TMPDIR", "TEMP", "TMP", "SystemRoot", "SystemDrive", "ComSpec", "PATHEXT",
     "WINDIR", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA",
     "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "DISPLAY",
-    "WAYLAND_DISPLAY", "SECURITYSESSIONID",
+    "WAYLAND_DISPLAY", "SECURITYSESSIONID", "CODERAX_DPAPI_PATH",
   ]);
   const output = {};
   for (const [name, value] of Object.entries(env)) {
@@ -83,12 +83,8 @@ export function runCommand(file, args, {
     });
     child.on("error", (error) => finish({ code: null, error, stdout, stderr }));
     child.on("close", (code) => finish({ code, error: null, stdout, stderr }));
-    if (input !== undefined) {
-      child.stdin?.on("error", () => {});
-      child.stdin?.end(input);
-    } else {
-      child.stdin?.end();
-    }
+    child.stdin?.on("error", () => {});
+    child.stdin?.end(input);
   });
 }
 

@@ -1,54 +1,88 @@
 {
   "name": "coderax-cli",
   "version": "1.0.0",
-  "private": true,
   "description": "Coderax terminal client: interactive Chat and Work, durable WorkflowEngine tasks, cloud engineering workflows, notifications and approvals",
   "type": "module",
   "bin": {
     "coderax": "src/cli.js"
   },
-  "engines": {
-    "node": ">=24"
+  "exports": {
+    ".": "./src/cli.js",
+    "./client": "./src/legacy-client.js",
+    "./compat": "./src/compat.js",
+    "./config": "./src/legacy-config.js",
+    "./credentials": "./src/legacy-credentials.js",
+    "./diagnostics": "./src/diagnostics.js",
+    "./discover": "./src/discover.js",
+    "./maintenance": "./src/maintenance.js",
+    "./product-registry": "./src/product-registry.js",
+    "./sdk": "./packages/workflow-sdk/src/index.js",
+    "./sdk/contract": "./packages/workflow-sdk/src/contract.js",
+    "./sdk/v1": "./packages/workflow-sdk/src/v1/index.js",
+    "./version": "./src/version.js",
+    "./package.json": "./package.json",
+    "./legacy-cli": "./src/legacy-cli.js",
+    "./legacy-config": "./src/legacy-config.js",
+    "./legacy-credentials": "./src/legacy-credentials.js"
   },
   "files": [
-    "src",
-    "contracts",
-    "docs",
+    "src/",
+    "packages/workflow-sdk/src/",
+    "packages/workflow-sdk/package.json",
+    "contracts/",
+    "docs/",
     "README.md",
-    "ARCHITECTURE.md",
     "SECURITY.md",
+    "ARCHITECTURE.md",
+    "BACKEND-DEFECTS.md",
     "CHANGELOG.md"
   ],
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "private": true,
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "repository": {
     "type": "git",
-    "url": "https://github.com/Auctivon-CoderaxAI/CoderaxCLI.git"
+    "url": "git+https://github.com/Auctivon-CoderaxAI/CoderaxCLI.git"
   },
-  "homepage": "https://github.com/Auctivon-CoderaxAI/CoderaxCLI",
   "bugs": {
     "url": "https://github.com/Auctivon-CoderaxAI/CoderaxCLI/issues"
   },
+  "homepage": "https://github.com/Auctivon-CoderaxAI/CoderaxCLI#readme",
   "keywords": [
     "coderax",
     "cli",
-    "terminal",
     "workflow-engine",
-    "coding-agent"
+    "agents"
   ],
+  "scripts": {
+    "start": "node src/cli.js --help",
+    "test": "node --test \"test/**/*.test.js\"",
+    "test:contract": "node scripts/check-contract.mjs",
+    "test:pty": "node --test test/pty.test.js",
+    "check": "node scripts/check.mjs",
+    "build": "node scripts/build-release.mjs",
+    "verify": "node scripts/verify-release.mjs",
+    "repro": "node scripts/repro-check.mjs",
+    "install-test": "node scripts/install-test.mjs",
+    "smoke:install": "node scripts/smoke-install.mjs",
+    "verify:cross-surface": "node scripts/verify-cross-surface.mjs",
+    "audit": "npm audit --audit-level=high",
+    "release:check": "npm run check && npm test && npm run build && npm run verify && npm run repro && npm run install-test",
+    "prepublishOnly": "npm run release:check",
+    "test:integration": "node --test \"test/integration/**/*.test.js\"",
+    "test:engine": "node --test \"test/integration/engine.test.js\"",
+    "pack:check": "node scripts/verify-pack.mjs",
+    "release:build": "node scripts/package-release.mjs",
+    "fixture:engine": "node test/fixtures/engine-server.js"
+  },
   "coderax": {
     "contractVersion": "1.0.0",
     "eventSchemaVersion": 1,
     "sdk": "@coderax/sdk@1.0.0"
-  },
-  "scripts": {
-    "start": "node src/cli.js",
-    "check": "node scripts/check.mjs",
-    "test": "node --test \"test/**/*.test.js\"",
-    "test:integration": "node --test \"test/integration/**/*.test.js\"",
-    "test:contract": "node scripts/check-contract.mjs",
-    "test:engine": "node --test \"test/integration/engine.test.js\"",
-    "verify": "npm run check && npm test && npm run test:contract && npm run pack:check",
-    "pack:check": "node scripts/verify-pack.mjs",
-    "release:build": "node scripts/package-release.mjs",
-    "fixture:engine": "node test/fixtures/engine-server.js"
   }
 }

@@ -1,3 +1,15 @@
-# The vendored WorkflowEngine contract is hashed byte-for-byte. Disable
-# end-of-line conversion so a Windows checkout cannot change its digest.
+# A CRLF shebang breaks `#!/usr/bin/env node` on POSIX, so source and shell
+# scripts are always LF in the repository and in release archives.
+* text=auto eol=lf
+*.sh text eol=lf
+*.mjs text eol=lf
+*.js text eol=lf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+*.png binary
+*.jpg binary
+*.gz binary
+*.zip binary
+
+# Preserve the vendored contract digest on all checkout platforms.
 contracts/** -text

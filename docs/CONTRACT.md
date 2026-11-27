@@ -1,5 +1,7 @@
 # WorkflowEngine contract
 
+Version: CLI `1.0.0`. The [deployment compatibility contract](DEPLOYMENT-CONTRACT.md) uses API major `1`.
+
 CLI `1.0.0` targets the authoritative Coderax WorkflowEngine API:
 
 - API prefix `/v1`

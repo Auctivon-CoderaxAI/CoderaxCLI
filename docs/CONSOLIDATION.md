@@ -14,7 +14,7 @@ backend capabilities exist.
 | Streaming | `SseTextNormalizer`, `TextAssembler`, `src/engine/stream.js` | Strict SSE, snapshot/delta dedupe, replay and reconnect |
 | Credentials | `src/credentials.js` | Native OS stores; `auto` fails closed |
 | Commands | `src/commands/registry.js` | One list for validation and shell completion |
-| Release | `scripts/package-release.mjs`, `scripts/verify-pack.mjs` | Existing release pipeline; no second candidate |
+| Release | `.github/workflows/release.yml` | Signed standalone release with backward compatible platform archives |
 
 Integration foundation: `feat/consolidated-cli`, branched from
 `feat/terminal-client-completion` at
@@ -24,10 +24,10 @@ reference is `feat/engine-thin-client-v1` at
 fixes are ported here rather than kept as a parallel client.
 
 The legacy `/api` gateway clients in PR #5, PR #6 and
-`feat/secure-owner-auth` are **not** merged. Their unique credentials and
-terminal features already exist on the foundation branch. Keeping a second
-transport would mean two execution authorities, which this consolidation
-forbids.
+`feat/secure-owner-auth` are preserved for compatibility with deployments that still serve those routes.
+Use the explicit `coderax legacy <command>` entrypoint; the default CLI never
+falls back to it after an engine error. Existing SDK exports remain available
+for library users.
 
 ## Contract policy
 
@@ -107,7 +107,7 @@ does not expose or simulate them.
 | Branch/PR | Disposition |
 | --- | --- |
 | PR #4, SSE fixture corrections | Preserve and review independently; its fixture intent is covered by the strict decoder tests here |
-| PR #5, owner-only cloud client | Superseded transport; do not merge as a second authority |
+| PR #5, owner-only cloud client | Compatibility commands use explicit legacy dispatch |
 | PR #6, release candidate | Superseded; its release work must be reconciled with the existing pipeline before any closure |
 | `feat/secure-owner-auth` | Credential patterns reviewed; native-store selection ported; not merged as a separate client |
 | `feat/workflow-engine-capabilities` | Useful 1.1.0 catalogue evidence; not final contract |

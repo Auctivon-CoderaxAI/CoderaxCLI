@@ -1,93 +1,172 @@
 name: release
 
+# Publishing happens only from a version tag or an explicit manual dispatch.
+# Pull requests never reach this workflow, so release credentials and the
+# contents: write permission are never exposed to untrusted code.
 on:
   push:
-    tags: ["v*"]
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to publish (vX.Y.Z)"
+        required: true
+        type: string
+      publish_npm:
+        description: "Also publish to npm (owner authorization required)"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  build:
-    name: build (${{ matrix.os }})
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - os: ubuntu-latest
-            platform: linux
-          - os: windows-latest
-            platform: windows
-          - os: macos-latest
-            platform: darwin
-    runs-on: ${{ matrix.os }}
+  release:
+    name: build and publish the GitHub Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release and upload assets
+      id-token: write # Sigstore keyless signing for provenance
     steps:
       - name: Check out source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
       - name: Set up Node
-        uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b # v4.0.3
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
-      - name: Verify the tag matches package.json
+          cache: npm
+      - name: Install from the lockfile
+        run: npm ci --ignore-scripts
+      - name: Resolve and validate the release tag
+        id: meta
         shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
-          node -e 'const p=require("./package.json"); if (process.env.GITHUB_REF_NAME !== `v${p.version}`) { console.error(`tag ${process.env.GITHUB_REF_NAME} does not match v${p.version}`); process.exit(1); }'
-      - name: Install locked tooling
-        run: npm ci
-      - name: Static checks
+          tag="${INPUT_TAG:-${GITHUB_REF_NAME}}"
+          case "$tag" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::invalid release tag: $tag"; exit 1 ;;
+          esac
+          version="$(node -p 'require("./package.json").version')"
+          if [ "$tag" != "v$version" ]; then
+            echo "::error::tag $tag does not match package.json version $version"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Releasing $tag"
+      - name: Syntax check
         run: npm run check
-      - name: Tests
+      - name: Unit and CLI tests
         run: npm test
-      - name: Build archives
+      - name: Build release artifacts
+        run: npm run build
+      - name: Verify artifacts, checksums, and install safety
+        run: npm run verify
+      - name: Reproducibility check
+        run: npm run repro
+      - name: Installation test
+        run: npm run install-test
+      - name: Include platform archives for the original installers
         shell: bash
         run: |
-          npm run release:build -- --platform "${{ matrix.platform }}" --arch x64
-          npm run release:build -- --platform "${{ matrix.platform }}" --arch arm64
-      - name: Upload release files
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-${{ matrix.platform }}
-          if-no-files-found: error
-          path: |
-            dist/*.tar.gz
-            dist/*.zip
-            dist/SHA256SUMS-*
-            dist/manifest-*.json
-
-  publish:
-    name: publish GitHub release
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          persist-credentials: false
-      - name: Download archives
-        uses: actions/download-artifact@v4
-        with:
-          path: release-assets
-          merge-multiple: true
-      - name: Combine checksums
-        shell: bash
+          set -euo pipefail
+          for platform in linux darwin windows; do
+            for arch in x64 arm64; do
+              npm run release:build -- --platform "$platform" --arch "$arch" --out dist/platform
+            done
+          done
+          mv dist/platform/*.tar.gz dist/platform/*.zip dist/
+          cat dist/platform/SHA256SUMS-* >> dist/SHA256SUMS
+          rm -r dist/platform
+          cp install.sh dist/install-platform.sh
+          cp install.ps1 dist/install-platform.ps1
+          (cd dist && sha256sum install-platform.sh install-platform.ps1 >> SHA256SUMS)
+          (cd dist && sha256sum -c SHA256SUMS)
+      # GitHub artifact attestations are public-repository-only on GitHub Free.
+      # Keyless Sigstore signing is free for private repositories and produces a
+      # portable bundle that ships beside each asset.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+      - name: Sign release assets with Sigstore
         run: |
-          cd release-assets
-          test -n "$(find . -maxdepth 1 -name '*.tar.gz' -print -quit)"
-          test -n "$(find . -maxdepth 1 -name '*.zip' -print -quit)"
-          sha256sum *.tar.gz *.zip | sort -k2 > SHA256SUMS
-          cat SHA256SUMS
-      - name: Publish release
+          set -euo pipefail
+          for f in dist/*; do
+            [ -f "$f" ] || continue
+            case "$f" in *.sigstore.json) continue ;; esac
+            cosign sign-blob --yes --bundle "${f}.sigstore.json" "$f"
+          done
+      - name: Verify the signed archive
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          cosign verify-blob \
+            --bundle "dist/coderax-cli-${VERSION}-standalone.tar.gz.sigstore.json" \
+            --certificate-identity-regexp "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/(tags|heads)/.*" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "dist/coderax-cli-${VERSION}-standalone.tar.gz"
+      - name: Publish the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        shell: bash
+          TAG: ${{ steps.meta.outputs.tag }}
         run: |
-          set -eu
-          TAG="$GITHUB_REF_NAME"
-          FILES=(release-assets/*.tar.gz release-assets/*.zip release-assets/SHA256SUMS install.sh install.ps1)
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "${FILES[@]}" --clobber
-          else
-            gh release create "$TAG" "${FILES[@]}" --verify-tag --generate-notes
+            echo "::error::release $TAG already exists; cut a new version instead of reusing a tag"
+            exit 1
           fi
+          gh release create "$TAG" dist/* \
+            --title "Coderax CLI $TAG" \
+            --notes-file dist/release-notes.md \
+            --verify-tag
+
+  npm:
+    name: publish to npm (requires authorization)
+    needs: release
+    # Requires an explicit manual dispatch and an owner-set repository variable.
+    # Configure npm-publish reviewers where supported. On private GitHub Free,
+    # keep NPM_PUBLISH_ENABLED unset until a replacement approval control exists.
+    # package.json is also "private": true until the owner authorizes
+    # publication, so even a misconfigured run is refused by npm.
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_npm == true && vars.NPM_PUBLISH_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    permissions:
+      contents: read
+      id-token: write # trusted publishing, no long-lived token
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node for publishing
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+      - name: Download the published assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          mkdir -p dist
+          gh release download "$TAG" --dir dist \
+            --pattern "coderax-cli-*.tgz" \
+            --pattern "SHA256SUMS"
+      - name: Verify the downloaded tarball against the release checksums
+        run: |
+          cd dist
+          sha256sum -c SHA256SUMS --ignore-missing
+      - name: Publish to npm
+        run: |
+          version="$(node -p 'require("./package.json").version')"
+          # npm provenance requires a public source repository; private Free cannot use it.
+          npm publish "./dist/coderax-cli-${version}.tgz" --access public

@@ -269,9 +269,11 @@ the `coderax` bin, checks the dependency tree and rejects test/secrets files.
 writes `SHA256SUMS-<platform>-<arch>` and a manifest.
 
 GitHub Actions runs the suite on Ubuntu, Windows and macOS using standard
-GitHub-hosted runners. Tagged releases build archives on each OS and attach them,
-`SHA256SUMS` and the installers to a GitHub release. No external registry is
-used.
+GitHub-hosted runners. Tagged releases attach signed standalone and platform archives, installers,
+and checksums to the GitHub release. Use `install-platform.sh` or
+`install-platform.ps1` for the original platform archive layout; the release
+assets named `install.sh` and `install.ps1` use the standalone layout. npm
+publication requires separate owner authorization.
 
 ## Development
 
@@ -303,3 +305,7 @@ with an in-memory store. It is test-only; the CLI has no local engine mode.
 - The deployment/OpenAPI surface (`coderax deploy ...`, `coderax call`,
   `products`, `cloud`, `projects`) is retained for legacy Coderax deployments
   and is separate from the WorkflowEngine commands.
+
+## Older deployments
+
+Use `coderax legacy <command>` for the [deployment compatibility contract](docs/DEPLOYMENT-CONTRACT.md). Use `coderax compat` to check a deployment and `coderax uninstall` to remove an installed copy. The default Chat and Work commands use WorkflowEngine `/v1`.
