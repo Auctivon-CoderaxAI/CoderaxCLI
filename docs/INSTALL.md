@@ -76,7 +76,7 @@ without either verified form of evidence stop installation.
 
 <!-- coderabbit-ai-generated:v1 -->
 
-<!-- coderabbit-ai-generated-section:v1:cc77f4485f44777508275f8700275f99cc09da51a30205b575c31748c8a6e1cd -->
+<!-- coderabbit-ai-generated-section:v1:887804190d1fc74f56fab46e0f10b25df55593b9d2b0677b39bd9e3c47a43aeb -->
 
 ```sh
 (
@@ -85,7 +85,7 @@ without either verified form of evidence stop installation.
   mkdir -p release
   gh release download "v$version" \
     --repo Auctivon-CoderaxAI/CoderaxCLI \
-    --dir release
+    --dir release --clobber
 
   cd release
   installer_checksum="$(grep '  install.sh$' SHA256SUMS)"
