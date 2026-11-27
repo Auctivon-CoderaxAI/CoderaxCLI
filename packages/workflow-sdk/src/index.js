@@ -22,3 +22,9 @@ export {
   responseError,
 } from "./http.js";
 export { WorkflowClient } from "./client.js";
+
+/**
+ * The authoritative `/v1` surface. Import from here, never from a copy: a
+ * second mirror is a second contract.
+ */
+export * as v1 from "./v1/index.js";

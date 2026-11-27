@@ -148,6 +148,51 @@ instead of approving automatically. An approval request sends the exact
 | `7` | contract violation, including an incomplete stream |
 | `130` | cancelled or detached locally |
 
+## Interactive terminal transport (provisional)
+
+The terminal consumes a facade with a deliberately small surface:
+
+```js
+getCapabilities() -> {
+  contractVersion, contractVerified, stream, work, tools, attachments,
+  conversations, permissions, verifiedPermissions, models, agents,
+  modelSelection, agentSelection
+}
+streamMessage({ mode, text, model, agent, conversationId, attachments,
+                signal, onEvent })
+respondPermission(payload)
+listModels(), listAgents(), listConversations(), close()
+```
+
+Events are `delta`, `replace`, `final`, `tool`, `progress`, `permission` and
+`conversation`. The presentation layer does not route models or run workflows;
+it only renders these events and passes selections through.
+
+The shared `packages/workflow-sdk` transport is the default for both the terminal
+and non-interactive commands. `CODERAX_SDK=legacy` selects the bounded
+compatibility adapter; it is not the default. `CODERAX_SDK=canonical` requires
+`contractVersion` `coderax-sdk/1`, `contractVerified: true` and streaming
+support; a mismatch exits with `SDK_CONTRACT_MISMATCH` rather than falling back
+silently. `CODERAX_SDK=auto` falls back to legacy until that handshake succeeds.
+This contract is provisional until the gateway and WorkflowEngine owners verify
+it end to end.
+
+## Permission approval (provisional)
+
+A permission request is actionable only when all of these are present:
+
+- `serverIssued: true`, received on the authenticated SSE/SDK channel
+- `requestId` issued by the server
+- `executionId` identifying the engine execution
+- `action` from the allowed set (`read_file`, `write_file`, `delete_file`,
+  `list_directory`, `run_command`, `network`, `send_files`, `use_tool`)
+- `resource` that canonicalises to an absolute path, URL or exact command
+- optional `expiresAt` and `resourceHash`; a supplied hash must match
+
+The response is `{ requestId, executionId, action, resourceHash, decision,
+  decidedAt }`. Session approval applies to that exact tuple only. The legacy
+  transport declares `permissions: false` and fails closed.
+
 ## Tests that pin this contract
 
 `test/contract.test.js` stubs the deployment and asserts, among others:
@@ -164,3 +209,47 @@ instead of approving automatically. An approval request sends the exact
   `waiting_approval` fails closed;
 - expired credentials exit `3` without retrying;
 - an unadvertised capability exits `6` without calling the guessed route.
+
+## Canonical WorkflowEngine `/v1` contract
+
+The authoritative engine contract is
+`Auctivon-CoderaxAI/Coderax-WorkflowEngine`. Its generated `openapi.json` is
+vendored at `contracts/workflow-engine-1.0.0.openapi.json` with provenance in
+[`contracts/PROVENANCE.md`](../contracts/PROVENANCE.md). The implementation
+lives inside the one shared SDK at `packages/workflow-sdk/src/v1/`; there is no
+second mirror in `src/`.
+
+| Concern | Behaviour |
+| --- | --- |
+| Version | Accepts any server reporting major `1`; a newer minor records `CONTRACT_MINOR_NEWER`; another major is `CONTRACT_UNSUPPORTED`. |
+| Validation | Every response and execution event is checked with strict, exact-key rules. A drift is `CONTRACT_VIOLATION`, never a plausible wrong value. |
+| Chat | `POST /v1/chat` accepts a JSON `ChatReply` or an SSE reply that ends in one; an SSE reply without a final `ChatReply` is `STREAM_INCOMPLETE`. |
+| Events | `GET /v1/work/{taskId}/events?after=<seq>` plus `Last-Event-ID`. A duplicate `eventId` is dropped; `seq <= last` is a replay; a gap reconnects from the cursor; more than three gaps is `EVENT_GAP`. |
+| Task state | `GET /v1/work/{taskId}` is authoritative. A closed stream is never read as completion. |
+| Submission | One idempotency key per submission, written to a private ledger before transmission. An ambiguous outcome is `SUBMISSION_UNCERTAIN` (exit `9`) and is never retried automatically. |
+| Approvals | Only a server-issued `approval.required` event produces a prompt; a decision is sent to `POST /v1/work/{taskId}/permissions` with its `requestId`. |
+| Attachments | Refused with `CAPABILITY_UNAVAILABLE`; `/v1` publishes no upload operation. |
+
+`CODERAX_SDK=v1` selects this transport and fails closed. `workflow` and
+`legacy` remain explicit migration modes; `auto` and `canonical` are unchanged.
+
+Exit codes:
+
+| Code | Meaning |
+| --- | --- |
+| 0 | success |
+| 1 | unclassified failure |
+| 2 | usage |
+| 3 | unauthenticated / forbidden |
+| 4 | network or timeout |
+| 5 | not found |
+| 6 | unavailable / unsupported capability |
+| 7 | contract violation |
+| 8 | approval required and not granted |
+| 9 | submission uncertain (do not blindly resubmit) |
+| 10 | conflict or busy |
+| 130 | cancelled |
+
+Engine-side defects found while implementing this contract are recorded in
+[`BACKEND-DEFECTS.md`](../BACKEND-DEFECTS.md) (W1 chat content type, W2 Work
+idempotency).

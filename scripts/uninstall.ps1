@@ -23,6 +23,35 @@ if ([string]::IsNullOrWhiteSpace($Prefix) -or $Prefix -eq "/" -or $Prefix -eq $e
 $launcher = Join-Path $BinDir "coderax.cmd"
 $config = if ($env:CODERAX_CONFIG) { $env:CODERAX_CONFIG } else { Join-Path $env:USERPROFILE ".coderax\config.json" }
 
+# install.ps1 keeps the batch file ASCII and stores the entrypoint
+# base64-encoded, so the install path never appears verbatim in it.
+function Test-UnderPrefix([string]$Candidate, [string]$Root) {
+  if ([string]::IsNullOrWhiteSpace($Candidate) -or [string]::IsNullOrWhiteSpace($Root)) { return $false }
+  $trimmedRoot = $Root.TrimEnd('\', '/')
+  $trimmedCandidate = $Candidate.TrimEnd('\', '/')
+  if ($trimmedCandidate.Equals($trimmedRoot, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+  # Compare on a separator boundary so a sibling "<root>-other" cannot match.
+  foreach ($separator in @('\', '/')) {
+    if ($trimmedCandidate.StartsWith($trimmedRoot + $separator, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+  }
+  return $false
+}
+
+function Test-LauncherBelongsToPrefix([string]$LauncherPath, [string]$Root) {
+  $content = Get-Content -Raw -LiteralPath $LauncherPath
+  if ([string]::IsNullOrEmpty($content)) { return $false }
+  if ($content.IndexOf($Root, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true }
+  foreach ($match in [regex]::Matches($content, '[A-Za-z0-9+/]{24,}={0,2}')) {
+    try {
+      $decoded = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($match.Value))
+    } catch {
+      continue
+    }
+    if (Test-UnderPrefix $decoded $Root) { return $true }
+  }
+  return $false
+}
+
 $targets = @()
 if ($Version) {
   $candidate = Join-Path $Prefix $Version
@@ -45,26 +74,13 @@ foreach ($target in $targets) {
   Remove-Item -LiteralPath $target -Recurse -Force
 }
 
-# Only remove the launcher when it came from this prefix.
+# Only remove the launcher when it came from this prefix. The Windows shim
+# keeps its entrypoint base64-encoded so paths with spaces and Unicode survive
+# cmd.exe, so inspect both the literal text and the embedded payload.
 if (Test-Path -LiteralPath $launcher) {
-  $content = Get-Content -Raw -Encoding UTF8 -LiteralPath $launcher
-  $target = $null
-  # Read the launcher's target as data; never execute the launcher to find it.
-  if ($content -match '(?m)^node -e "const p = Buffer\.from\(''(?<path>[A-Za-z0-9+/=]+)'', ''base64''\)\.toString\(''utf8''\); ') {
-    try {
-      $target = [System.Text.UTF8Encoding]::new($false, $true).GetString([Convert]::FromBase64String($Matches['path']))
-    } catch {
-      # An invalid path encoding does not establish ownership.
-    }
-  } elseif ($content -match '(?m)^call "(?<path>[^"\r\n]+)" %\*\r?$') {
-    # Older installers called the versioned batch file directly.
-    $target = $Matches['path']
-  }
-
   $prefixPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Prefix)
-  $escapedPrefix = [regex]::Escape($prefixPath.TrimEnd([char[]]'\/'))
-  # Require a versioned entry point inside this prefix, including the path separator.
-  if ($target -match "\A$escapedPrefix[\\/]\d+\.\d+\.\d+(?:[-.][0-9A-Za-z.]+)?[\\/](?:src[\\/]cli\.js|bin[\\/]coderax\.cmd)\z") {
+  if (Test-LauncherBelongsToPrefix $launcher $prefixPath) {
+
     Remove-Item -LiteralPath $launcher -Force
   } else {
     Write-Warning "leaving $launcher (it does not reference $Prefix)"
