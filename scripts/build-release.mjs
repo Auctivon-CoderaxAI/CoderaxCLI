@@ -13,7 +13,7 @@
  *   coderax-cli-<version>-standalone.zip       Windows standalone tree
  *   release-manifest.json                      versions, hashes, file inventory
  *   SHA256SUMS                                 checksums for every asset
- *   sbom.spdx.json                             zero-dependency SPDX SBOM
+ *   sbom.spdx.json                             SPDX SBOM
  *   release-notes.md                           notes for the GitHub Release
  *   install.sh / install.ps1                   installers (also release assets)
  *   uninstall.sh / uninstall.ps1               uninstallers
@@ -25,7 +25,12 @@ import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createTarGz, createZip } from "./lib/archive.mjs";
-import { NODE_REQUIREMENT, PACKAGE_NAME, SUPPORTED_ENGINE_RANGE, VERSION as PACKAGE_VERSION } from "../src/version.js";
+import {
+  COMPATIBILITY_BASIS,
+  SUPPORTED_API_VERSION,
+  SUPPORTED_DEPLOYMENT_RANGE,
+} from "../src/compat.js";
+import { NODE_REQUIREMENT, PACKAGE_NAME, VERSION as PACKAGE_VERSION } from "../src/version.js";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const pkg = JSON.parse(await readFile(join(ROOT, "package.json"), "utf8"));
@@ -41,17 +46,15 @@ function option(name, fallback) {
 }
 
 const OUT = resolve(ROOT, option("out", "dist"));
-// `--version` builds a rehearsal artifact of a future release (used by the
-// upgrade/rollback test). The shipped version always comes from package.json.
+const SOURCE_DATE_EPOCH = Number(process.env.SOURCE_DATE_EPOCH ?? DEFAULT_SOURCE_DATE_EPOCH);
+if (!Number.isInteger(SOURCE_DATE_EPOCH) || SOURCE_DATE_EPOCH <= 0) {
+  throw new Error("SOURCE_DATE_EPOCH must be a positive integer");
+}
 const OVERRIDE_VERSION = option("version", null);
 if (OVERRIDE_VERSION !== null && !/^\d+\.\d+\.\d+([-.][0-9A-Za-z.]+)?$/.test(OVERRIDE_VERSION)) {
   throw new Error("--version must be a semantic version such as 1.2.3");
 }
 const VERSION = OVERRIDE_VERSION ?? PACKAGE_VERSION;
-const SOURCE_DATE_EPOCH = Number(process.env.SOURCE_DATE_EPOCH ?? DEFAULT_SOURCE_DATE_EPOCH);
-if (!Number.isInteger(SOURCE_DATE_EPOCH) || SOURCE_DATE_EPOCH <= 0) {
-  throw new Error("SOURCE_DATE_EPOCH must be a positive integer");
-}
 const MTIME = SOURCE_DATE_EPOCH * 1000;
 
 const BASE = `${PACKAGE_NAME}-${VERSION}`;
@@ -68,13 +71,13 @@ function portable(path) {
   return path.split(sep).join("/");
 }
 
-async function walk(directory) {
+async function walk(directory, bundled = false) {
   const entries = await readdir(directory, { withFileTypes: true });
   const files = [];
   for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-    if (["node_modules", ".git", "dist", "coverage"].includes(entry.name)) continue;
+    if ([".git", "coverage"].includes(entry.name) || (!bundled && ["dist", "node_modules"].includes(entry.name))) continue;
     const full = join(directory, entry.name);
-    if (entry.isDirectory()) files.push(...(await walk(full)));
+    if (entry.isDirectory()) files.push(...(await walk(full, bundled)));
     else if (entry.isFile()) files.push(full);
   }
   return files;
@@ -170,6 +173,18 @@ async function releaseNotes() {
   return `${lines.slice(start, end === -1 ? undefined : end).join("\n").trim()}\n`;
 }
 
+const lock = JSON.parse(await readFile(join(ROOT, "package-lock.json"), "utf8"));
+const runtimePackages = pkg.bundleDependencies.map((name, index) => {
+  const { version, resolved } = lock.packages[`node_modules/${name}`];
+  return {
+    name,
+    versionInfo: version,
+    SPDXID: `SPDXRef-Runtime-${index}`,
+    downloadLocation: resolved.startsWith("https:") ? resolved : "NOASSERTION",
+    filesAnalyzed: false,
+  };
+});
+
 function sbom() {
   return {
     spdxVersion: "SPDX-2.3",
@@ -182,7 +197,7 @@ function sbom() {
       creators: ["Tool: coderax-cli-build-release"],
     },
     comment:
-      "Coderax CLI bundles its pinned runtime dependencies and never installs Ollama, containers, local AI runtimes, databases, or background services.",
+      "Coderax CLI bundles its pinned capability SDK and schema validator. It never installs Ollama, containers, local AI runtimes, databases, or background services.",
     packages: [
       {
         name: PACKAGE_NAME,
@@ -201,8 +216,14 @@ function sbom() {
           },
         ],
       },
+      ...runtimePackages,
     ],
     relationships: [
+      ...runtimePackages.map((entry) => ({
+        spdxElementId: "SPDXRef-Package",
+        relationshipType: "DEPENDS_ON",
+        relatedSpdxElement: entry.SPDXID,
+      })),
       {
         spdxElementId: "SPDXRef-DOCUMENT",
         relationshipType: "DESCRIBES",
@@ -224,12 +245,6 @@ function commit() {
 if (pkg.version !== PACKAGE_VERSION) throw new Error("package.json and src/version.js disagree about the version");
 if (pkg.name !== PACKAGE_NAME) throw new Error("package name mismatch between package.json and src/version.js");
 
-// An override changes the version inside the artifact too, including the
-// manifest that `src/version.js` reads, so the installed launcher reports it.
-const versionOverride = OVERRIDE_VERSION === null
-  ? new Map()
-  : new Map([["package.json", `${JSON.stringify({ ...pkg, version: VERSION }, null, 2)}\n`]]);
-
 await rm(OUT, { recursive: true, force: true });
 await mkdir(OUT, { recursive: true });
 
@@ -239,16 +254,40 @@ for (const script of scriptFiles) {
   if (!existsSync(join(ROOT, "scripts", script))) throw new Error(`missing installer: scripts/${script}`);
 }
 
-const npmEntries = npmOrder(await entriesFrom("package/", packageList, versionOverride));
-
-// The standalone tree runs without npm, so it carries the pinned runtime
-// dependencies (the canonical SDK, its contracts and zod) inside the archive.
-const runtimeModules = await walk(join(ROOT, "node_modules"));
-const standaloneFiles = [
-  ...packageList,
-  ...scriptFiles,
-  ...runtimeModules.map((file) => portable(relative(ROOT, file))),
+// The installers must be able to extract an archive without trusting the host
+// tar/zip implementation, and without downloading a second helper. Their safe
+// extractor is embedded at build time as base64; verify-release decodes it and
+// compares it with these sources so the shipped copy cannot drift.
+const EXTRACTOR_SOURCES = [
+  ["scripts/lib/archive.mjs", "@CODERAX_ARCHIVE_B64@"],
+  ["scripts/lib/safe-extract.mjs", "@CODERAX_EXTRACT_B64@"],
 ];
+
+async function injectExtractors(script) {
+  let text = await readFile(join(ROOT, "scripts", script), "utf8");
+  for (const [source, marker] of EXTRACTOR_SOURCES) {
+    const body = await readFile(join(ROOT, source));
+    text = text.split(marker).join(body.toString("base64"));
+  }
+  return Buffer.from(text, "utf8");
+}
+
+const installerScripts = new Map();
+for (const script of scriptFiles) {
+  installerScripts.set(
+    script,
+    script.startsWith("install") ? await injectExtractors(script) : await readFile(join(ROOT, "scripts", script)),
+  );
+}
+
+const versionOverride = new Map([["package.json", JSON.stringify({ ...pkg, version: VERSION }, null, 2) + "\n"]]);
+const runtimeFiles = (await Promise.all(
+  pkg.bundleDependencies.map((name) => walk(join(ROOT, "node_modules", name), true)),
+)).flat().map((file) => portable(relative(ROOT, file)));
+const bundledFiles = [...packageList, ...runtimeFiles];
+const npmEntries = npmOrder(await entriesFrom("package/", bundledFiles, versionOverride));
+
+const standaloneFiles = [...bundledFiles, ...scriptFiles];
 const overrides = new Map([
   ...versionOverride,
   ["bin/coderax", POSIX_LAUNCHER],
@@ -256,7 +295,7 @@ const overrides = new Map([
   ...scriptFiles.map((file) => [file, null]),
 ]);
 for (const file of scriptFiles) {
-  overrides.set(file, await readFile(join(ROOT, "scripts", file)));
+  overrides.set(file, installerScripts.get(file));
 }
 // bin/* are launchers, not repository files; add them explicitly.
 async function standaloneEntries() {
@@ -292,7 +331,7 @@ const artifacts = [
 for (const artifact of artifacts) await writeFile(join(OUT, artifact.name), artifact.data);
 await writeFile(join(OUT, "release-notes.md"), await releaseNotes());
 for (const script of scriptFiles) {
-  await writeFile(join(OUT, script), await readFile(join(ROOT, "scripts", script)));
+  await writeFile(join(OUT, script), installerScripts.get(script));
 }
 const sbomBody = `${JSON.stringify(sbom(), null, 2)}\n`;
 await writeFile(join(OUT, "sbom.spdx.json"), sbomBody);
@@ -304,7 +343,9 @@ const manifest = {
   sourceDate: new Date(MTIME).toISOString(),
   sourceDateEpoch: SOURCE_DATE_EPOCH,
   node: NODE_REQUIREMENT,
-  supportedWorkflowEngine: SUPPORTED_ENGINE_RANGE,
+  supportedApiVersion: `${SUPPORTED_API_VERSION}.x`,
+  supportedDeploymentRange: SUPPORTED_DEPLOYMENT_RANGE,
+  compatibilityBasis: COMPATIBILITY_BASIS,
   commit: commit(),
   reproducible: "Run `npm run repro`; identical source and SOURCE_DATE_EPOCH produce identical artifact hashes.",
   artifacts: artifacts.map((artifact) => ({
@@ -336,9 +377,6 @@ for (const name of checksumTargets) {
 await writeFile(join(OUT, "SHA256SUMS"), `${checksumLines.join("\n")}\n`);
 
 console.log(`coderax-cli ${VERSION} release artifacts -> ${portable(relative(ROOT, OUT)) || "."}`);
-if (OVERRIDE_VERSION !== null) {
-  console.log(`  note: rehearsal artifact for ${OVERRIDE_VERSION}; package.json still declares ${PACKAGE_VERSION}`);
-}
 for (const artifact of artifacts) {
   console.log(`  ${artifact.name.padEnd(46)} ${String(artifact.data.length).padStart(9)} bytes  ${sha256(artifact.data)}`);
 }

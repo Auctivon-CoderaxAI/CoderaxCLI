@@ -13,7 +13,12 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 import { readTar, readZip } from "./lib/archive.mjs";
-import { NODE_REQUIREMENT, PACKAGE_NAME, SUPPORTED_ENGINE_RANGE, VERSION } from "../src/version.js";
+import {
+  COMPATIBILITY_BASIS,
+  SUPPORTED_API_VERSION,
+  SUPPORTED_DEPLOYMENT_RANGE,
+} from "../src/compat.js";
+import { NODE_REQUIREMENT, PACKAGE_NAME, VERSION } from "../src/version.js";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const DIST = resolve(ROOT, process.argv.includes("--out")
@@ -50,8 +55,16 @@ check(manifest.name === PACKAGE_NAME, "manifest name does not match package.json
 check(manifest.version === VERSION, "manifest version does not match package.json");
 check(manifest.node === NODE_REQUIREMENT, "manifest node requirement does not match package.json");
 check(
-  manifest.supportedWorkflowEngine === SUPPORTED_ENGINE_RANGE,
-  "manifest WorkflowEngine range does not match src/version.js",
+  manifest.supportedApiVersion === `${SUPPORTED_API_VERSION}.x`,
+  "manifest API version does not match the shared SDK",
+);
+check(
+  manifest.supportedDeploymentRange === SUPPORTED_DEPLOYMENT_RANGE,
+  "manifest deployment range does not match src/compat.js",
+);
+check(
+  manifest.compatibilityBasis === COMPATIBILITY_BASIS,
+  "manifest compatibility basis does not match src/compat.js",
 );
 
 // --- checksums -------------------------------------------------------------
@@ -106,7 +119,8 @@ const npmEntries = readTar(gunzipSync(await readFile(join(DIST, npmTarballName))
 for (const path of npmEntries.keys()) {
   check(path.startsWith("package/"), `npm tarball entry outside package/: ${path}`);
   check(!path.includes(".."), `npm tarball entry escapes its root: ${path}`);
-  check(!/(^|\/)(node_modules|\.git|dist|coverage)\//.test(path), `npm tarball contains a forbidden path: ${path}`);
+  const pinnedModule = /^(?:package|[^/]+)\/node_modules\/(?:@coderax\/sdk|zod)\//.test(path);
+  check(pinnedModule || !/(^|\/)(node_modules|\.git|dist|coverage)\//.test(path), `npm tarball contains a forbidden path: ${path}`);
   check(!/(^|\/)\.env(\.|$)/.test(path), `npm tarball contains an environment file: ${path}`);
   check(!/\.log$/.test(path), `npm tarball contains a log file: ${path}`);
 }
@@ -118,45 +132,55 @@ if (npmCli) {
 }
 for (const file of [
   "config.js",
+  "credentials.js",
   "client.js",
   "discover.js",
   "product-commands.js",
   "product-registry.js",
+  "session.js",
+  "render.js",
+  "approval.js",
+  "workflow-commands.js",
   "version.js",
-  "auth.js",
-  "credentials.js",
-  "secure-store.js",
-  "engine.js",
-  "interactive.js",
-  "completion.js",
-  "capability-catalog.js",
-  "capability-commands.js",
-  "capability-registry.js",
+  "compat.js",
+  "diagnostics.js",
+  "maintenance.js",
 ]) {
   check(npmEntries.has(`package/src/${file}`), `npm tarball is missing src/${file}`);
 }
+// The shared SDK is the authoritative client contract, so it must ship.
+for (const file of ["index.js", "contract.js", "client.js", "http.js", "sse.js", "errors.js", "redact.js"]) {
+  check(
+    npmEntries.has(`package/packages/workflow-sdk/src/${file}`),
+    `npm tarball is missing packages/workflow-sdk/src/${file}`,
+  );
+}
+check(
+  npmEntries.has("package/packages/workflow-sdk/package.json"),
+  "npm tarball is missing packages/workflow-sdk/package.json",
+);
 check(npmEntries.has("package/README.md"), "npm tarball is missing README.md");
 
-// The CLI is an access client, not an installer: shipping code that starts
-// runtimes or services behind the operator's back is forbidden. The only
-// exception is the OS credential store, which invokes the platform's own
-// security tool and passes every secret over stdin, never through argv.
-const PROCESS_HELPERS = new Set(["package/src/credentials.js", "package/src/secure-store.js"]);
+// The CLI is an access client, not an installer: shipping code that spawns
+// processes would make it possible to start runtimes or services behind the
+// operator's back. Three modules have a bounded, documented exception:
+// credentials.js drives a fixed OS credential helper (never a caller-supplied
+// command), workflow-commands.js runs a command only when the operator
+// explicitly passes --notify-command, and secure-store.js invokes the fixed
+// platform ACL helper for private files. Every other module must stay
+// spawn-free.
+const SPAWN_ALLOWLIST = new Map([
+  ["package/src/credentials.js", /"secret-tool"|"powershell\.exe"|"cmd\.exe"|"where"|"\/bin\/sh"/],
+  ["package/src/workflow-commands.js", /notify-command/],
+  ["package/src/secure-store.js", /"powershell\.exe"|"whoami"|"ls"/],
+]);
 for (const [path, entry] of npmEntries) {
   if (!path.endsWith(".js")) continue;
-  if (PROCESS_HELPERS.has(path)) {
-    if (path.endsWith("credentials.js")) {
-      check(
-        entry.data.toString("utf8").includes("childEnvironment"),
-        `${path} must scrub the session token from helper environments`,
-      );
-    }
-    continue;
-  }
-  check(
-    !entry.data.toString("utf8").includes("child_process"),
-    `${path} must not spawn processes`,
-  );
+  const source = entry.data.toString("utf8");
+  if (!source.includes("child_process")) continue;
+  const allowed = SPAWN_ALLOWLIST.get(path);
+  check(allowed !== undefined, `${path} must not spawn processes`);
+  if (allowed !== undefined) check(allowed.test(source), `${path} spawns without its documented guard`);
 }
 
 // --- standalone tree -------------------------------------------------------
@@ -166,9 +190,8 @@ const zipEntries = readZip(await readFile(join(DIST, standaloneZipName)));
 for (const path of tgzEntries.keys()) {
   check(path.startsWith(root), `standalone tarball entry outside ${root}: ${path}`);
   check(!path.includes(".."), `standalone tarball entry escapes its root: ${path}`);
-  // The standalone tree intentionally bundles the pinned runtime dependencies;
-  // a checkout, build output or coverage must never be shipped with them.
-  check(!/(^|\/)(\.git|dist|coverage)\//.test(path), `standalone tarball contains a forbidden path: ${path}`);
+  const pinnedModule = /^(?:package|[^/]+)\/node_modules\/(?:@coderax\/sdk|zod)\//.test(path);
+  check(pinnedModule || !/(^|\/)(node_modules|\.git|dist|coverage)\//.test(path), `standalone tarball contains a forbidden path: ${path}`);
 }
 
 const launcher = tgzEntries.get(`${root}bin/coderax`);
@@ -216,6 +239,40 @@ check(
   sbom.packages?.[0]?.externalRefs?.[0]?.referenceLocator === `pkg:npm/${PACKAGE_NAME}@${VERSION}`,
   "SBOM purl does not match the release",
 );
+
+// --- installer safety ------------------------------------------------------
+// The installers must embed the repository's safe extractor, not call the host
+// tar/zip. Decode the shipped copy and compare it byte for byte.
+function embeddedBase64(text, marker) {
+  const lines = text.split("\n");
+  const end = lines.indexOf(marker);
+  if (end === -1) return null;
+  let start = end - 1;
+  while (start >= 0 && !lines[start].includes("CODERAX_")) start -= 1;
+  if (start < 0) return null;
+  return lines.slice(start + 1, end).join("").trim();
+}
+
+for (const [script, marker, source] of [
+  ["install.sh", "CODERAX_ARCHIVE_EOF", "scripts/lib/archive.mjs"],
+  ["install.sh", "CODERAX_EXTRACT_EOF", "scripts/lib/safe-extract.mjs"],
+]) {
+  const text = await readFile(join(DIST, script), "utf8");
+  const encoded = embeddedBase64(text, marker);
+  check(encoded !== null, `${script} does not embed ${source}`);
+  if (encoded !== null) {
+    const shipped = Buffer.from(encoded, "base64");
+    const current = await readFile(join(ROOT, source));
+    check(shipped.equals(current), `${script} embeds a stale copy of ${source}`);
+  }
+}
+
+for (const script of ["install.sh", "install.ps1"]) {
+  const text = await readFile(join(DIST, script), "utf8");
+  check(!/--token\b(?!-file)/.test(text), `${script} must not document a token as a command-line argument`);
+  check(!/config set[^\n]*--token/.test(text), `${script} must not document --token`);
+  check(!/\bCODERAX_TOKEN\s*=/.test(text), `${script} must not assign a token`);
+}
 
 // --- report ----------------------------------------------------------------
 notes.push(`${npmEntries.size} files in the npm tarball, ${tgzEntries.size} in the standalone tree`);

@@ -1,87 +1,154 @@
 # Compatibility
 
-Coderax CLI is a thin client for a Coderax **WorkflowEngine** deployment. It does
-not guess compatibility from a version string in a health payload. It asks the
-engine for its capability handshake and compares the three versioned surfaces the
-canonical SDK validates:
+Coderax CLI is a thin client: HTTP requests and SSE against a deployment's
+documented API. Compatibility therefore has two independent axes, and this
+release reports them separately instead of collapsing them into one guessed
+number.
 
-| Surface | Pinned by | Meaning |
-| --- | --- | --- |
-| HTTP contract | `@coderax/sdk` 1.1.0 (`SDK_CONTRACT_VERSION`) | request/response shapes and the 30 published operations |
-| Execution events | `SDK_EVENT_SCHEMA_VERSION` | durable task event framing |
-| Chat stream | `SDK_CHAT_STREAM_VERSION` | versioned chat frames |
+## What changed, and why
 
-A deployment that does not serve a compatible contract fails with
-`CONTRACT_INCOMPATIBLE` (exit `7`) before any operation is attempted. The CLI
-never falls back to guessing, scraping OpenAPI or simulating an operation.
+Release `0.2.0` declared a hardcoded "WorkflowEngine" range of `>=0.8.0 <1.0.0`
+and read it from `/health`. That was not derived from any authoritative signal:
 
-## Runtime
+- the reference deployment (`Auctivon-CoderaxAI/Coderax`) is `v0.8.8`, and its
+  `/health` endpoint returns the plain text `OK` with no version;
+- `packages/workflow-sdk/src/contract.js` records that the deployment publishes
+  no `/api/meta` and no API-version endpoint (at the commit the contract was read
+  from), so the client sends `x-coderax-api-version: 1` and records
+  `API_VERSION_UNVERIFIED` when nothing answers;
+- the separate `Coderax-WorkflowEngine` package is `0.1.0`, which the old range
+  would reject.
 
-| Component | Supported | Notes |
-| --- | --- | --- |
-| Node.js | `>=24.0.0` | declared in `engines`; `coderax doctor` fails below it |
-| Linux | x64, arm64 | GitHub-hosted `ubuntu-latest` in the CI matrix |
-| macOS | arm64, x64 | GitHub-hosted `macos-latest` in the CI matrix |
-| Windows | x64 | GitHub-hosted `windows-latest` in the CI matrix |
-| Shell | sh, bash, zsh, fish, PowerShell 5.1+, cmd.exe | completion for four shells; POSIX and `.cmd` launchers |
+The range is now derived from the API contract the CLI implements and the
+deployment release it was validated against.
 
-The standalone archive bundles the pinned canonical SDK, its contracts and
-`zod`, so it runs without `npm install`. No native modules, no build step and no
-install hooks.
-
-## WorkflowEngine
+## Axis 1 — API version (authoritative handshake)
 
 | Field | Value |
 | --- | --- |
-| Consolidation target | WorkflowEngine PR #7, `9b4cb5c` |
-| Contract | `1.1.0` |
-| SDK | `@coderax/sdk` `1.1.0`, `sha256:520a0cf8…73db` |
-| Supported engine range | `>=1.0.0 <2.0.0` (`src/version.js`) |
-| Reported by | `coderax capabilities`, `coderax readiness`, `coderax doctor`, `coderax status` |
+| Implemented by | `packages/workflow-sdk/src/contract.js` (`API_VERSION = "1"`) |
+| Sent by | every SDK request: `x-coderax-api-version: 1` |
+| Read from | `/api/meta`, `/.well-known/coderax.json`, `/api/version`, or a response header |
+| Supported | major `1` |
+| A different major | `API_VERSION_UNSUPPORTED`, exit `6` |
 
-`coderax capabilities` prints the served contract, every operation the engine
-publishes, any SDK coverage gap, and each capability family's state. A family is
-`available` only when the handshake publishes the flag and every operation the
-command needs. It is `unverified` when the engine makes no claim, `unconfigured`
-when a required provider is missing, and `not_implemented` when the contract has
-no such operation. The CLI never upgrades a state on its own.
+A missing API version is **unverified**, never assumed compatible. `--strict`
+turns that into a failure for automation that requires a pinned contract.
 
-## CLI surface
+## Axis 2 — Deployment version (published contract)
 
-Commands: `products`, `chat`, `work`, `interactive`, `models`, `agents`, `cloud`,
-`projects`, `login`, `logout`, `status`, `config show|get|set`, `doctor`,
-`version`, `update`, `completion`, `health`, `openapi`, `call`, `capabilities`,
-`readiness`, `capability run`, the 20 capability commands, `upload`, `artifacts`,
-`schedules`, `permissions`, `task`, `help`.
-
-Exit codes are part of the contract:
-
-| Code | Meaning |
+| Field | Value |
 | --- | --- |
-| `0` | success |
-| `1` | task failure, integrity failure, conflict, other non-2xx |
-| `2` | usage, configuration or local input validation |
-| `3` | authentication/authorization failure, including an unavailable or corrupt credential store |
-| `4` | network failure, timeout, or the local wait limit |
-| `5` | not found |
-| `6` | capability not available |
-| `7` | incompatible contract or contract violation |
-| `130` | cancelled |
+| Read from | the deployment's OpenAPI document, `info.version` |
+| Supported range | `>=0.8.8 <1.0.0` |
+| Floor evidence | the reference deployment release the SDK contract was read from |
+| Ceiling | the next major line; a breaking deployment change is a major release |
 
-## Authentication and transport
+Prereleases are reported and never trusted. An unparseable or missing version is
+unknown.
 
-Remote base URLs must use HTTPS; plain HTTP is accepted only for `localhost`,
-`127.0.0.1` and `::1`. Tokens are stored in the operating-system credential store
-(macOS Keychain, Linux libsecret, Windows DPAPI), never in the config file.
-`CODERAX_TOKEN` remains the CI path. See [INSTALL.md](INSTALL.md) and
-[SECURITY.md](../SECURITY.md).
+## Verdict matrix
 
-## What is not claimed
+`coderax compat` exits `0` only when both axes are affirmatively supported.
 
-- Contract 1.1.0 publishes no device-code, refresh or revoke operation, so the
-  CLI implements none of them.
-- Media, creative and games families are absent from PR #7; they report
-  `unverified` or `not_implemented`.
-- PR #7 keeps artifacts and schedules in process memory. Durability across
-  engine restarts or devices is not claimed until `feat/durable-artifacts`
-  lands.
+| API version | Deployment version | `supported` | Exit | Meaning |
+| --- | --- | --- | --- | --- |
+| `1.x` | in range | `true` | `0` | compatible |
+| other major | in range | `false` | `1` | the CLI speaks a different API contract |
+| `1.x` | outside range | `false` | `1` | deployment release is older or newer than validated |
+| missing | in range | `null` | `1` | API compatibility unverified |
+| `1.x` | missing | `null` | `1` | deployment version unknown |
+| missing | missing | `null` | `1` | unavailable / no metadata |
+| HTTP 401/403 | — | — | `3` | unauthenticated, not an unknown version |
+| timeout / network error | — | — | `4` | unreachable, not an unknown version |
+
+The CLI warns rather than blocking ordinary commands. Refusing to run would turn
+a compatibility question into an outage, and `coderax call` is an explicit escape
+hatch. Automation that must enforce compatibility should check
+`coderax compat --json` and treat any non-zero exit as a hard failure.
+
+`coderax version --json` reports the same contract:
+
+```json
+{
+  "schemaVersion": 1,
+  "cliVersion": "0.3.0",
+  "supportedApiVersion": "1.x",
+  "supportedDeploymentRange": ">=0.8.8 <1.0.0",
+  "compatibilityBasis": "x-coderax-api-version handshake (shared SDK) + OpenAPI info.version"
+}
+```
+
+## Runtime and platforms
+
+| Component | Supported | Notes |
+| --- | --- | --- |
+| Node.js | `>=24.0.0` | Declared in `engines`; `doctor` fails below it |
+| Linux | x64, arm64 | Executed here: `linux-x64`, Node 24.22.1 |
+| macOS | arm64, x64 | Hosted `macos-latest` job configured |
+| Windows | x64 | Hosted `windows-latest` job configured |
+| Shell | sh, bash, zsh, PowerShell 5.1+, cmd.exe | POSIX launcher plus `coderax.cmd` |
+
+No native modules, no build step, no optional dependencies.
+
+## CLI and SDK surface
+
+Commands: `login`, `logout`, `whoami`, `status`, `chat`, `work`, `work submit`,
+`tasks`, `workflows`, `runs`, `run`, `cancel`, `resume`, `retry`, `approve`,
+`repos`, `agents`, `models`, `products`, `cloud`, `projects`, `doctor`,
+`diagnostics`, `version`, `compat`, `update`, `uninstall`/`cleanup`, `health`,
+`openapi`, `call`, `config`, `help`.
+
+| Import | Contents |
+| --- | --- |
+| `coderax-cli` | `runCli`, `parseArgv`, `isEntrypoint`, `VERSION` |
+| `coderax-cli/client` | `request`, `streamRequest`, `redact`, `CoderaxError` |
+| `coderax-cli/compat` | `SUPPORTED_API_VERSION`, `SUPPORTED_DEPLOYMENT_RANGE`, `checkCompatibility`, semver helpers |
+| `coderax-cli/credentials` | `credentialBackend`, `readCredential`, `writeCredential`, `readTokenFile` |
+| `coderax-cli/sdk` | `WorkflowClient`, `API_VERSION`, `CAPABILITY`, `ROUTE` |
+| `coderax-cli/sdk/contract` | the frozen contract constants |
+
+Adding an export is a minor release; removing or renaming one is a major release.
+The installation test imports the public entry points from an installed tarball.
+
+## Evidence
+
+Measured on `linux-x64`, Node 24.22.1, for this branch:
+
+| Check | Result |
+| --- | --- |
+| Unit, CLI, contract, redaction and release tests | **128 / 128 pass** |
+| Packed-artifact installation acceptance | **20 / 20 checks pass** |
+| Reproducible build (two builds plus `dist/`) | identical hashes |
+| Artifact verification (checksums, modes, contents, embedded extractor) | pass |
+
+The 20 installation checks cover: hostile archives (traversal, absolute path,
+symlink, duplicate, overwrite), a path with spaces and Unicode, non-interactive
+entrypoints, `version --json`, doctor before configuration, refusal of a token in
+argv, stdin login, compatible / incompatible-API / older / unavailable /
+unauthenticated states, Work SSE streaming, npm SDK imports and bin, npm global
+install, refused reinstall, corrupted upgrade leaving the install intact, atomic
+force upgrade retaining a rollback directory, token-leak scanning, and uninstall.
+
+**Limitations, stated plainly:**
+
+- macOS and Windows were **not executed in this environment**. Their jobs are
+  defined in `.github/workflows/ci.yml`; a hosted run is required before
+  claiming those platforms pass.
+- No live Coderax deployment or owner credential was available. The stubs prove
+  conformance to the published contract, not behaviour against a specific
+  production build.
+- No interactive TTY session was driven. The hidden prompt is implemented and
+  the non-interactive paths are tested; a real terminal check is still required.
+
+## Repeating the evidence
+
+```sh
+npm ci --ignore-scripts
+npm test
+npm run build && npm run verify && npm run repro
+npm run install-test
+```
+
+`dist/install-evidence.json` records every check, its duration, platform, release
+commit and compatibility basis.

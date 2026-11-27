@@ -1,8 +1,7 @@
 {
   "name": "coderax-cli",
   "version": "0.3.0",
-  "private": true,
-  "description": "Owner-only Coderax cloud client: chat, Work, secure owner auth, handshake-resolved capabilities, artifacts, schedules, permissions, an interactive terminal and durable task control through the canonical WorkflowEngine SDK",
+  "description": "Owner-only Coderax cloud client and command-line access interface: interactive chat, autonomous Work, durable runs, streaming, replay, diagnostics, and release engineering.",
   "type": "module",
   "bin": {
     "coderax": "src/cli.js"
@@ -17,24 +16,34 @@
     "./discover": "./src/discover.js",
     "./product-registry": "./src/product-registry.js",
     "./version": "./src/version.js",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./compat": "./src/compat.js",
+    "./diagnostics": "./src/diagnostics.js",
+    "./maintenance": "./src/maintenance.js",
+    "./sdk": "./packages/workflow-sdk/src/index.js",
+    "./sdk/contract": "./packages/workflow-sdk/src/contract.js",
+    "./sdk/v1": "./packages/workflow-sdk/src/v1/index.js"
   },
   "files": [
     "src/",
-    "scripts/",
-    "vendor/",
+    "packages/workflow-sdk/src/",
+    "packages/workflow-sdk/package.json",
+    "contracts/",
     "docs/",
-    "ARCHITECTURE.md",
     "README.md",
-    "SECURITY.md"
+    "SECURITY.md",
+    "ARCHITECTURE.md",
+    "BACKEND-DEFECTS.md",
+    "CHANGELOG.md",
+    "vendor/"
   ],
   "engines": {
     "node": ">=24.0.0"
   },
+  "private": true,
   "publishConfig": {
     "access": "public",
-    "registry": "https://registry.npmjs.org/",
-    "provenance": true
+    "registry": "https://registry.npmjs.org/"
   },
   "repository": {
     "type": "git",
@@ -52,17 +61,27 @@
   ],
   "scripts": {
     "start": "node src/cli.js --help",
-    "test": "node --test",
-    "check": "node scripts/verify-vendor.mjs && node --check scripts/verify-vendor.mjs && node --check scripts/build-release.mjs && node --check scripts/verify-release.mjs && node --check scripts/repro-check.mjs && node --check scripts/install-check.mjs && node --check src/auth.js && node --check src/capability-catalog.js && node --check src/capability-commands.js && node --check src/capability-registry.js && node --check src/cli.js && node --check src/client.js && node --check src/completion.js && node --check src/config.js && node --check src/credentials.js && node --check src/discover.js && node --check src/engine.js && node --check src/exit.js && node --check src/file-transfer.js && node --check src/format.js && node --check src/interactive.js && node --check src/product-commands.js && node --check src/product-registry.js && node --check src/secure-store.js && node --check src/ui/ansi.js && node --check src/ui/markdown.js && node --check src/ui/presenter.js && node --check src/ui/prompt.js && node --check src/ui/tables.js && node --check src/version.js",
-    "verify:vendor": "node scripts/verify-vendor.mjs",
+    "test": "node --test \"test/*.test.js\"",
+    "test:contract": "node --test test/contract.test.js test/workflow-cli.test.js",
+    "test:pty": "node --test test/pty.test.js",
+    "check": "node scripts/verify-vendor.mjs && node scripts/check.js",
     "build": "node scripts/build-release.mjs",
     "verify": "node scripts/verify-release.mjs",
     "repro": "node scripts/repro-check.mjs",
-    "install-test": "node scripts/install-check.mjs",
-    "release:check": "npm run check && npm test && npm run build && npm run verify && npm run repro"
+    "install-test": "node scripts/install-test.mjs",
+    "smoke:install": "node scripts/smoke-install.mjs",
+    "verify:cross-surface": "node scripts/verify-cross-surface.mjs",
+    "audit": "npm audit --audit-level=high",
+    "release:check": "npm run check && npm test && npm run build && npm run verify && npm run repro && npm run install-test",
+    "prepublishOnly": "npm run release:check",
+    "verify:vendor": "node scripts/verify-vendor.mjs"
   },
   "dependencies": {
     "@coderax/sdk": "file:vendor/coderax-sdk-1.1.0.tgz",
     "zod": "^3.25.67"
-  }
+  },
+  "bundleDependencies": [
+    "@coderax/sdk",
+    "zod"
+  ]
 }

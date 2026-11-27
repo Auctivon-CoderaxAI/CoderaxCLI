@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { access, mkdtemp, symlink, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -99,12 +99,13 @@ test("writeArtifactBytes writes verified bytes and honors force", async () => {
     () =>
       writeArtifactBytes({
         destination,
-        expectedSha256: `sha256:${sha256Hex(PDF)}`,
-        expectedBytes: PDF.length,
-        content: encodeBase64(PDF),
+        expectedSha256: `sha256:${sha256Hex(Buffer.from("replacement"))}`,
+        expectedBytes: Buffer.byteLength("replacement"),
+        content: encodeBase64(Buffer.from("replacement")),
       }),
     { code: "ARTIFACT_DESTINATION_EXISTS" },
   );
+  assert.deepEqual(await readFile(destination), PDF);
 });
 
 test("artifactPath never produces an absolute or traversing path", () => {

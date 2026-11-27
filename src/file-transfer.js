@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { lstat, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { lstat, open, readFile, rename, rm, stat } from "node:fs/promises";
 import { basename, dirname, extname, isAbsolute, resolve, sep } from "node:path";
 import { CoderaxError } from "./client.js";
 import { MAX_ARTIFACT_BYTES, MAX_ARTIFACT_DOWNLOAD_BYTES } from "./capability-catalog.js";
@@ -429,13 +429,20 @@ export async function writeArtifactBytes({
   const tempPath = force
     ? `${destination}.${process.pid}.${randomBytes(6).toString("hex")}.part`
     : destination;
+  let created = false;
   try {
-    await writeFile(tempPath, buffer, { flag: "wx", mode: 0o600 });
+    const file = await open(tempPath, "wx", 0o600);
+    created = true;
+    try {
+      await file.writeFile(buffer);
+    } finally {
+      await file.close();
+    }
     if (force) await replaceFile(tempPath, destination);
     return { path: destination, bytes: buffer.length, sha256: actual };
   } catch (error) {
     try {
-      await rm(tempPath, { force: true });
+      if (created) await rm(tempPath, { force: true });
     } catch {
       // Nothing to clean up.
     }

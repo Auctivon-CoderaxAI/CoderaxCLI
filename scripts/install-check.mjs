@@ -138,7 +138,7 @@ function installer(extra = [], options = {}) {
       ? []
       : ["-FromFile", archive, "-Checksum", checksum];
     return spawn("powershell.exe", [
-      "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", join(ROOT, "scripts", "install.ps1"),
+      "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", join(DIST, "install.ps1"),
       "-Version", version,
       ...local,
       "-Prefix", prefix,
@@ -148,7 +148,7 @@ function installer(extra = [], options = {}) {
     ], { env: runEnv });
   }
   return spawn("sh", [
-    join(ROOT, "scripts", "install.sh"),
+    join(DIST, "install.sh"),
     "--version", version,
     ...(extra.includes("--rollback") ? [] : ["--from-file", archive, "--checksum", checksum]),
     "--prefix", prefix,
@@ -183,7 +183,7 @@ function hasTool(name, args = ["--version"]) {
 function uninstaller(extra = []) {
   if (IS_WINDOWS) {
     return spawn("powershell.exe", [
-      "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", join(ROOT, "scripts", "uninstall.ps1"),
+      "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", join(DIST, "uninstall.ps1"),
       "-Prefix", prefix,
       "-BinDir", binDir,
       "-CompletionDir", completionDir,
@@ -192,7 +192,7 @@ function uninstaller(extra = []) {
       ...extra,
     ], { env });
   }
-  return spawn("sh", [join(ROOT, "scripts", "uninstall.sh"), "--prefix", prefix, "--bin-dir", binDir, "--yes", "--purge", ...extra], { env });
+  return spawn("sh", [join(DIST, "uninstall.sh"), "--prefix", prefix, "--bin-dir", binDir, "--yes", "--purge", ...extra], { env });
 }
 
 async function pathExists(path) {
@@ -219,8 +219,12 @@ async function withEngine(version, run) {
       if (version !== null) payload.workflowEngine = { version };
       return json(200, payload);
     }
+    if (url.pathname === "/api/meta") {
+      if (version === null) return json(404, { message: "not found" });
+      return json(200, { apiVersion: "1" });
+    }
     if (url.pathname === "/api/user") {
-      return authenticated ? json(200, { email: "release-ci@coderax.test" }) : json(401, { message: "unauthorized" });
+      return authenticated ? json(200, { email: "release-ci@coderax.test", role: "ADMIN" }) : json(401, { message: "unauthorized" });
     }
     if (url.pathname === "/api/agents") {
       return authenticated ? json(200, { agents: [{ id: "agent-1", name: "Reviewer" }] }) : json(401, { message: "unauthorized" });
@@ -270,8 +274,8 @@ try {
 
   await step("installer rejects an unknown Node-only flag safely", async () => {
     const result = IS_WINDOWS
-      ? spawn("powershell.exe", ["-NoProfile", "-File", join(ROOT, "scripts", "install.ps1"), "-NotAFlag"], { env })
-      : spawn("sh", [join(ROOT, "scripts", "install.sh"), "--not-a-flag"], { env });
+      ? spawn("powershell.exe", ["-NoProfile", "-File", join(DIST, "install.ps1"), "-NotAFlag"], { env })
+      : spawn("sh", [join(DIST, "install.sh"), "--not-a-flag"], { env });
     assert.notEqual(result.status, 0, "an unknown flag must fail");
     return "exit code is non-zero";
   });
@@ -427,7 +431,7 @@ try {
     assert.equal(info.cliVersion, VERSION);
     assert.equal(info.installMethod, "standalone");
     assert.equal(info.nodeSupported, true);
-    assert.match(info.supportedWorkflowEngine, /^>=0\.8\.0 <1\.0\.0$/);
+    assert.match(info.supportedDeploymentRange, /^>=0\.8\.8 <1\.0\.0$/);
     assert.equal(info.installPath, join(prefix, VERSION));
     return `${info.cliVersion} on node ${info.node} (${info.platform}-${info.arch})`;
   });
@@ -452,9 +456,11 @@ try {
 
   await step("authenticated communication with a compatible WorkflowEngine (0.8.8)", async () => {
     return withEngine("0.8.8", async (baseUrl) => {
-      const login = await cli(["login", "--base-url", baseUrl, "--token", TOKEN, "--json"]);
-      assert.equal(login.status, 0, tail(login));
-      assert.equal(JSON.parse(login.stdout).authenticated, true);
+      // Secure login itself is exercised by install-test.mjs; this rehearsal
+      // uses an ephemeral token to drive the installed launcher.
+      const configured = await cli(["config", "set", "--base-url", baseUrl]);
+      assert.equal(configured.status, 0, tail(configured));
+      env.CODERAX_TOKEN = TOKEN;
 
       const status = await cli(["status", "--json"]);
       assert.equal(status.status, 0, tail(status));
@@ -470,7 +476,7 @@ try {
       assert.equal(compat.status, 0, tail(compat));
       const verdict = JSON.parse(compat.stdout);
       assert.equal(verdict.supported, true);
-      assert.equal(verdict.engineVersion, "0.8.8");
+      assert.equal(verdict.deploymentVersion, "0.8.8");
 
       const agents = await cli(["agents", "--json"]);
       assert.equal(agents.status, 0, tail(agents));
@@ -483,10 +489,10 @@ try {
     });
   });
 
-  await step("engine compatibility boundaries (0.7.9 / 0.8.0 / 0.9.5 / 1.0.0)", async () => {
+  await step("engine compatibility boundaries (0.8.7 / 0.8.8 / 0.9.5 / 1.0.0)", async () => {
     const expectations = [
-      ["0.7.9", 1, false],
-      ["0.8.0", 0, true],
+      ["0.8.7", 1, false],
+      ["0.8.8", 0, true],
       ["0.9.5", 0, true],
       ["1.0.0", 1, false],
     ];
@@ -506,7 +512,7 @@ try {
       assert.equal(result.status, 1, tail(result));
       const verdict = JSON.parse(result.stdout);
       assert.equal(verdict.supported, null);
-      assert.match(verdict.reason, /did not report/);
+      assert.equal(verdict.status, "unknown");
       return "unknown is distinct from incompatible";
     });
   });
@@ -540,7 +546,7 @@ const compat = await import("coderax-cli/compat");
 const version = await import("coderax-cli/version");
 const diagnostics = await import("coderax-cli/diagnostics");
 assert.equal(typeof sdk.runCli, "function");
-assert.equal(typeof compat.isSupportedEngineVersion, "function");
+assert.equal(typeof compat.isSupportedDeploymentVersion, "function");
 assert.equal(version.VERSION, ${JSON.stringify(VERSION)});
 assert.equal(diagnostics.detectInstallMethod(), "npm-local");
 console.log(version.VERSION);
@@ -597,8 +603,8 @@ console.log(version.VERSION);
     return `${transcript.join("\n").length} bytes of output scanned`;
   });
 
-  await step("uninstall removes the program, launcher, credentials and its completion", async () => {
-    assert.ok(await pathExists(configPath), "login should have written a config file");
+  await step("uninstall removes the program, launcher, user data and its completion", async () => {
+    assert.ok(await pathExists(configPath), "config set should have written a config file");
 
     // A hand-written file with the same name must survive: the uninstaller only
     // deletes files that carry the generated-file marker.
@@ -636,7 +642,7 @@ console.log(version.VERSION);
     arch: process.arch,
     node: process.versions.node,
     release: { name: manifest.name, version: manifest.version, commit: manifest.commit },
-    workflowEngineRange: manifest.supportedWorkflowEngine,
+    workflowEngineRange: manifest.supportedDeploymentRange,
     checks: results,
   };
   const evidencePath = process.argv.includes("--evidence")

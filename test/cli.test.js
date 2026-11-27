@@ -100,7 +100,7 @@ test("missing base URL fails without leaking configuration", async () => {
   assert.match(io.err(), /BASE_URL_REQUIRED/i);
 });
 
-test("config set persists values and refuses to write a plaintext token", async () => {
+test("config set persists values and refuses a token in argv", async () => {
   const io = capture();
   const env = await tempEnv();
 
@@ -116,7 +116,7 @@ test("config set persists values and refuses to write a plaintext token", async 
     { env, stdout: tokenIo.stdout, stderr: tokenIo.stderr },
   );
   assert.equal(tokenCode, 2);
-  assert.match(tokenIo.err(), /plaintext/);
+  assert.match(tokenIo.err(), /argv/);
   assert.equal(tokenIo.out().includes(TOKEN), false);
   assert.equal(tokenIo.err().includes(TOKEN), false);
 
@@ -514,7 +514,7 @@ const CLI_PATH = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 test("the packaged executable reaches runCli", () => {
   const result = spawnSync(process.execPath, [CLI_PATH, "--version"], { encoding: "utf8" });
   assert.equal(result.status, 0);
-  assert.match(result.stdout, new RegExp(`coderax-cli ${VERSION.replace(/\./g, "\\.")}`));
+  assert.equal(result.stdout.trim(), `coderax-cli ${VERSION}`);
 });
 
 test("a symlinked executable is still detected as the entrypoint", async (t) => {

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { PassThrough } from "node:stream";
-import { runInteractive } from "../src/interactive.js";
+import { runInteractive } from "../src/capability-terminal.js";
 import { startWorkflowHarness } from "./support/workflow-harness.js";
 
 /**

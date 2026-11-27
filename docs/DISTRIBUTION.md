@@ -17,7 +17,7 @@ so is listed as **requires authorization**.
 
 | Channel | Cost | Who can install | Needs | Fit |
 | --- | --- | --- | --- | --- |
-| **GitHub Releases** | Free. Up to 1,000 assets per release, each file under 2 GiB, no total-size or bandwidth limit ([docs](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases)) | Anyone with repository access | `contents: write` at release time only | **Primary.** Works for private and public repositories, all OSes, no registry ownership |
+| **GitHub Releases** | Free. Up to 1,000 assets per release, each file under 2 GiB, no total-size or bandwidth limit ([docs](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases)) | Anyone, for a public repository | `contents: write` at release time only | **Primary.** Works for every OS, no registry ownership, public downloads |
 | **npm public registry** | Free for public packages | Node users; `npx` | npm account and ownership of the name | **Secondary, not enabled.** Best ergonomics; see the publication gate below |
 | GitHub Packages (npm) | 500 MB included on Free ([pricing](https://github.com/pricing)) | Authenticated users only | GitHub org + token to install | Rejected: installs require a registry token, which defeats one-command install |
 | **JSR** | Free | Deno and Node ESM users | A JSR scope; `jsr.json` with `name`, `version`, `exports` ([publishing](https://jsr.io/docs/publishing-packages), [scopes](https://jsr.io/docs/scopes)) | Optional: the package is already ESM-only, so it would fit; adds a second registry to own |
@@ -32,14 +32,12 @@ so is listed as **requires authorization**.
 
 - Standard GitHub-hosted runners are **free and unlimited for public
   repositories** ([runner docs](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)).
-- For private repositories, GitHub Free includes **2,000 CI/CD minutes per
-  month** ([pricing](https://github.com/pricing)); usage draws from that
-  allowance.
+- This repository is public, so the Windows/macOS/Linux acceptance matrix and the
+  release job do not draw down a paid minute allowance.
 
-This repository's CI runs three OS jobs of roughly one to two minutes each on
-pushes and pull requests, plus the release job on tags. On a private repository
-that fits comfortably inside the free allowance; making the repository public
-removes the limit entirely.
+This repository's CI runs three OS jobs on pushes and pull requests, plus the
+release job on tags. If a job cannot start, the cause is an organization
+Actions policy or billing setting, not a code failure.
 
 ## Recommendation
 
@@ -59,9 +57,8 @@ removes the limit entirely.
 
 - Publishing requires ownership of the package name and a licence decision.
   Both belong to the repository owner, not to an automated change.
-- npm provenance is not available for packages published from **private source
-  repositories** ([GitHub changelog](https://github.blog/changelog/2023-07-25-publishing-with-npm-provenance-from-private-source-repositories-is-no-longer-supported/)),
-  so provenance would require making the repository public first.
+- The repository is public, so npm provenance is available along with trusted
+  publishing. Publication still requires the owner's explicit authorization.
 - Trusted publishing (OIDC, no long-lived token) requires npm CLI 11.5.1+ and a
   trusted-publisher configuration on npmjs.com
   ([npm docs](https://docs.npmjs.com/trusted-publishers)).
@@ -79,9 +76,6 @@ environment, never in a workflow reachable from a pull request.
   with `contents: write` scoped to that job.
 - Installation from the GitHub Release (`install.sh`, `install.ps1`) and from
   the npm tarball (`npm install --global ./coderax-cli-<version>.tgz`).
-- Shell completion for bash, zsh, fish and PowerShell, written by the standalone
-  installers and removed by the uninstallers only when the file carries the
-  generated marker.
 - No registry, no package publication, no ownership change.
 
 ### What still needs the owner

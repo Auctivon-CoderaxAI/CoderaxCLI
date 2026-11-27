@@ -5,17 +5,20 @@
  * canonical engine adapter. It keeps the branch's rules:
  *
  * - a token is never written to the plaintext configuration file;
- * - a token argument is never required, and `--token` is a one-shot override;
+ * - a token is never accepted through argv;
  * - every store write is verified by the operating-system credential store;
  * - a login proves the token against the deployment before it is stored.
  *
- * The branch's second SDK and `workflow-commands.js` are deliberately not
- * imported: owner identity is verified through `src/engine.js`.
+ * Owner verification uses the selected engine contract before the common
+ * credential write and read-back.
  */
 
 import { CoderaxError, request } from "./client.js";
 import { saveConfig } from "./config.js";
 import { credentialAccount, readTokenFile } from "./credentials.js";
+import { SdkError, WorkflowClient } from "../packages/workflow-sdk/src/index.js";
+import { V1Client } from "../packages/workflow-sdk/src/v1/index.js";
+import { VERSION } from "./version.js";
 import { createEngineClient, negotiate, verifyOwner } from "./engine.js";
 
 export const CREDENTIAL_VERSION = 1;
@@ -171,7 +174,7 @@ export async function resolveSessionToken({ config, env = process.env, flagToken
     }
   }
   if (typeof config?.token === "string" && config.token !== "") {
-    return { token: config.token, source: "config file", legacy: true, account: config.account ?? null };
+    return { token: config.token, source: config.tokenStore === "file" ? "config file" : "legacy credential store", legacy: config.tokenStore === "file", account: config.account ?? null };
   }
   return { token: null, source: "none", legacy: false, account: config?.account ?? null };
 }
@@ -222,31 +225,56 @@ export async function loginWithToken(
   }
   const store = requireCredentialStore(context.credentialStore);
 
-  const client = createEngineClient({
+  const clientOptions = {
     baseUrl,
     token,
     timeoutMs: context.timeoutMs,
     fetchImpl: fetchImpl ?? context.fetchImpl ?? fetch,
-  });
-  await negotiate(client);
-  await verifyOwner(client);
-
-  const claims = parseJwtClaims(token);
-  const label = account ?? (await accountLabel({
-    baseUrl,
-    token,
-    timeoutMs: context.timeoutMs,
-    fetchImpl: fetchImpl ?? context.fetchImpl ?? fetch,
-    claims,
-  }));
+    clientVersion: VERSION,
+    signal: context.signal,
+  };
+  const sdk = String(context.env?.CODERAX_SDK ?? "").trim().toLowerCase();
+  let authMethod = "capabilities";
+  let role = null;
+  let label = account;
+  if (sdk === "v1") {
+    authMethod = "v1";
+    const client = new V1Client(clientOptions);
+    try {
+      await client.negotiate({ force: true });
+      await client.agents({ refresh: true });
+    } catch (error) {
+      if (error instanceof SdkError && ["UNAUTHENTICATED", "FORBIDDEN"].includes(error.code)) {
+        throw new SdkError("OWNER_UNVERIFIABLE", "the /v1 owner-protected route rejected this token; it was not stored");
+      }
+      throw error;
+    }
+  } else if (sdk === "workflow" || sdk === "legacy") {
+    authMethod = "legacy";
+    const identity = await new WorkflowClient(clientOptions).requireOwner();
+    label ??= identity.account;
+    role = identity.role;
+  } else {
+    const client = createEngineClient(clientOptions);
+    await negotiate(client);
+    await verifyOwner(client);
+    label ??= await accountLabel({ ...clientOptions, claims: parseJwtClaims(token) });
+  }
 
   const stored = await storeCredential({ store, baseUrl, token, account: label });
   // Remove a legacy plaintext token only after the secure store verified the
   // write, so a failed login can never lose the only working credential.
-  await saveConfig({ token: null, account: label, baseUrl }, { filePath: context.configPath });
+  await saveConfig({ token: null, account: null, baseUrl, role, authMethod }, {
+    filePath: context.configPath,
+    credentialStore: context.tokenStore,
+    env: context.env,
+    credentialAccount: context.account,
+  });
   return {
     authenticated: true,
     account: label,
+    role,
+    authMethod,
     source,
     store: stored.store,
     token,
@@ -265,7 +293,11 @@ export async function logoutSession(context) {
       storeError = error instanceof CoderaxError ? error.message : String(error?.message ?? error);
     }
   }
-  await saveConfig({ token: null, account: null }, { filePath: context.configPath });
+  await saveConfig({ token: null, account: null, role: null, authMethod: null, sessions: {} }, {
+    filePath: context.configPath,
+    credentialStore: context.tokenStore,
+    env: context.env,
+  });
 
   const environmentTokenActive = Boolean(context.env?.CODERAX_TOKEN?.trim());
   const message = storeError

@@ -1,3 +1,9 @@
+> **Private-repository note (GitHub Free):** GitHub artifact attestations are
+> public-repository-only on Free. Releases are signed with keyless Sigstore and
+> publish a `.sigstore.json` bundle next to each asset; verify with
+> `cosign verify-blob --bundle …`. npm provenance is also public-only and is not
+> produced from a private repository.
+
 # Release process
 
 This document is for maintainers. It describes how a version becomes a set of
@@ -10,8 +16,10 @@ verified artifacts and, when authorized, a published GitHub Release.
   to publish a tag that disagrees with it.
 - While `0.x`, a minor release may change behaviour. Every release documents
   changes in `CHANGELOG.md`.
-- The supported WorkflowEngine range (`src/version.js`) is part of the release
-  contract. Widening or narrowing it is at least a minor release.
+- The compatibility contract (`src/compat.js`) is part of the release:
+  `supportedApiVersion` comes from the shared SDK (`API_VERSION`) and
+  `supportedDeploymentRange` is the deployment release the contract was
+  validated against. Widening or narrowing either is at least a minor release.
 
 ## What a release contains
 
@@ -22,7 +30,7 @@ verified artifacts and, when authorized, a published GitHub Release.
 | `coderax-cli-<version>-standalone.zip` | Windows standalone tree |
 | `SHA256SUMS` | SHA-256 for every uploaded asset |
 | `release-manifest.json` | Versions, commit, artifact hashes, per-file inventory |
-| `sbom.spdx.json` | SPDX 2.3 SBOM (no runtime dependencies) |
+| `sbom.spdx.json` | SPDX 2.3 SBOM (includes the pinned runtime dependencies) |
 | `install.sh`, `install.ps1` | Installers |
 | `uninstall.sh`, `uninstall.ps1` | Uninstallers |
 | `release-notes.md` | The changelog section for this version |
@@ -106,8 +114,8 @@ Rules that keep publication credentials away from untrusted code:
   is not left in `.git/config` for later steps or scripts.
 - `contents: write` exists only in the release job, which runs from a tag or a
   manual dispatch, never from a pull request.
-- npm publication uses short-lived OIDC credentials from a protected
-  environment; no long-lived `NPM_TOKEN` is stored in this repository.
+- npm publication uses short-lived OIDC credentials from the
+  `npm-publish` environment; no long-lived `NPM_TOKEN` is stored in this repository.
 - Third-party actions are pinned to commit SHAs; the release path uses `gh`
   from the runner image instead of a third-party release action.
 
@@ -120,19 +128,28 @@ The package is `"private": true`. Publishing to npm requires the owner to:
 3. remove `"private": true` in a reviewed commit;
 4. configure a trusted publisher for the repository and workflow on npmjs.com
    (npm CLI 11.5.1+ and Node 22.14+ are required for OIDC publishing);
-5. set the repository variable `NPM_PUBLISH_ENABLED=true` and protect the
-   `npm-publish` environment with required reviewers.
+5. enforce reviewer approval for `npm-publish`, then set
+   `NPM_PUBLISH_ENABLED=true`. Private GitHub Free repositories do not enforce
+   environment reviewers. Keep publishing disabled until a replacement
+   approval control is in place.
 
 Only then does the gated `npm` job exist as a usable path. Until all five steps
 happen, `npm publish` is refused by npm itself because the package is private.
 
-Note: npm provenance is not available for packages built from **private source
-repositories**. If provenance is a requirement, the repository must be public
-before publishing. GitHub Releases remain the canonical channel regardless.
+The repository is public, so npm provenance is available for a tarball built
+from it. GitHub Releases remain the canonical channel regardless.
 
-Signing (Sigstore/cosign) is not enabled. The `id-token: write` permission and
-SHA-256 checksums leave room to add keyless signing later without changing the
-artifact layout.
+### Build provenance
+
+Every artifact is covered by `SHA256SUMS`. The release workflow also signs
+each asset with keyless Cosign, verifies the standalone tarball's signature,
+and uploads each asset's `.sigstore.json` bundle. The installers can verify
+these bundles with Cosign via `--provenance`, `-Provenance`, or
+`CODERAX_REQUIRE_PROVENANCE=1`. They require the GitHub Actions OIDC issuer
+and the repository's release workflow, on the corresponding version tag
+or on a branch for manual dispatch. If a bundle is absent, a valid legacy
+GitHub attestation verified by `gh` is required. See [Install](INSTALL.md)
+for local archive verification.
 
 ## Troubleshooting
 
@@ -142,5 +159,5 @@ artifact layout.
 | `release v0.3.0 already exists` | Tag reused | Cut a new version; do not move published tags |
 | `checksum mismatch` in `npm run verify` | Build raced an edit, or `SOURCE_DATE_EPOCH` differed | Rebuild from a clean checkout |
 | `dist/` hashes differ in `npm run repro` | Non-deterministic input (untracked file, locale, zlib difference) | Build with the same Node version; check `git status` |
-| CI minutes exhausted on a private repo | 3-OS matrix on every push | Standard runners are free only for public repositories; reduce the matrix or make the repository public |
+| Hosted runner cannot start | Organization billing or spending limit | Standard runners are free for this public repository; check the organization's Actions policy |
 | npm job fails with "package is private" | Publication not authorized | Follow the five steps above |

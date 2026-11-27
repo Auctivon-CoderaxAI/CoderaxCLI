@@ -1,7 +1,7 @@
 # Installing Coderax CLI
 
-Coderax CLI is the command-line **access and control interface** for a
-cloud-hosted Coderax deployment. It is a small Node.js program.
+Coderax CLI is the owner-only command-line client for a cloud-hosted Coderax
+deployment. It is a small, dependency-free Node.js program.
 
 ## Requirements
 
@@ -9,7 +9,7 @@ cloud-hosted Coderax deployment. It is a small Node.js program.
 | --- | --- |
 | Node.js | 24.0.0 or newer (`node --version`) |
 | Network | HTTPS access to your Coderax deployment |
-| Disk | About 150 KB per installed version |
+| Disk | About 200 KB per installed version |
 | Privileges | None. Everything installs under your user account. |
 | Shell | bash, zsh, sh, PowerShell 5.1+, or cmd.exe |
 
@@ -18,21 +18,14 @@ install Node for you.
 
 ## What installation does not do
 
-Installing this CLI does **not** install, start, or require:
+Installing this CLI does **not** install, start, or require Ollama, Docker,
+containers, databases, background agents or services, Python, compilers, or
+native build tools. Coderax inference and state live in the hosted deployment.
 
-- Ollama or any local AI runtime
-- Docker, containers, or Kubernetes workloads
-- databases or message queues
-- background agents, daemons, services, cron jobs, or listening ports
-- Python, compilers, or native build tools
-
-Coderax inference, conversations, agents, and Work runs happen in the hosted
-deployment. The CLI stores one small configuration file with the deployment URL
-and an optional token. It makes HTTP requests and exits.
-
-`package.json` has no `preinstall`, `install`, or `postinstall` script, and no
-shipped module imports `node:child_process`. Both properties are enforced by
-`npm run verify` and the test suite.
+`package.json` has no `preinstall`, `install`, or `postinstall` script. The only
+shipped modules that spawn a process are the credential helper (fixed OS
+commands) and the explicit `--notify-command` feature; `npm run verify` enforces
+that allowlist.
 
 ## Verify what you downloaded
 
@@ -60,12 +53,19 @@ Get-Content SHA256SUMS | ForEach-Object {
 }
 ```
 
-Replace `0.3.0` below with the release you are installing. The latest release is
-listed at <https://github.com/Auctivon-CoderaxAI/CoderaxCLI/releases>.
+Release downloads are public: <https://github.com/Auctivon-CoderaxAI/CoderaxCLI/releases>.
 
-> Release downloads require access to the repository. While the repository is
-> private, only users with repository access can fetch these URLs; the same
-> artifacts in `dist/` can be distributed internally.
+Use `--provenance` / `-Provenance` (or `CODERAX_REQUIRE_PROVENANCE=1`)
+to verify the archive after the checksum check. Install Cosign on PATH
+for releases with a `.sigstore.json` bundle. The installer downloads the
+bundle alongside the archive and verifies the signature from the CoderaxCLI
+release workflow. For `--from-file` / `-FromFile`, save the bundle next to
+the archive with `.sigstore.json` appended to the archive filename.
+
+If the bundle is absent (HTTP 404 for a download, or no local sidecar),
+the installer requires the GitHub CLI (`gh`) and a valid legacy GitHub
+attestation. Invalid bundles, other bundle download failures, and releases
+without either verified form of evidence stop installation.
 
 ## Option A — standalone installer (Linux and macOS)
 
@@ -81,9 +81,10 @@ sh install.sh --version "$version"
 ```
 
 The installer downloads `coderax-cli-$version-standalone.tar.gz`, verifies it
-against the release `SHA256SUMS`, extracts it to `~/.coderax/cli/$version`, and
-symlinks `~/.local/bin/coderax` to the versioned launcher. Old versions stay in
-place, which makes rollback a one-line change.
+against the release `SHA256SUMS`, extracts it with a traversal-safe extractor to
+a staging directory, proves the staged launcher reports the expected version,
+and only then moves it to `~/.coderax/cli/$version` and atomically repoints
+`~/.local/bin/coderax`.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
@@ -91,16 +92,14 @@ place, which makes rollback a one-line change.
 | `--prefix <dir>` | `~/.coderax/cli` | Install root; versions live below it |
 | `--bin-dir <dir>` | `~/.local/bin` | Where the `coderax` launcher goes |
 | `--from-file <path>` | — | Install a local tarball (air-gapped) |
-| `--checksum <sha256>` | — | Required to verify `--from-file` |
-| `--base-url <url>` | GitHub Releases | Releases mirror |
-| `--force` | off | Replace an existing install of the same version |
-| `--rollback` | off | Repoint the launcher to an installed version (needs `--version`) |
-| `--no-completion` | off | Do not install shell completion |
+| `--checksum <sha256>` | — | Required with `--from-file` |
+| `--base-url <url>` | GitHub Releases | HTTPS release mirror |
+| `--provenance` | off | Verify a Sigstore bundle or legacy GitHub attestation |
+| `--force` | off | Atomically replace the same version, retaining a rollback copy |
 | `--dry-run` | off | Print the plan and change nothing |
 | `--skip-verify` | off | Skip checksum verification (not recommended) |
 
-The installer never edits your shell profile. If `~/.local/bin` is not on
-`PATH`, it prints the line to add.
+The installer never edits your shell profile and never accepts a token.
 
 ## Option B — standalone installer (Windows)
 
@@ -117,46 +116,22 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Version $vers
 ```
 
 Defaults: program in `%LOCALAPPDATA%\Coderax\cli\<version>`, launcher
-`%LOCALAPPDATA%\Coderax\bin\coderax.cmd`. The installer does not change `PATH`;
-it prints the command to add the launcher directory to your user `PATH`.
+`%LOCALAPPDATA%\Coderax\bin\coderax.cmd`. It does not change `PATH`.
 
 Options mirror the POSIX installer: `-Version`, `-Prefix`, `-BinDir`,
-`-FromFile`, `-Checksum`, `-BaseUrl`, `-Force`, `-Rollback`, `-NoCompletion`,
-`-CompletionDir`, `-DryRun`, `-SkipVerify`.
-
-`-ExecutionPolicy Bypass` applies to that one process only. If your
-organisation forbids it, unblock the file instead:
-`Unblock-File .\install.ps1`.
+`-FromFile`, `-Checksum`, `-BaseUrl`, `-Provenance`, `-Force`, `-DryRun`,
+`-SkipVerify`.
 
 ## Option C — npm
 
-The package is currently **not published**: `package.json` contains
-`"private": true` so that publication is an explicit owner decision (see
-[RELEASE.md](RELEASE.md)). Once publication is authorized:
-
-```sh
-npm install --global coderax-cli
-# or pin a version
-npm install --global coderax-cli@0.3.0
-```
-
-Today you can install a release tarball directly; it bundles its pinned runtime dependencies,
-so npm has nothing else to fetch:
+The package is **not published to the registry**: `package.json` contains
+`"private": true` so publication is an explicit owner decision. Install a
+release tarball directly; it contains no dependencies:
 
 ```sh
 npm install --global ./coderax-cli-0.3.0.tgz
-```
-
-To install into a project instead of globally:
-
-```sh
-npm install --save-exact ./coderax-cli-0.3.0.tgz
 npx coderax --version
 ```
-
-npm creates the `coderax` and `coderax.cmd` shims automatically. npm installs do
-not add shell completion; print it with `coderax completion <shell>` and write it
-to the path for your shell (see below).
 
 ## Shell completion
 
@@ -203,24 +178,12 @@ git clone https://github.com/Auctivon-CoderaxAI/CoderaxCLI.git
 cd CoderaxCLI
 npm ci --ignore-scripts
 node src/cli.js --version
-# optional: put it on PATH
-npm link
 ```
 
-`npm ci` installs the vendored canonical SDK and zod; the lockfile pins the tree
-tree. Do not run `npm install` with lifecycle scripts enabled for a checkout you
-have not reviewed.
+## Option E — air-gapped
 
-## Option E — air-gapped or offline
-
-On a connected machine, download these five files from the release:
-
-- `coderax-cli-<version>-standalone.tar.gz` (Linux/macOS) or
-  `coderax-cli-<version>-standalone.zip` (Windows)
-- `SHA256SUMS`
-- `install.sh` or `install.ps1` (optional; the archive also contains them)
-
-Transfer them, verify the checksums, then install without network access:
+Download the standalone archive and `SHA256SUMS` on a connected machine, transfer
+them, verify the checksum, then:
 
 ```sh
 sh install.sh --version 0.3.0 \
@@ -228,31 +191,33 @@ sh install.sh --version 0.3.0 \
   --checksum "<sha256 from SHA256SUMS>"
 ```
 
-Without the installer, extraction is enough:
+## First run — authenticate without leaking the token
+
+A token is refused as a command-line argument: argv appears in shell history and
+process listings.
 
 ```sh
-tar -xzf coderax-cli-0.3.0-standalone.tar.gz -C "$HOME/.coderax/cli"
-ln -sfn "$HOME/.coderax/cli/0.3.0/bin/coderax" "$HOME/.local/bin/coderax"
+coderax login                       # terminal prompt, echo disabled
+printf '%s' "$CODERAX_TOKEN" | coderax login    # CI
+coderax login --token-file ~/.coderax/token     # file must be 0600
 ```
 
-## First run
+Login verifies owner access before writing to the OS credential store.
+
+| Platform | Store |
+| --- | --- |
+| Windows | DPAPI (encrypted to the user account) |
+| Linux | Secret Service via `secret-tool` |
+| macOS | Keychain via `security -i` |
+
+Use `CODERAX_TOKEN` for ephemeral automation when a store is unavailable.
 
 ```sh
-coderax config set --base-url https://coderax.example.com
-coderax login --token-file ~/.coderax/owner-token   # or: ... | coderax login --with-token
-coderax doctor          # environment, config, credential store, reachability
-coderax capabilities    # contract, operations and capability states
+coderax doctor          # environment, install, reachability, API and deployment version
+coderax compat          # explicit two-axis compatibility verdict
 coderax status
 coderax chat "Summarize this repository"
 ```
-
-`coderax login` verifies the token against the engine handshake and the
-owner-only agent read before storing it in the operating-system credential
-store. The config file never contains the token. `--token-file` requires a
-regular file that is not group/other readable; `--with-token` reads stdin.
-Environment variables (`CODERAX_BASE_URL`, `CODERAX_TOKEN`,
-`CODERAX_TIMEOUT_MS`) take precedence over the file and the credential store,
-which suits CI.
 
 Remote deployments must use HTTPS. Plain HTTP is accepted only for `localhost`,
 `127.0.0.1`, and `::1`.
@@ -261,17 +226,18 @@ Remote deployments must use HTTPS. Plain HTTP is accepted only for `localhost`,
 
 ```sh
 coderax --version            # coderax-cli 0.3.0
-coderax status --json        # version, deployment, credential source, config path
+coderax version --json       # machine-readable install report
 coderax help                 # command list
 ```
 
-`coderax status --json` reports the CLI version, deployment URL, whether a
-credential is configured and where it came from, the account label, and the
-config path. It never prints the token.
+`coderax version --json` reports `cliVersion`, `node`, `platform`, `arch`,
+`installMethod` (`standalone`, `npm-global`, `npm-local`, or `source`),
+`installPath`, `configPath`, `supportedApiVersion`,
+`supportedDeploymentRange`, and `compatibilityBasis`.
 
 ## PATH setup
 
-POSIX, if the installer reported that the launcher directory is not on `PATH`:
+POSIX:
 
 ```sh
 export PATH="$HOME/.local/bin:$PATH"   # add to ~/.profile or ~/.zshrc yourself
@@ -287,26 +253,25 @@ Windows, per-user `PATH`:
 )
 ```
 
-Open a new terminal afterwards.
-
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
 | `Node.js is required but was not found` | Node missing from `PATH` | Install Node 24+ from <https://nodejs.org/> |
-| `Node.js 24 or newer is required` | Older runtime | Upgrade Node; the CLI declares `>=24.0.0` |
+| `Node.js 24 or newer is required` | Older runtime | Upgrade Node |
 | `checksum mismatch` | Truncated download, proxy, or tampering | Re-download; do not use `--skip-verify` |
-| `version X is already installed` | Re-running the same version | Use `--force` to replace it |
-| `coderax: command not found` | Launcher directory not on `PATH` | See PATH setup above |
-| Completion does nothing | Shell has not loaded the generated file | Check the path and enable it as shown in [Shell completion](#shell-completion) |
+| `checksum mismatch` after a tampered archive | Integrity check worked | Do not install that file |
+| `archive failed safe extraction` | Absolute path, `..`, symlink, duplicate or overwrite in the archive | Treat the download as hostile; re-download from the release |
+| `version X is already installed` | Re-running the same version | Use `--force` to replace it atomically |
+| `--token is refused` | A token was passed in argv | Use `coderax login`, stdin, `--token-file`, or `CODERAX_TOKEN` |
+| `coderax: command not found` | Launcher directory not on `PATH` | See PATH setup |
 | `BASE_URL_INSECURE` | Remote URL is `http://` | Use `https://`; HTTP is loopback-only |
-| `HTTP_401` / `HTTP_403` | Missing, expired, or revoked token | `coderax login --token-file <path>` |
-| `CONTRACT_INCOMPATIBLE` | Engine does not serve contract 1.1.0 | See [COMPATIBILITY.md](COMPATIBILITY.md) |
-| PowerShell refuses to run the script | Execution policy | Run with `-ExecutionPolicy Bypass` for that process |
-| `install.sh: tar: not found` | Minimal container image | Install `tar`, or extract the archive another way |
+| `HTTP_401` / `HTTP_403` | Missing, expired, or revoked token | `coderax login` |
+| `compat` says unsupported | API major or deployment version outside the contract | See [COMPATIBILITY.md](COMPATIBILITY.md) |
+| PowerShell refuses to run the script | Execution policy | `-ExecutionPolicy Bypass` for that process only |
 
 ## Next steps
 
-- [UPGRADE.md](UPGRADE.md) — moving to a newer release without downtime
+- [UPGRADE.md](UPGRADE.md) — atomic upgrades
 - [ROLLBACK.md](ROLLBACK.md) — returning to a previous version
-- [COMPATIBILITY.md](COMPATIBILITY.md) — supported runtimes and engine versions
+- [COMPATIBILITY.md](COMPATIBILITY.md) — runtime and deployment compatibility
