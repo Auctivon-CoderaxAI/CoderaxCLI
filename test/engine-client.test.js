@@ -318,3 +318,23 @@ function sseJson(res, payload, status = 200) {
   res.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(body) });
   res.end(body);
 }
+
+test("active events can continue past the idle window and the JSON deadline", async () => {
+  await withServer(
+    async (req, res) => {
+      sseHead(res);
+      for (let seq = 1; seq <= 5; seq += 1) {
+        if (seq > 1) await new Promise((resolve) => setTimeout(resolve, 300));
+        sseWrite(res, delta(seq, String(seq)));
+      }
+      res.end();
+    },
+    async (url) => {
+      const seqs = [];
+      for await (const value of client(url, { timeoutMs: 100, eventTimeoutMs: 1000 }).events("task-1")) {
+        seqs.push(value.seq);
+      }
+      assert.deepEqual(seqs, [1, 2, 3, 4, 5]);
+    },
+  );
+});

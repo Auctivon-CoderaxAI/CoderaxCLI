@@ -245,7 +245,7 @@ export class EngineClient {
     return headers;
   }
 
-  async #send({ method, path, query, body, accept = "application/json", signal, timeoutMs, cancelled }) {
+  async #send({ method, path, query, body, accept = "application/json", signal, fixedDeadline = true, cancelled }) {
     let target;
     try {
       target = joinUrl(this.baseUrl, path, query);
@@ -260,8 +260,8 @@ export class EngineClient {
       payload = JSON.stringify(body);
     }
 
-    const timeout = AbortSignal.timeout(timeoutMs ?? this.timeoutMs);
-    const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
+    const deadline = fixedDeadline ? AbortSignal.timeout(this.timeoutMs) : undefined;
+    const combined = deadline && signal ? AbortSignal.any([signal, deadline]) : deadline ?? signal;
 
     try {
       return await this.fetchImpl(target, {
@@ -276,10 +276,10 @@ export class EngineClient {
         throw new CoderaxError("CANCELLED", "request cancelled");
       }
       const name = error?.name ?? "";
-      if (name === "TimeoutError" || name === "AbortError") {
+      if (fixedDeadline && (name === "TimeoutError" || name === "AbortError")) {
         throw new CoderaxError(
           "REQUEST_TIMEOUT",
-          `request to ${target.pathname} timed out after ${timeoutMs ?? this.timeoutMs}ms`,
+          `request to ${target.pathname} timed out after ${this.timeoutMs}ms`,
         );
       }
       throw new CoderaxError(
@@ -337,7 +337,8 @@ export class EngineClient {
   }
 
   chat(request) {
-    return this.#json("submitChat", { path: operation("submitChat").path, body: request });
+    const { path, responseMediaType } = operation("submitChat");
+    return this.#json("submitChat", { path, body: request, accept: responseMediaType });
   }
 
   submitWork(request) {
@@ -409,6 +410,7 @@ export class EngineClient {
     const path = taskPath(taskId, "/events");
     const controller = new AbortController();
     const onAbort = () => controller.abort();
+    if (signal?.aborted) throw new CoderaxError("CANCELLED", "event stream detached");
     signal?.addEventListener("abort", onAbort, { once: true });
     let timedOut = false;
     let timer;
@@ -429,7 +431,7 @@ export class EngineClient {
         query: { after },
         accept: "text/event-stream",
         signal: controller.signal,
-        timeoutMs: this.eventTimeoutMs,
+        fixedDeadline: false,
         // The internal controller also aborts on the idle deadline; only the
         // caller's own signal means a deliberate detach.
         cancelled: () => signal?.aborted === true,
@@ -492,7 +494,6 @@ export class EngineClient {
         }
       }
     } catch (error) {
-      if (error instanceof CoderaxError) throw error;
       if (signal?.aborted) throw new CoderaxError("CANCELLED", "event stream detached");
       if (timedOut) {
         throw new CoderaxError(

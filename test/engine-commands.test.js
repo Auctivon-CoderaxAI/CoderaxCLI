@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { fileURLToPath } from "node:url";
 import { readFile } from "node:fs/promises";
 import { runCli } from "../src/cli.js";
 import {
@@ -78,6 +81,11 @@ async function handler(state, req, res) {
   if (url.pathname === "/v1/models") return json(res, 200, modelsBody());
 
   if (url.pathname === "/v1/chat" && req.method === "POST") {
+    assert.equal(req.headers.accept, "application/json");
+    if (state.onChatRequest) {
+      state.onChatRequest();
+      return;
+    }
     const body = entry.body ?? {};
     return json(res, 200, chatBody({
       text: state.chatText ?? `echo:${body.message}`,
@@ -92,6 +100,7 @@ async function handler(state, req, res) {
   }
 
   if (url.pathname === "/v1/work/task-1" && req.method === "GET") {
+    if (state.taskUnavailable) return json(res, 404, problem(404, "not_found", "status unavailable"));
     return json(res, 200, state.task);
   }
 
@@ -101,6 +110,11 @@ async function handler(state, req, res) {
     }
     const after = Number(url.searchParams.get("after") ?? 0);
     sseHead(res);
+    if (state.onEventsRequest) {
+      sseWrite(res, delta(1, "started"));
+      state.onEventsRequest();
+      return;
+    }
     for (const value of state.events) {
       if (value.seq > after) sseWrite(res, value);
     }
@@ -170,7 +184,7 @@ async function scenario(run) {
       const env = { ...(await tempEnv()), CODERAX_BASE_URL: url, CODERAX_TOKEN: TOKEN };
       const invoke = async (argv, options = {}) => {
         const io = capture();
-        const code = await runCli(argv, {
+        const code = await runCli(["engine", ...argv], {
           env: options.env ?? env,
           stdout: io.stdout,
           stderr: io.stderr,
@@ -186,11 +200,11 @@ async function scenario(run) {
 
 test("login verifies the owner token before storing it", async () => {
   await scenario(async ({ invoke, env }) => {
-    const rejected = await invoke(["login", "--token", "wrong-token", "--json"]);
+    const rejected = await invoke(["login", "--json"], { env: { ...env, CODERAX_TOKEN: "wrong-token" } });
     assert.equal(rejected.code, 3);
     await assert.rejects(readFile(env.CODERAX_CONFIG, "utf8"), (error) => error.code === "ENOENT");
 
-    const accepted = await invoke(["login", "--token", TOKEN, "--json"]);
+    const accepted = await invoke(["login", "--json"]);
     assert.equal(accepted.code, 0);
     assert.equal(accepted.out.includes(TOKEN), false);
     const payload = JSON.parse(accepted.out);
@@ -298,8 +312,8 @@ test("work detaches at an approval request with the exact decision commands", as
     const payload = JSON.parse(result.out);
     assert.equal(payload.detached, true);
     assert.equal(payload.state, "awaiting_approval");
-    assert.match(result.err, /coderax approve task-1 perm-1/);
-    assert.match(result.err, /coderax deny task-1 perm-1/);
+    assert.match(result.err, /coderax engine approve task-1 perm-1/);
+    assert.match(result.err, /coderax engine deny task-1 perm-1/);
   });
 });
 
@@ -447,5 +461,65 @@ test("an expired token during replay is reported once and not retried", async ()
     assert.equal(result.code, 3);
     assert.match(result.err, /expired token/);
     assert.equal(state.requests.filter((request) => request.path.endsWith("/events")).length, 1);
+  });
+});
+
+test("work rejects invalid or detached replay cursors before sending a request", async () => {
+  await scenario(async ({ state, invoke }) => {
+    for (const flags of [["--after", "-1"], ["--after", "1", "--detach"]]) {
+      const result = await invoke(["work", "do the work", ...flags]);
+      assert.equal(result.code, 2);
+      assert.match(result.err, /--after/);
+    }
+    assert.deepEqual(state.requests, []);
+  });
+});
+
+test("work reports the accepted task ID when final status fails in JSON mode", async () => {
+  await scenario(async ({ state, invoke }) => {
+    state.taskUnavailable = true;
+    const result = await invoke(["work", "do the work", "--json"]);
+    assert.equal(result.code, 5);
+    assert.deepEqual(JSON.parse(result.out), {
+      taskId: "task-1",
+      error: { code: "not_found", message: "HTTP 404 from getTask: status unavailable" },
+    });
+    assert.match(result.err, /coderax engine task task-1/);
+  });
+});
+
+test("SIGINT stops a pending Chat and detaches a Work follower", {
+  skip: process.platform === "win32",
+  timeout: 10_000,
+}, async () => {
+  await scenario(async ({ env, state }) => {
+    async function interrupt(args, hook) {
+      let requested;
+      const ready = new Promise((resolve) => { requested = resolve; });
+      state[hook] = requested;
+      const child = spawn(process.execPath, [
+        fileURLToPath(new URL("../src/cli.js", import.meta.url)), "engine", ...args,
+      ], { env: { ...process.env, ...env }, stdio: ["ignore", "pipe", "pipe"] });
+      const closed = once(child, "close");
+      let output = "";
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", (chunk) => { output += chunk; });
+      child.stderr.resume();
+      try {
+        await Promise.race([ready, closed.then(() => { throw new Error("CLI exited before its request"); })]);
+        child.kill("SIGINT");
+        const [code, signal] = await closed;
+        return { code, signal, output };
+      } finally {
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      }
+    }
+
+    const chat = await interrupt(["chat", "wait", "--json"], "onChatRequest");
+    assert.equal(chat.signal, "SIGINT");
+    const work = await interrupt(["work", "wait", "--json"], "onEventsRequest");
+    assert.equal(work.code, 130);
+    assert.equal(JSON.parse(work.output).detached, true);
+    assert.equal(state.requests.some((request) => request.path.endsWith("/cancel")), false);
   });
 });

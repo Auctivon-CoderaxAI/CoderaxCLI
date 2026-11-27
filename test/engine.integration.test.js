@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -40,7 +40,7 @@ async function cli(started, argv, { token = helpers?.OWNER_TOKEN, config } = {})
     CODERAX_BASE_URL: started.url,
     CODERAX_TOKEN: token,
   };
-  const code = await runCli(argv, {
+  const code = await runCli(["engine", ...argv], {
     env,
     stdout: io.stdout,
     stderr: io.stderr,
@@ -90,6 +90,16 @@ test("the CLI meets the real engine contract and owner-only auth", { skip }, asy
   } finally {
     await started.close();
   }
+});
+
+test("the Chat overlay uses the pinned engine's ChatReply schema", { skip }, async () => {
+  const { ChatReply } = await import(pathToFileURL(join(engineRoot, "packages/contracts/dist/tasks.js")).href);
+  const { toJsonSchema } = await import(pathToFileURL(join(engineRoot, "packages/contracts/dist/json-schema.js")).href);
+  const overlay = JSON.parse(await readFile(new URL(
+    "../contracts/workflow-engine-chat.overlay.json", import.meta.url
+  ), "utf8"));
+  const chatContent = overlay.actions.find(({ update }) => update?.["application/json"]);
+  assert.deepEqual(chatContent.update["application/json"].schema, toJsonSchema(ChatReply));
 });
 
 test("chat and conversation history are shared across clients", { skip }, async () => {
@@ -144,13 +154,15 @@ test("work streams, persists status, notifications, history and artifact metadat
     const result = JSON.parse(work.out);
     assert.equal(result.state, "completed");
     assert.equal(result.generation, 1);
-    assert.equal(result.text, "A verified result.\n\nA verified result.\n\nA verified result.");
     assert.ok(result.events >= 5);
     assert.ok(result.conversationId);
 
     const status = await cli(started, ["task", result.taskId, "--json"]);
     assert.equal(status.code, 0);
-    assert.equal(JSON.parse(status.out).state, "completed");
+    const taskStatus = JSON.parse(status.out);
+    assert.equal(taskStatus.state, "completed");
+    assert.match(taskStatus.result.summary, /Verification: passed/);
+    assert.equal(result.text, taskStatus.result.summary);
 
     const notifications = await cli(started, ["notifications", "--json"]);
     assert.equal(notifications.code, 0);
@@ -209,7 +221,7 @@ test("cancellation settles a running task without leaving it running", { skip },
 });
 
 test("a failed task can be retried on the same engine with a new generation", { skip }, async () => {
-  const started = await helpers.startTestApp({ gateway: helpers.failingGateway(1) });
+  const started = await helpers.startTestApp({ gateway: helpers.failingGateway(2) });
   const client = new EngineClient({ baseUrl: started.url, token: helpers.OWNER_TOKEN });
   try {
     const submitted = await cli(started, ["work", "retryable work", "--detach", "--json"]);

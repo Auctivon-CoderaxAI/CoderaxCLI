@@ -1,6 +1,5 @@
 {
   "baseUrl": "https://coderax-engine.example.com",
-  "token": "replace-with-the-owner-token",
   "timeoutMs": 15000,
   "eventTimeoutMs": 60000,
   "agent": "coderax",

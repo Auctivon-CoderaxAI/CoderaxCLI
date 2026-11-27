@@ -1,0 +1,100 @@
+{
+  "overlay": "1.0.0",
+  "info": {
+    "title": "WorkflowEngine 1.0.0 Chat response correction",
+    "version": "1.0.0"
+  },
+  "extends": "./workflow-engine-1.0.0.openapi.json",
+  "actions": [
+    {
+      "target": "$.paths['/v1/chat'].post",
+      "update": {
+        "summary": "One Chat turn returning a JSON reply."
+      }
+    },
+    {
+      "target": "$.paths['/v1/chat'].post.responses['200'].content",
+      "update": {
+        "application/json": {
+          "schema": {
+            "type": "object",
+            "properties": {
+              "conversationId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "messageId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "text": {
+                "type": "string"
+              },
+              "agent": {
+                "type": "string",
+                "enum": [
+                  "coderax",
+                  "opencode",
+                  "freebuff"
+                ]
+              },
+              "model": {
+                "type": "object",
+                "properties": {
+                  "providerId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "modelId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 160
+                  }
+                },
+                "required": [
+                  "providerId",
+                  "modelId"
+                ],
+                "additionalProperties": false
+              },
+              "usage": {
+                "type": "object",
+                "properties": {
+                  "inputTokens": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "outputTokens": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "additionalProperties": false
+              },
+              "createdAt": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "conversationId",
+              "messageId",
+              "text",
+              "agent",
+              "model",
+              "createdAt"
+            ],
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "target": "$.paths['/v1/chat'].post.responses['200'].content['text/event-stream']",
+      "remove": true
+    }
+  ]
+}

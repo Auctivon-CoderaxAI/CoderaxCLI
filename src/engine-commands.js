@@ -9,6 +9,7 @@ import {
   KNOWN_AGENTS,
   contractBanner,
 } from "./contract.js";
+import { credentialBackend, readTokenFile } from "./credentials.js";
 import { followTaskEvents } from "./events.js";
 import { EngineClient } from "./engine.js";
 import { VERSION } from "./version.js";
@@ -55,7 +56,7 @@ export function requireBase(ctx) {
 
 export function requireAuth(ctx) {
   if (!ctx.settings.token) {
-    throw new CoderaxError("unauthorized", "no owner token configured; run `coderax login` first");
+    throw new CoderaxError("unauthorized", "no owner token configured; run `coderax engine login` first");
   }
 }
 
@@ -103,7 +104,7 @@ async function promptText(ctx, mode) {
   let text = ctx.args.join(" ").trim();
   if (!text && !ctx.stdinIsTTY) text = String(await ctx.readSecret()).trim();
   if (!text) {
-    throw usage(`no message provided; usage: coderax ${mode} "your message"`);
+    throw usage(`no message provided; usage: coderax engine ${mode} "your message"`);
   }
   return text;
 }
@@ -140,9 +141,9 @@ function renderTaskEvent(ctx, event, outcome) {
           `  resource    ${request.resource ?? "(unknown)"}`,
           `  description ${request.description ?? ""}`.trimEnd(),
           `  request     ${request.requestId ?? "(unknown)"}`,
-          `  approve     coderax approve ${event.taskId ?? "<taskId>"} ${request.requestId ?? "<requestId>"}`,
-          `  deny        coderax deny ${event.taskId ?? "<taskId>"} ${request.requestId ?? "<requestId>"}`,
-          `  continue    coderax events ${event.taskId ?? "<taskId>"}`,
+          `  approve     coderax engine approve ${event.taskId ?? "<taskId>"} ${request.requestId ?? "<requestId>"}`,
+          `  deny        coderax engine deny ${event.taskId ?? "<taskId>"} ${request.requestId ?? "<requestId>"}`,
+          `  continue    coderax engine events ${event.taskId ?? "<taskId>"}`,
           "",
         ].join("\n"),
       );
@@ -161,9 +162,16 @@ function renderTaskEvent(ctx, event, outcome) {
 
 export async function login(ctx) {
   requireBase(ctx);
-  const token = ctx.flags.get("token") || ctx.env.CODERAX_TOKEN || String(await ctx.readSecret()).trim();
+  const tokenFile = ctx.flags.get("token-file");
+  let token;
+  try {
+    token = tokenFile ? await readTokenFile(tokenFile)
+      : ctx.env.CODERAX_TOKEN?.trim() || String(await ctx.readSecret()).trim();
+  } catch (error) {
+    throw new CoderaxError("TOKEN_READ_FAILED", error.message);
+  }
   if (!token) {
-    throw usage("no token provided; use `coderax login --token <token>` or pipe it on stdin");
+    throw usage("no token provided; use `coderax engine login --token-file <path>`, set CODERAX_TOKEN, or pipe it on stdin");
   }
 
   const engine = new EngineClient({
@@ -175,10 +183,18 @@ export async function login(ctx) {
   // verifyOwner calls an owner-only operation: a valid token proves the caller
   // is the single owner, and a rejected one is never written to disk.
   const agents = await engine.agents();
-  await saveConfig(
-    { token, baseUrl: ctx.settings.baseUrl, account: null },
-    { filePath: ctx.settings.configPath },
-  );
+  const record = { token, baseUrl: ctx.settings.baseUrl, account: null, role: null, authMethod: "v1" };
+  const store = credentialBackend(ctx.env);
+  const save = (credentialStore) => saveConfig(record, {
+    filePath: ctx.settings.configPath, credentialStore, env: ctx.env,
+  });
+  try {
+    await save(store);
+  } catch (error) {
+    if (store === "file") throw error;
+    ctx.err("Credential store unavailable; using the private config file.");
+    await save("file");
+  }
 
   const payload = {
     authenticated: true,
@@ -190,17 +206,19 @@ export async function login(ctx) {
   };
   emit(
     ctx,
-    `Signed in as the owner. Token stored with 0600 permissions. ${contractBanner()}.`,
+    `Signed in as the owner. Token stored securely. ${contractBanner()}.`,
     payload,
   );
   return EXIT.OK;
 }
 
 export async function logout(ctx) {
-  const stored = await loadConfig({ env: {}, filePath: ctx.settings.configPath });
-  const removed = Boolean(stored.token);
+  const { configPath, tokenStore } = ctx.settings;
+  const removed = Boolean((await loadConfig({ env: { ...ctx.env, CODERAX_TOKEN: "" }, filePath: configPath })).token);
   const environmentTokenActive = Boolean(ctx.env.CODERAX_TOKEN?.trim());
-  await saveConfig({ token: null, account: null }, { filePath: ctx.settings.configPath });
+  await saveConfig({ token: null, account: null, role: null, authMethod: null, sessions: null }, {
+    filePath: configPath, credentialStore: tokenStore, env: ctx.env,
+  });
   const message = environmentTokenActive
     ? "Stored credentials cleared. CODERAX_TOKEN is still set; unset it to sign out of this environment."
     : removed
@@ -234,7 +252,7 @@ export async function status(ctx) {
   ctx.out(`WorkflowEngine    ${CONTRACT_VERSION} (events v1)`);
   ctx.out(`API               ${payload.baseUrl ?? "(not configured)"}`);
   ctx.out(
-    `Authentication    ${payload.authenticated ? `owner token (${payload.token}, via ${payload.tokenSource})` : "no \u2014 run `coderax login`"}`,
+    `Authentication    ${payload.authenticated ? `owner token (${payload.token}, via ${payload.tokenSource})` : "no \u2014 run `coderax engine login`"}`,
   );
   if (payload.agent) ctx.out(`Agent             ${payload.agent}`);
   if (payload.model) ctx.out(`Model             ${payload.model}`);
@@ -369,7 +387,24 @@ export async function chat(ctx) {
   return EXIT.OK;
 }
 
+function eventCursor(ctx) {
+  const raw = ctx.flags.get("after") ?? "0";
+  const after = Number(raw);
+  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(after)) {
+    throw usage("--after must be a non-negative integer");
+  }
+  return after;
+}
+
+function followWithSignal(ctx, follow) {
+  return ctx.followWithInterrupt ? ctx.followWithInterrupt(follow) : follow(ctx.signal);
+}
+
 export async function work(ctx) {
+  const after = eventCursor(ctx);
+  if (ctx.flags.has("after") && ctx.flags.has("detach")) {
+    throw usage("--after cannot be combined with --detach");
+  }
   requireBase(ctx);
   requireAuth(ctx);
   const objective = await promptText(ctx, "work");
@@ -391,22 +426,19 @@ export async function work(ctx) {
   if (ctx.flags.has("detach")) {
     emit(
       ctx,
-      `detached; task ${accepted.taskId} continues on the engine.\n  follow  coderax events ${accepted.taskId}\n  status  coderax task ${accepted.taskId}\n  cancel  coderax cancel ${accepted.taskId}\n`,
+      `detached; task ${accepted.taskId} continues on the engine.\n  follow  coderax engine events ${accepted.taskId}\n  status  coderax engine task ${accepted.taskId}\n  cancel  coderax engine cancel ${accepted.taskId}\n`,
       { ...accepted, detached: true },
     );
     return EXIT.OK;
   }
 
-  const after = Number(ctx.flags.get("after") ?? 0);
-  if (!Number.isInteger(after) || after < 0) throw usage("--after must be a non-negative integer");
-
   let assembler;
   try {
-    assembler = await followTaskEvents({
+    assembler = await followWithSignal(ctx, (signal) => followTaskEvents({
       client: engine,
       taskId: accepted.taskId,
       after,
-      signal: ctx.signal,
+      signal,
       onEvent: (event, outcome) => {
         if (outcome.kind === "approval") {
           renderTaskEvent(ctx, event, outcome);
@@ -417,12 +449,12 @@ export async function work(ctx) {
         }
         renderTaskEvent(ctx, event, outcome);
       },
-    });
+    }));
   } catch (error) {
     if (error?.code === "DETACHED") {
       if (!ctx.json) {
         ctx.err(`detached; task ${accepted.taskId} is awaiting an approval decision.`);
-        ctx.err(`  approve/deny or follow: coderax events ${accepted.taskId}`);
+        ctx.err(`  approve/deny or follow: coderax engine events ${accepted.taskId}`);
       } else {
         ctx.out(formatJson({ ...accepted, detached: true, state: "awaiting_approval" }));
       }
@@ -431,8 +463,8 @@ export async function work(ctx) {
     if (error?.code === "CANCELLED") {
       if (!ctx.json) {
         ctx.err(`detached; task ${accepted.taskId} continues on the engine.`);
-        ctx.err(`  follow  coderax events ${accepted.taskId}`);
-        ctx.err(`  cancel  coderax cancel ${accepted.taskId}`);
+        ctx.err(`  follow  coderax engine events ${accepted.taskId}`);
+        ctx.err(`  cancel  coderax engine cancel ${accepted.taskId}`);
       } else {
         ctx.out(formatJson({ ...accepted, detached: true }));
       }
@@ -441,7 +473,7 @@ export async function work(ctx) {
     if (error?.code === "STREAM_DISCONNECTED" || error?.code === "REQUEST_TIMEOUT" || error?.code === "REQUEST_FAILED") {
       throw new CoderaxError(
         error.code,
-        `${error.message}\n  task ${accepted.taskId} may still be running; follow it with \`coderax events ${accepted.taskId}\``,
+        `${error.message}\n  task ${accepted.taskId} may still be running; follow it with \`coderax engine events ${accepted.taskId}\``,
       );
     }
     throw error;
@@ -450,7 +482,17 @@ export async function work(ctx) {
   // Task status is authoritative; the stream is a rendering of it. The
   // completion summary is the engine's final answer, while the stream shows
   // progress, so the summary wins for machine output.
-  const status = await engine.task(accepted.taskId);
+  let status;
+  try {
+    status = await engine.task(accepted.taskId);
+  } catch (error) {
+    const code = error.code ?? "ERROR";
+    if (ctx.json) ctx.out(formatJson({ taskId: accepted.taskId, error: { code, message: error.message } }));
+    throw new CoderaxError(
+      code,
+      `could not read final status for accepted task ${accepted.taskId}: ${error.message}\n  query it with \`coderax engine task ${accepted.taskId}\``,
+    );
+  }
   const text = status.result?.summary || assembler.text || "";
   if (ctx.json) {
     ctx.out(
@@ -534,7 +576,7 @@ export async function tasks(ctx) {
   }
   if (list.notifications.length === 0) {
     ctx.out("no durable tasks reported yet.");
-    ctx.out("use `coderax conversations` for Chat/Work history, or `coderax task <id>` with a known id.");
+    ctx.out("use `coderax engine conversations` for Chat/Work history, or `coderax engine task <id>` with a known id.");
     return EXIT.OK;
   }
   const rows = list.notifications.map((item) => [
@@ -554,21 +596,22 @@ export async function events(ctx) {
   requireAuth(ctx);
   const taskId = ctx.args[0];
   if (!taskId) throw usage("events requires a task id");
-  const after = Number(ctx.flags.get("after") ?? 0);
-  if (!Number.isInteger(after) || after < 0) throw usage("--after must be a non-negative integer");
+  const after = eventCursor(ctx);
   const engine = engineFor(ctx);
   const once = ctx.flags.has("once");
 
   if (once) {
     const { EventAssembler } = await import("./events.js");
     const assembler = new EventAssembler();
-    for await (const event of engine.events(taskId, { after, signal: ctx.signal })) {
-      const outcome = assembler.apply(event);
-      if (outcome.kind === "duplicate") continue;
-      if (ctx.json) ctx.out(`${JSON.stringify(event)}\n`);
-      else renderTaskEvent(ctx, event, outcome);
-      if (assembler.terminal) break;
-    }
+    await followWithSignal(ctx, async (signal) => {
+      for await (const event of engine.events(taskId, { after, signal })) {
+        const outcome = assembler.apply(event);
+        if (outcome.kind === "duplicate") continue;
+        if (ctx.json) ctx.out(`${JSON.stringify(event)}\n`);
+        else renderTaskEvent(ctx, event, outcome);
+        if (assembler.terminal) break;
+      }
+    });
     if (!ctx.json) {
       if (assembler.text) ctx.out("");
       ctx.err(`replayed ${assembler.eventCount} event(s); stopped at seq ${assembler.lastSeq}`);
@@ -576,16 +619,16 @@ export async function events(ctx) {
     return EXIT.OK;
   }
 
-  const assembler = await followTaskEvents({
+  const assembler = await followWithSignal(ctx, (signal) => followTaskEvents({
     client: engine,
     taskId,
     after,
-    signal: ctx.signal,
+    signal,
     onEvent: (event, outcome) => {
       if (ctx.json) ctx.out(`${JSON.stringify(event)}\n`);
       else renderTaskEvent(ctx, event, outcome);
     },
-  });
+  }));
   if (!ctx.json) {
     if (assembler.text) ctx.out("");
     ctx.err(`task ${taskId} ${assembler.terminal?.state ?? "stream ended"} (seq ${assembler.lastSeq})`);
@@ -673,8 +716,8 @@ function renderPermissions(ctx, taskId, list) {
   if (pending.length > 0) {
     ctx.out("");
     for (const request of pending) {
-      ctx.out(`approve  coderax approve ${taskId} ${request.requestId}`);
-      ctx.out(`deny     coderax deny ${taskId} ${request.requestId}`);
+      ctx.out(`approve  coderax engine approve ${taskId} ${request.requestId}`);
+      ctx.out(`deny     coderax engine deny ${taskId} ${request.requestId}`);
     }
   }
 }
@@ -874,7 +917,7 @@ export async function doctor(ctx) {
     detail: ctx.settings.token
       ? `${maskToken(ctx.settings.token)} via ${ctx.env.CODERAX_TOKEN ? "environment" : "config file"}`
       : "no token",
-    hint: ctx.settings.token ? "" : "Run `coderax login`.",
+    hint: ctx.settings.token ? "" : "Run `coderax engine login`.",
   });
 
   let contractVersion = null;
@@ -928,7 +971,7 @@ export async function doctor(ctx) {
           name: "owner-auth",
           ok: false,
           detail: error.message,
-          hint: "The token was rejected; run `coderax login` again.",
+          hint: "The token was rejected; run `coderax engine login` again.",
         });
       }
     }

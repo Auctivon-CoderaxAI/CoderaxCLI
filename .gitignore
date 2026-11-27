@@ -6,4 +6,6 @@ node_modules/
 coverage/
 *.log
 .DS_Store
+dist/
 .ref-engine/
+.engine/

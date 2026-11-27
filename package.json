@@ -1,20 +1,76 @@
 {
   "name": "coderax-cli",
-  "version": "0.1.0",
-  "private": true,
-  "description": "Owner-only Coderax CLI: Chat, durable Work, streaming events, task control, history, permissions and engine diagnostics",
+  "version": "0.3.0",
+  "description": "Owner-only Coderax cloud client and command-line access interface: interactive chat, autonomous Work, durable runs, streaming, replay, diagnostics, and release engineering.",
   "type": "module",
   "bin": {
     "coderax": "src/cli.js"
   },
-  "engines": {
-    "node": ">=24"
+  "exports": {
+    ".": "./src/cli.js",
+    "./client": "./src/client.js",
+    "./compat": "./src/compat.js",
+    "./config": "./src/config.js",
+    "./credentials": "./src/credentials.js",
+    "./diagnostics": "./src/diagnostics.js",
+    "./discover": "./src/discover.js",
+    "./maintenance": "./src/maintenance.js",
+    "./product-registry": "./src/product-registry.js",
+    "./sdk": "./packages/workflow-sdk/src/index.js",
+    "./sdk/contract": "./packages/workflow-sdk/src/contract.js",
+    "./sdk/v1": "./packages/workflow-sdk/src/v1/index.js",
+    "./version": "./src/version.js",
+    "./package.json": "./package.json"
   },
+  "files": [
+    "src/",
+    "packages/workflow-sdk/src/",
+    "packages/workflow-sdk/package.json",
+    "contracts/",
+    "docs/",
+    "README.md",
+    "SECURITY.md",
+    "ARCHITECTURE.md",
+    "BACKEND-DEFECTS.md",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "private": true,
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Auctivon-CoderaxAI/CoderaxCLI.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Auctivon-CoderaxAI/CoderaxCLI/issues"
+  },
+  "homepage": "https://github.com/Auctivon-CoderaxAI/CoderaxCLI#readme",
+  "keywords": [
+    "coderax",
+    "cli",
+    "workflow-engine",
+    "agents"
+  ],
   "scripts": {
     "start": "node src/cli.js --help",
-    "test": "node --test",
-    "test:unit": "node --test test/*.test.js",
+    "test": "node --test \"test/*.test.js\"",
+    "test:contract": "node --test test/contract.test.js test/engine-contract.test.js test/v1-contract.test.js test/workflow-cli.test.js",
     "test:engine": "node --test test/engine.integration.test.js",
-    "check": "node --check src/config.js && node --check src/client.js && node --check src/sse.js && node --check src/contract.js && node --check src/engine.js && node --check src/events.js && node --check src/engine-commands.js && node --check src/discover.js && node --check src/cli.js && node --check src/product-commands.js && node --check src/product-registry.js && node --check src/version.js"
+    "test:pty": "node --test test/pty.test.js",
+    "check": "node scripts/check.js",
+    "build": "node scripts/build-release.mjs",
+    "verify": "node scripts/verify-release.mjs",
+    "repro": "node scripts/repro-check.mjs",
+    "install-test": "node scripts/install-test.mjs",
+    "smoke:install": "node scripts/smoke-install.mjs",
+    "verify:cross-surface": "node scripts/verify-cross-surface.mjs",
+    "audit": "npm audit --audit-level=high",
+    "release:check": "npm run check && npm test && npm run build && npm run verify && npm run repro && npm run install-test",
+    "prepublishOnly": "npm run release:check"
   }
 }

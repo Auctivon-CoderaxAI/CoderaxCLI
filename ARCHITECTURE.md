@@ -1,108 +1,158 @@
 # Architecture
 
-The CLI is a transport and rendering layer. The WorkflowEngine owns every
-decision about models, agents, execution, permissions and persistence.
-
 ```
-argv ──► parseArgv ──► preflight ──► resolveSettings ──► command
+argv ──► parseArgv ──► preflight ──► resolveSettings ──► dispatch
                           │              │                 │
-                     usage errors   config.js         ┌─────┴──────────┐
-                     (exit 2)       env + 0600 file    │                │
-                                                       ▼                ▼
-                                             engine-commands.js    legacy openapi /
-                                                       │             call
-                          ┌────────────────────────────┼───────────────┐
-                          ▼                            ▼               ▼
-                      engine.js                    events.js        config.js
-                    HTTP + SSE client        assembler + reconnect
-                          │                            │
-                          ▼                            ▼
-                      sse.js                     contract.js
-                chunk-safe framing       pinned routes + versions
+                    usage errors    config.js        product commands
+                    (exit 2)     (env + 0600 file)   (login, status, doctor)
+                                                          │
+                                          ┌───────────────┴───────────────┐
+                                          ▼                               ▼
+                                  workflow-commands.js              discover.js
+                                  (chat, work, runs,                (OpenAPI)
+                                   approvals, notifications)
+                                          │
+                                          ▼
+                                  packages/workflow-sdk
+                                  contract · http · sse · client
+                                          │
+                                          ▼
+                                  fetch (HTTPS, no redirects)
+
+The interactive terminal is a presentation layer over the same transport:
+
+interactive.js ─► terminal/session.js ─► sdk.js ─► workflow-transport.js
+                        │                 │        └─► packages/workflow-sdk (legacy /api SSE)
+                        │                 ├─► v1-transport.js ─► packages/workflow-sdk/src/v1
+                        │                 ├─► sdk-legacy.js (explicit only)
+                        │                 └─► @coderax/sdk (verified only)
+                        ├─► terminal/renderer.js ─► terminal/editor.js
+                        ├─► terminal/markdown.js ─► terminal/highlight.js
+                        ├─► terminal/permissions.js
+                        └─► terminal/attachments.js
 ```
 
 ## Layers
 
 | Module | Responsibility | Knows about |
 | --- | --- | --- |
-| `src/contract.js` | pinned contract version, route catalogue, event types, capability truth | nothing |
-| `src/sse.js` | chunk-safe SSE framing, CRLF handling, JSON frames | nothing |
-| `src/engine.js` | one versioned HTTP/SSE request per call, error mapping, response validation | fetch, contract |
-| `src/events.js` | duplicate-safe text assembly, cursor, reconnect and terminal handling | contract |
-| `src/engine-commands.js` | Chat, Work, tasks, replay, control, permissions, history, diagnostics | engine, events, config |
-| `src/config.js` | resolve, validate and atomically persist connection settings | filesystem, environment |
-| `src/cli.js` | parsing, preflight, dispatch, output redaction | all of the above |
-| `src/client.js` | legacy single-request/SSE helper used by `call` and `openapi` | fetch only |
-| `src/discover.js` | legacy OpenAPI discovery for `openapi`; no engine command guesses a route | client |
+| `src/cli.js` | parsing, preflight, dispatch, exit-code mapping, top-level errors | every command module |
+| `src/config.js` | resolve, validate, atomically persist settings; 0600/0700; symlink refusal; sessions; role; delegates the token to the credential store | filesystem, environment, credentials |
+| `src/credentials.js` | OS credential storage (DPAPI, Secret Service), token files, non-argv secret input | fixed OS helpers |
+| `src/product-commands.js` | owner login/logout/whoami/status, doctor, `compat`, `update`, legacy discovery commands | SDK, config, credentials, discovery |
+| `src/compat.js` | two-axis compatibility: SDK API handshake plus deployment `info.version` | SDK, discovery |
+| `src/diagnostics.js` | install method, version and compatibility contract | filesystem, compat |
+| `src/maintenance.js` | uninstall/cleanup of user data and program-removal guidance | filesystem |
+| `src/workflow-commands.js` | chat, Work, autonomous submit, tasks, runs, approvals, cancel/resume/retry, notifications | SDK, session, render, approval |
+| `src/v1-commands.js` | `coderax v1` surface: login/whoami, health, discovery, chat, submit, watch, task control, resolve, notifications, conversations, permissions, templates | shared SDK `/v1` |
+| `src/v1-transport.js` | maps `/v1` execution events onto the terminal vocabulary; honest capabilities | shared SDK `/v1`, client |
+| `src/submissions.js` | durable, private, per-deployment submission ledger | secure-store, config |
+| `src/session.js` | per-deployment conversation continuity, bounded and normalized | none |
+| `src/render.js` | human tables and run rendering | none |
+| `src/approval.js` | fail-closed approval policies | SDK |
+| `src/discover.js` | OpenAPI discovery for `openapi`/`agents`/`models` | HTTP client |
+| `packages/workflow-sdk/src/contract.js` | routes, capabilities, statuses, documented backend gaps | none |
+| `packages/workflow-sdk/src/http.js` | transport, SSE content-type enforcement, version header, idle timeout, cancellation | `fetch` |
+| `packages/workflow-sdk/src/sse.js` | SSE decoder, event sequencing, deduplication, gap handling | none |
+| `packages/workflow-sdk/src/client.js` | owner check, negotiation, chat, runs, builds, approvals, cancellation | contract, http, sse |
+| `packages/workflow-sdk/src/v1/contract.js` | pinned `/v1` route catalogue and strict payload/event validators | none |
+| `packages/workflow-sdk/src/v1/client.js` | `/v1` requests, negotiation, SSE chat and event replay | v1 contract, http, sse |
+| `packages/workflow-sdk/src/v1/stream.js` | durable task tailing: dedupe, gap detection, bounded reconnect | v1 contract |
+| `packages/workflow-sdk/src/v1/submit.js` | at-most-once submission over an injected ledger; uncertainty handling | v1 contract |
+| `packages/workflow-sdk/src/redact.js` | streaming and recursive token redaction | none |
+| `src/client.js` | one HTTP request, error mapping, redaction | `fetch` only |
+| `src/product-registry.js` | canonical five-product status data | none |
+| `src/commands.js` | canonical command catalogue for CLI dispatch and terminal completion | none |
+| `src/sdk.js` | interactive transport facade: canonical `/v1`, shared legacy SDK, verified `@coderax/sdk` gate | shared SDK, legacy adapter |
+| `src/workflow-transport.js` | terminal adapter over the shared workflow SDK | `packages/workflow-sdk` |
+| `src/sdk-legacy.js` | explicit compatibility SSE adapter | client, discovery |
+| `src/interactive.js` | TTY raw mode, resize, accessible input | terminal modules, sdk |
+| `src/terminal/session.js` | interactive Chat/Work orchestration | renderer, editor, stores |
+| `src/terminal/renderer.js` | prompt region, bounded block, accessible output | text, theme |
+| `src/terminal/markdown.js` | streaming markdown, highlighting, preview | sanitize, text, highlight |
+| `src/terminal/editor.js` | grapheme-safe multiline editing | text |
+| `src/terminal/keys.js` | key/paste parsing | none |
+| `src/terminal/history.js` | prompt and conversation metadata storage | secure-store |
+| `src/terminal/permissions.js` | verified approval binding | sanitize |
+| `src/terminal/attachments.js` | explicit local-file review | sanitize |
+| `src/secure-store.js` | cross-platform private file verification | OS ACL tools |
 
-Each layer is injectable: tests pass `fetchImpl`, `env`, `stdout`, `stderr` and
-file readers, so the suite runs without a deployment.
+The SDK is imported by relative path. There is no workspace install step, no
+npm dependency and no duplicate backend implementation inside the CLI.
 
-## Invariants
+## Credentials
 
-1. **Server authority.** Task state, conversations, permissions and
-   notifications are read from the engine. The CLI never derives a terminal
-   state or invents a task.
-2. **No orchestration.** There is no model routing, planner, tool runner, task
-   queue or database in this repository.
-3. **Owner only.** There is no signup, membership or billing surface. Login is
-   accepted only when an owner-only operation succeeds.
-4. **One client contract.** The route table and versions come from the pinned
-   engine OpenAPI document; `test/contract.test.js` fails on drift.
-5. **Event durability is server-side.** Detaching closes a stream, not a task.
-   Reconnecting uses `after=<lastSeq>` and replays retained events.
-6. **Dedupe before display.** `eventId` and per-task `seq` are the identity of
-   an event. A replayed or out-of-order event is ignored.
-7. **Snapshots win over their deltas.** A cumulative snapshot that extends the
-   displayed text emits only the suffix; a snapshot that rewrites it emits one
-   replacement. An incremental delta already present at the end of a snapshot is
-   discarded, never printed twice.
-8. **Token hygiene.** Every output path passes through redaction. The token is
-   never in a URL, config summary, error message or streamed event.
+`credentials.js` is the only module allowed to handle a secret before it reaches
+the config layer. It never puts a token in `argv`: Windows DPAPI and Linux
+Secret Service are driven through stdin, and the macOS Keychain is deliberately
+not used because its CLI requires the password as an argument. When no OS store
+is available the token goes into the `0600` config file and the CLI says so.
 
-## Event pipeline
+## Release engineering
 
-```
-GET /v1/work/{id}/events?after=N
-        │
-        ▼
-  SseDecoder  ── frame split at any byte, CRLF/lone CR ──► JSON envelope
-        │
-        ▼
-  EventAssembler ── duplicate? ──► ignore
-        │              │
-        │              ├─ text.delta ──► append unseen
-        │              ├─ text.replace ──► suffix or replacement
-        │              └─ task.completed/failed/cancelled/interrupted ──► terminal
-        ▼
-  render / JSON output / cursor advance
-```
+`scripts/build-release.mjs` produces deterministic npm, POSIX and Windows
+artifacts, embeds the safe extractor into both installers, and writes the
+manifest, checksums and SPDX SBOM. `verify-release.mjs` re-checks every hash and
+the embedded extractor. `install-test.mjs` installs the packed artifacts and
+exercises hostile archives, secure auth, every compatibility state, streaming,
+atomic upgrade and uninstall. `repro-check.mjs` proves two builds are identical.
 
-A clean close without a terminal event is a reconnect, not a completion. A 401,
-403, 404, malformed frame or contract violation is fatal. A network failure,
-idle deadline or 5xx is retried with bounded backoff; the reconnect count resets
-after any received event.
+## Streams
+
+### Chat
+
+`POST /api/work/chat` is a single, non-retryable request. The SDK accepts
+cumulative snapshots (`message`, `type:"text"`) and deltas, treats the final
+frame as authoritative, and flushes any suffix held by the streaming redactor.
+Interruption yields `STREAM_INCOMPLETE` with the conversation id; it never
+re-POSTs.
+
+### Durable runs
+
+`GET /api/workflows/runs/:id/stream` is a snapshot stream. `watchRun` reconnects
+with bounded exponential backoff, sends `last-event-id` only when it has an id,
+and treats duplicate snapshots as idempotent. `EventSequencer` buffers
+out-of-order frames and reports gaps. Terminal statuses stop monitoring;
+`paused` and `waiting_approval` remain observable.
+
+## Ordering rules
+
+`preflight` runs before config resolution so an unknown command reports a usage
+error, not a missing base URL. Usage errors exit `2`; contract failures exit
+`7`; unavailable capabilities exit `6`. A failed run exits `1`. A local detach
+exits `130` without cancelling.
 
 ## Failure semantics
 
 | Condition | Code | Exit |
 | --- | --- | --- |
-| unknown command, flag misuse, invalid agent/model/mode | `USAGE` | 2 |
-| insecure URL, bad timeout, unreadable config | `BASE_URL_*`, `TIMEOUT_INVALID` | 2 |
-| no engine configured | `BASE_URL_REQUIRED` | 1 |
-| HTTP 401/403 or engine `unauthorized`/`forbidden` | `unauthorized`, `forbidden` | 3 |
-| HTTP 404 or engine `not_found` | `not_found` | 5 |
-| timeout, transport failure, lost stream | `REQUEST_TIMEOUT`, `REQUEST_FAILED`, `STREAM_DISCONNECTED` | 4 |
-| engine unavailable or not ready | `engine_unavailable`, `not_ready` | 6 |
-| contract mismatch, malformed event, other engine failure | `CONTRACT_*`, `STREAM_PROTOCOL`, engine code | 1 |
-| task cancelled or client detached | `CANCELLED` | 130 |
+| unknown command or flag misuse | `USAGE` / `UsageError` | 2 |
+| insecure URL, bad timeout | `BASE_URL_*`, `TIMEOUT_INVALID` | 2 |
+| no deployment or token | `BASE_URL_REQUIRED`, `UNAUTHENTICATED` | 1 / 3 |
+| HTTP 401/403 or non-owner | `UNAUTHENTICATED`, `FORBIDDEN` | 3 |
+| timeout or transport failure | `REQUEST_TIMEOUT`, `NETWORK` | 4 |
+| HTTP 404 | `NOT_FOUND` | 5 |
+| missing capability or bad API major | `CAPABILITY_UNAVAILABLE`, `API_VERSION_*` | 6 |
+| SSE/JSON mismatch, incomplete stream | `CONTRACT_VIOLATION`, `STREAM_INCOMPLETE` | 7 |
+| local cancellation/detach | `CANCELLED` | 130 |
+
+## Terminal memory bounds
+
+The renderer keeps only the last response block (200 rows / 64 KiB) for resize
+reflow; earlier output belongs to the terminal's scrollback. Markdown rendering
+is capped at 2 MiB with an explicit truncation notice, code blocks at 4000
+lines, tool activity at 200 events, conversations at 50 records, prompt history
+at its configured limit, and the editor at 100 000 characters / 200 lines.
 
 ## Deliberate constraints
 
-- One request per command, except `capabilities` and `doctor` (parallel reads)
-  and the event stream.
-- No redirects: `redirect: "error"`.
-- No cookie jar, telemetry or persistent HTTP agent.
-- No local task database. The only local state is the owner token and defaults.
-- No artifact transfer: contract 1.0.0 has no such operation.
-- No inference, build, test or engineering workload runs on the client host.
+- No local execution, inference, database, Docker or agent process.
+- No automatic POST retries for Chat; no hidden write probes during negotiation.
+- No redirects; no cookie jar; no telemetry.
+- No token in output, diagnostics, sessions or error text.
+- Unknown backend capabilities fail closed rather than guessing paths.
+
+The explicit `coderax engine` command group runs the WorkflowEngine task and
+event commands through `src/engine-commands.js` and `src/engine.js`. It uses
+the same pinned OpenAPI artifact as the shared SDK and does not orchestrate,
+route models, or persist task state locally.

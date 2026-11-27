@@ -1,30 +1,148 @@
 name: ci
 
-# Every pushed branch is verified, not only main: a feature branch gets hosted
-# Linux, Windows and macOS evidence before a pull request exists. Pull requests
-# are verified again at the exact head.
 on:
   push:
+    # `main` keeps the full OS matrix green. `rc/**` exists so a release
+    # candidate can be accepted on Windows and macOS at its exact SHA without
+    # paying the matrix multiplier on every pull request; it is not a
+    # publishing branch and never bypasses review of `main`.
     branches: ["**"]
-  pull_request:
   workflow_dispatch:
+  # Only code changes start the matrix. A plain `pull_request` also fires on
+  # edits, labels and bot comments; with cancel-in-progress that killed a
+  # running Windows job when a review bot updated the PR body.
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read
 
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
-
+# Concurrency is per job and does not cancel. A backed-up hosted queue makes a
+# newer run share a group with older candidates; cancelling in progress then
+# discards the newer run before it can execute. Each job waits its turn, and the
+# required `test` gate stays outside every group so it always reports.
 jobs:
-  test:
-    name: test (${{ matrix.os }})
+  # Hosted standard runners only. This repository is being prepared for private
+  # operation, so pull requests run Linux only; the full OS matrix runs on main
+  # and on an `rc/**` release candidate; other branches verify on Linux. That keeps the macOS (10x) and Windows
+  # (2x) multipliers off every PR while still requiring cross-platform
+  # acceptance at the exact release SHA before a release.
+  verify:
+    name: verify (${{ matrix.os }})
+    concurrency:
+      group: ci-${{ github.workflow }}-${{ github.ref }}-verify-${{ matrix.os }}
+      cancel-in-progress: false
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 20
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: ${{ fromJSON((github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/heads/rc/'))) && '["ubuntu-latest"]' || '["ubuntu-latest","windows-latest","macos-latest"]') }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Install from the lockfile
+        run: npm ci --ignore-scripts
+      - name: Syntax check
+        run: npm run check
+      # On Windows this runs the Windows-only ACL, console and wide-character
+      # tests. On every platform it runs the terminal, session, SDK, permission
+      # and secure-store suites.
+      #
+      # The output is tee'd and, on Windows, a failed run republishes the failing
+      # test names as check annotations. Job logs need repository admin rights,
+      # so without this a Windows-only failure is visible as "exit code 1" and
+      # nothing else. `shell: bash` keeps pipefail, so the step still fails.
+      - name: Unit, CLI, security and contract tests
+        shell: bash
+        run: npm test 2>&1 | tee test-output.log
+      - name: Publish failing test names
+        if: failure() && runner.os == 'Windows'
+        shell: bash
+        run: |
+          if [ -f test-output.log ]; then
+            # Keep the actual/expected lines: an assertion message alone is not
+            # enough to diagnose a Windows-only failure without the job log.
+            grep -E -A 8 '^✖ |^  ✖ |AssertionError|^not ok ' test-output.log | head -60 | while IFS= read -r line; do
+              [ -n "$line" ] && echo "::error::${line}"
+            done
+          fi
+      - name: Check out the pinned WorkflowEngine
+        if: runner.os == 'Linux'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Auctivon-CoderaxAI/Coderax-WorkflowEngine
+          ref: 7b7c9d7a88b8e483995ebe445f2bbbdd29050229
+          path: .engine
+          persist-credentials: false
+      - name: Install and build the engine
+        if: runner.os == 'Linux'
+        working-directory: .engine
+        run: npm ci --no-audit --no-fund && npm run build
+      - name: Run the CLI against the real engine harness
+        if: runner.os == 'Linux'
+        run: WORKFLOW_ENGINE_ROOT="$GITHUB_WORKSPACE/.engine" npm run test:engine
+      - name: Build release artifacts
+        run: npm run build
+      - name: Verify checksums, contents, installers and safety
+        run: npm run verify
+      # Real packed artifacts: install into a path with spaces and Unicode,
+      # refuse argv tokens, authenticate over stdin, exercise every
+      # compatibility state, stream Work SSE, upgrade atomically with rollback,
+      # and uninstall.
+      - name: Hosted installation acceptance (install → auth → upgrade → uninstall)
+        run: npm run install-test
+      # The acceptance script records every check in dist/install-evidence.json.
+      # Publish the failing ones as annotations so an installer failure is
+      # diagnosable without admin access to the job log or the artifact.
+      - name: Publish install acceptance failures
+        if: failure()
+        shell: bash
+        run: |
+          if [ -f dist/install-evidence.json ]; then
+            node -e 'const e=require("./dist/install-evidence.json"); for (const c of e.checks||[]) if (!c.ok) console.log("::error::"+c.name+": "+String(c.detail||"").split("\n")[0]);'
+          fi
+      - name: Reproducibility check
+        if: runner.os == 'Linux'
+        run: npm run repro
+      - name: Upload installation evidence
+        if: failure() || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: install-evidence-${{ matrix.os }}
+          path: |
+            dist/install-evidence.json
+            dist/SHA256SUMS
+            dist/sbom.spdx.json
+            dist/release-manifest.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # A real pseudo-terminal, not a mocked stream: raw mode, resize, wide
+  # characters, multiline editing, markdown streaming, cancellation and clean
+  # exit. `script` is available on both hosted POSIX images.
+  pty:
+    name: real PTY (${{ matrix.os }})
+    concurrency:
+      group: ci-${{ github.workflow }}-${{ github.ref }}-pty-${{ matrix.os }}
+      cancel-in-progress: false
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -34,25 +152,68 @@ jobs:
         uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b # v4.0.3
         with:
           node-version: "24"
-      - name: Syntax check
-        run: npm run check
-      - name: Unit and HTTP tests
-        run: npm test
-      # The engine is public. Pinning its commit makes the contract test
-      # reproducible and keeps a moving upstream out of the merge gate. One
-      # Ubuntu job runs both suites so a single runner is enough per push.
-      - name: Check out the pinned WorkflowEngine
-        if: matrix.os == 'ubuntu-latest'
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+          cache: npm
+      - name: Install from the lockfile
+        run: npm ci --ignore-scripts
+      - name: Real pseudo-terminal tests
+        run: npm run test:pty
+
+  # The protected branch requires a check context named exactly "test".
+  # GitHub accepts a skipped job as passing, so evaluate the result even after
+  # verify fails or is cancelled, and keep this gate outside concurrency
+  # groups so it cannot block verification for a newer run.
+  test:
+    name: test
+    needs: [verify, pty]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every platform and PTY job to pass
+        shell: bash
+        run: |
+          verify="${{ needs.verify.result }}"
+          pty="${{ needs.pty.result }}"
+          echo "verify result: $verify"
+          echo "pty result: $pty"
+          if [ "$verify" != "success" ] || [ "$pty" != "success" ]; then
+            echo "One or more platform or PTY jobs did not pass."
+            exit 1
+          fi
+
+  dependencies:
+    name: dependency audit
+    concurrency:
+      group: ci-${{ github.workflow }}-${{ github.ref }}-dependencies
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: Auctivon-CoderaxAI/Coderax-WorkflowEngine
-          ref: 808dfd3797f9b1d7647ebd14bd395806fc4ab9bd
-          path: .engine
           persist-credentials: false
-      - name: Install and build the engine
-        if: matrix.os == 'ubuntu-latest'
-        working-directory: .engine
-        run: npm ci --no-audit --no-fund && npm run build
-      - name: Run the CLI against the real engine harness
-        if: matrix.os == 'ubuntu-latest'
-        run: WORKFLOW_ENGINE_ROOT="$GITHUB_WORKSPACE/.engine" npm run test:engine
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Install from the lockfile
+        run: npm ci --ignore-scripts
+      - name: Runtime dependencies must remain empty
+        shell: bash
+        run: |
+          node -e '
+            const pkg = require("./package.json");
+            const deps = Object.keys(pkg.dependencies ?? {});
+            if (deps.length > 0) {
+              console.error("runtime dependencies are not allowed: " + deps.join(", "));
+              process.exit(1);
+            }
+            console.log("runtime dependencies: 0");
+          '
+      - name: Audit the dependency tree
+        run: npm audit --audit-level=high
+      - name: Show the full dependency tree
+        run: npm ls --all
