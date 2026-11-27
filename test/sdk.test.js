@@ -229,6 +229,23 @@ test("the shared workflow SDK is the default and an invalid mode is rejected", a
   );
 });
 
+test("the /v1 transport is explicit, verified and honest about attachments", async () => {
+  const { transport, description } = await createTransport({
+    settings: legacyOptions(),
+    env: { CODERAX_SDK: "v1" },
+  });
+  assert.equal(transport.kind, "workflow-v1");
+  assert.equal(description.contractVerified, true);
+  assert.equal(description.contractVersion, "1.0.0");
+  assert.equal(transport.capabilities.stream, true);
+  assert.equal(transport.capabilities.work, true);
+  assert.equal(transport.capabilities.conversations, true);
+  // The /v1 contract publishes no upload operation, so this must stay false.
+  assert.equal(transport.capabilities.attachments, false);
+  assert.equal(transport.capabilities.verifiedPermissions, true);
+  await transport.close();
+});
+
 test("capability normalisation is explicit about permissions", () => {
   assert.equal(normalizeCapabilities({}).stream, false);
   assert.deepEqual(normalizeCapabilities({ permissions: ["read_file"] }).permissions, ["read_file"]);

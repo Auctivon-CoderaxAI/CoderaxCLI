@@ -2,7 +2,12 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    # `main` keeps the full OS matrix green. `rc/**` exists so a release
+    # candidate can be accepted on Windows and macOS at its exact SHA without
+    # paying the matrix multiplier on every pull request; it is not a
+    # publishing branch and never bypasses review of `main`.
+    branches: [main, "rc/**"]
+  workflow_dispatch:
   # Only code changes start the matrix. A plain `pull_request` also fires on
   # edits, labels and bot comments; with cancel-in-progress that killed a
   # running Windows job when a review bot updated the PR body.
@@ -18,8 +23,10 @@ concurrency:
 
 jobs:
   # Hosted standard runners only. This repository is being prepared for private
-  # operation, so pull requests run Linux only; the full OS matrix runs on main.
-  # That keeps the macOS (10x) and Windows (2x) multipliers off every PR.
+  # operation, so pull requests run Linux only; the full OS matrix runs on main
+  # and on an `rc/**` release candidate. That keeps the macOS (10x) and Windows
+  # (2x) multipliers off every PR while still requiring cross-platform
+  # acceptance at the exact release SHA before a release.
   verify:
     name: verify (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

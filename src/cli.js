@@ -11,6 +11,7 @@ import { CoderaxError, formatJson, redact, request } from "./client.js";
 import { discoverOpenApi, findOperation } from "./discover.js";
 import * as product from "./product-commands.js";
 import * as workflow from "./workflow-commands.js";
+import * as v1 from "./v1-commands.js";
 import * as maintenance from "./maintenance.js";
 import { collectVersionInfo, formatVersionInfo } from "./diagnostics.js";
 import { SdkError } from "../packages/workflow-sdk/src/index.js";
@@ -31,6 +32,8 @@ Usage:
   coderax work submit <prompt> --repo <owner/name> --agent <id> [--base-ref <ref>]
                               [--mode turbo15|autonomous|verified] [--workspace <name>]
                               [--follow] [--json]
+  coderax v1 <health|chat|submit|task|watch|tasks|cancel|resume|retry|resolve|...> [--json]
+                                              canonical WorkflowEngine /v1 surface
   coderax tasks [taskId] [--json]              durable Work conversations
   coderax workflows [--json]
   coderax runs --workflow <id> [--json]
@@ -118,6 +121,9 @@ const EXIT = Object.freeze({
   notFound: 5,
   unavailable: 6,
   contract: 7,
+  approval: 8,
+  uncertain: 9,
+  conflict: 10,
   cancelled: 130,
 });
 
@@ -171,6 +177,10 @@ const KNOWN_FLAGS = new Set([
   "plain",
   "resume",
   "no-history",
+  "template",
+  "generation",
+  "after",
+  "retry-submission",
 ]);
 const ALLOWED_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
 const BOOLEAN_FLAGS = new Set([
@@ -194,6 +204,7 @@ const BOOLEAN_FLAGS = new Set([
   "accessible",
   "plain",
   "no-history",
+  "retry-submission",
 ]);
 
 export class UsageError extends Error {
@@ -577,6 +588,19 @@ function exitFor(error) {
   ) {
     return EXIT.unavailable;
   }
+  if (
+    error.code === "APPROVAL_REQUIRED" ||
+    error.code === "PERMISSION_REQUIRED" ||
+    error.code === "permission_required"
+  ) {
+    return EXIT.approval;
+  }
+  if (error.code === "SUBMISSION_UNCERTAIN" || error.code === "SUBMISSION_IN_PROGRESS") {
+    return EXIT.uncertain;
+  }
+  if (error.code === "CONFLICT" || error.code === "HTTP_409" || error.code === "conflict" || error.code === "busy") {
+    return EXIT.conflict;
+  }
   if (error.code === "CANCELLED") return EXIT.cancelled;
   if (
     error.code === "UNAUTHENTICATED" ||
@@ -699,6 +723,8 @@ export async function runCli(argv, options = {}) {
         return await workflow.chatCommand(ctx, ctx.args);
       case "work":
         return await workflow.workCommand(ctx, ctx.args);
+      case "v1":
+        return await v1.v1Command(ctx, ctx.args);
       case "tasks":
         return await workflow.tasksCommand(ctx, ctx.args);
       case "workflows":

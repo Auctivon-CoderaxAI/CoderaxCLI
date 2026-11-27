@@ -144,3 +144,46 @@ not a tenant-scoped role.
 | `repos` | `/api/repos` | exit `6` |
 | API version | metadata/header | `API_VERSION_UNVERIFIED`; `--strict` exit `6` |
 | event replay | SSE ids + `Last-Event-ID` | `CURSOR_UNSUPPORTED`; reconnect re-reads snapshots |
+
+## WorkflowEngine `/v1` findings
+
+Scope: `Auctivon-CoderaxAI/Coderax-WorkflowEngine` at `main`
+(`808dfd3797f9b1d7647ebd14bd395806fc4ab9bd`). The CLI consumes this contract
+through `packages/workflow-sdk/src/v1/` and pins the document in
+`contracts/workflow-engine-1.0.0.openapi.json`.
+
+### W1 — `/v1/chat` is documented as SSE but implemented as JSON *(high)*
+
+**Observed.** `packages/contracts/src/routes.ts` declares `submitChat` with
+`stream: true` and `{ status: 200, description: 'Chat reply', schema: ChatReply }`.
+`buildOpenApiDocument` therefore publishes
+`text/event-stream` as the only `200` content type. `src/api/routes.ts` registers
+the handler as `{ kind: 'json', status: 200, body: result.value }`.
+
+**Client behaviour.** The CLI sends `Accept: application/json,
+text/event-stream` and accepts either shape. A JSON body is validated as
+`ChatReply`; an SSE body must end in a `ChatReply` frame or the turn fails with
+`STREAM_INCOMPLETE`. It does not guess.
+
+**Required engine change.** Either stream the turn (emit `text.delta` frames and
+a final `ChatReply`) or mark the route as a JSON response. The generated document
+and the handler must agree; a client generated from this document would otherwise
+break on every successful chat.
+
+**Acceptance test.** `npm run openapi:check` should also assert that a route
+marked `stream: true` returns `{ kind: 'sse' }` from its handler.
+
+### W2 — `/v1/work` is not idempotent *(high)*
+
+**Observed.** `submitWork` has no documented idempotency key and no
+`Idempotency-Key` header in the contract. A lost `202` is therefore ambiguous.
+
+**Client behaviour.** The CLI writes a submission key to a private durable ledger
+before transmitting, sends `idempotency-key` and `x-coderax-client-request-id`,
+and never retries an ambiguous submission automatically. It reports
+`SUBMISSION_UNCERTAIN` (exit `9`) with the key and any conversation id, and
+offers `coderax work resolve <key> <taskId>`.
+
+**Required engine change.** Honour `Idempotency-Key` on `POST /v1/work` and
+return the original `TaskAccepted` for a repeat, so a client can recover without
+owner reconciliation.

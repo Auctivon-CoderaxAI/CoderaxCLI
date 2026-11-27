@@ -30,6 +30,9 @@ export const EXIT = Object.freeze({
   NOT_FOUND: 5,
   UNAVAILABLE: 6,
   CONTRACT: 7,
+  APPROVAL: 8,
+  UNCERTAIN: 9,
+  CONFLICT: 10,
   CANCELLED: 130,
 });
 

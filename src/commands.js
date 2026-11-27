@@ -122,6 +122,11 @@ export const COMMANDS = Object.freeze([
     cli: "work [message] [--model <id>] [--agent <id>] [--json]",
   }),
   Object.freeze({
+    name: "v1",
+    description: "Canonical WorkflowEngine /v1 operations",
+    cli: "v1 <health|models|agents|chat|submit|task|watch|tasks|cancel|resume|retry|resolve|notifications|conversations|permissions|templates> [--json]",
+  }),
+  Object.freeze({
     name: "tasks",
     description: "List or inspect durable Work conversations",
     cli: "tasks [taskId] [--json]",

@@ -209,3 +209,47 @@ The response is `{ requestId, executionId, action, resourceHash, decision,
   `waiting_approval` fails closed;
 - expired credentials exit `3` without retrying;
 - an unadvertised capability exits `6` without calling the guessed route.
+
+## Canonical WorkflowEngine `/v1` contract
+
+The authoritative engine contract is
+`Auctivon-CoderaxAI/Coderax-WorkflowEngine`. Its generated `openapi.json` is
+vendored at `contracts/workflow-engine-1.0.0.openapi.json` with provenance in
+[`contracts/PROVENANCE.md`](../contracts/PROVENANCE.md). The implementation
+lives inside the one shared SDK at `packages/workflow-sdk/src/v1/`; there is no
+second mirror in `src/`.
+
+| Concern | Behaviour |
+| --- | --- |
+| Version | Accepts any server reporting major `1`; a newer minor records `CONTRACT_MINOR_NEWER`; another major is `CONTRACT_UNSUPPORTED`. |
+| Validation | Every response and execution event is checked with strict, exact-key rules. A drift is `CONTRACT_VIOLATION`, never a plausible wrong value. |
+| Chat | `POST /v1/chat` accepts a JSON `ChatReply` or an SSE reply that ends in one; an SSE reply without a final `ChatReply` is `STREAM_INCOMPLETE`. |
+| Events | `GET /v1/work/{taskId}/events?after=<seq>` plus `Last-Event-ID`. A duplicate `eventId` is dropped; `seq <= last` is a replay; a gap reconnects from the cursor; more than three gaps is `EVENT_GAP`. |
+| Task state | `GET /v1/work/{taskId}` is authoritative. A closed stream is never read as completion. |
+| Submission | One idempotency key per submission, written to a private ledger before transmission. An ambiguous outcome is `SUBMISSION_UNCERTAIN` (exit `9`) and is never retried automatically. |
+| Approvals | Only a server-issued `approval.required` event produces a prompt; a decision is sent to `POST /v1/work/{taskId}/permissions` with its `requestId`. |
+| Attachments | Refused with `CAPABILITY_UNAVAILABLE`; `/v1` publishes no upload operation. |
+
+`CODERAX_SDK=v1` selects this transport and fails closed. `workflow` and
+`legacy` remain explicit migration modes; `auto` and `canonical` are unchanged.
+
+Exit codes:
+
+| Code | Meaning |
+| --- | --- |
+| 0 | success |
+| 1 | unclassified failure |
+| 2 | usage |
+| 3 | unauthenticated / forbidden |
+| 4 | network or timeout |
+| 5 | not found |
+| 6 | unavailable / unsupported capability |
+| 7 | contract violation |
+| 8 | approval required and not granted |
+| 9 | submission uncertain (do not blindly resubmit) |
+| 10 | conflict or busy |
+| 130 | cancelled |
+
+Engine-side defects found while implementing this contract are recorded in
+[`BACKEND-DEFECTS.md`](../BACKEND-DEFECTS.md) (W1 chat content type, W2 Work
+idempotency).

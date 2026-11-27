@@ -22,7 +22,8 @@ argv ──► parseArgv ──► preflight ──► resolveSettings ──►
 The interactive terminal is a presentation layer over the same transport:
 
 interactive.js ─► terminal/session.js ─► sdk.js ─► workflow-transport.js
-                        │                 │        └─► packages/workflow-sdk (SSE)
+                        │                 │        └─► packages/workflow-sdk (legacy /api SSE)
+                        │                 ├─► v1-transport.js ─► packages/workflow-sdk/src/v1
                         │                 ├─► sdk-legacy.js (explicit only)
                         │                 └─► @coderax/sdk (verified only)
                         ├─► terminal/renderer.js ─► terminal/editor.js
@@ -43,6 +44,9 @@ interactive.js ─► terminal/session.js ─► sdk.js ─► workflow-transpor
 | `src/diagnostics.js` | install method, version and compatibility contract | filesystem, compat |
 | `src/maintenance.js` | uninstall/cleanup of user data and program-removal guidance | filesystem |
 | `src/workflow-commands.js` | chat, Work, autonomous submit, tasks, runs, approvals, cancel/resume/retry, notifications | SDK, session, render, approval |
+| `src/v1-commands.js` | `coderax v1` surface: health, discovery, chat, submit, watch, task control, resolve, notifications, conversations, permissions, templates | shared SDK `/v1` |
+| `src/v1-transport.js` | maps `/v1` execution events onto the terminal vocabulary; honest capabilities | shared SDK `/v1`, client |
+| `src/submissions.js` | durable, private, per-deployment submission ledger | secure-store, config |
 | `src/session.js` | per-deployment conversation continuity, bounded and normalized | none |
 | `src/render.js` | human tables and run rendering | none |
 | `src/approval.js` | fail-closed approval policies | SDK |
@@ -51,6 +55,10 @@ interactive.js ─► terminal/session.js ─► sdk.js ─► workflow-transpor
 | `packages/workflow-sdk/src/http.js` | transport, SSE content-type enforcement, version header, idle timeout, cancellation | `fetch` |
 | `packages/workflow-sdk/src/sse.js` | SSE decoder, event sequencing, deduplication, gap handling | none |
 | `packages/workflow-sdk/src/client.js` | owner check, negotiation, chat, runs, builds, approvals, cancellation | contract, http, sse |
+| `packages/workflow-sdk/src/v1/contract.js` | pinned `/v1` route catalogue and strict payload/event validators | none |
+| `packages/workflow-sdk/src/v1/client.js` | `/v1` requests, negotiation, SSE chat and event replay | v1 contract, http, sse |
+| `packages/workflow-sdk/src/v1/stream.js` | durable task tailing: dedupe, gap detection, bounded reconnect | v1 contract |
+| `packages/workflow-sdk/src/v1/submit.js` | at-most-once submission over an injected ledger; uncertainty handling | v1 contract |
 | `packages/workflow-sdk/src/redact.js` | streaming and recursive token redaction | none |
 | `src/client.js` | one HTTP request, error mapping, redaction | `fetch` only |
 | `src/product-registry.js` | canonical five-product status data | none |

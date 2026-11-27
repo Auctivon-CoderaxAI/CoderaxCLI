@@ -15,11 +15,13 @@
 
 import { CoderaxError } from "./client.js";
 import { createLegacyTransport } from "./sdk-legacy.js";
+import { createSubmissionLedger } from "./submissions.js";
+import { createV1Transport } from "./v1-transport.js";
 import { createWorkflowTransport } from "./workflow-transport.js";
 
 export const SDK_CONTRACT_VERSION = "coderax-sdk/1";
 export const SUPPORTED_SDK_CONTRACTS = Object.freeze([SDK_CONTRACT_VERSION]);
-export const SDK_MODES = Object.freeze(["workflow", "legacy", "auto", "canonical"]);
+export const SDK_MODES = Object.freeze(["v1", "workflow", "legacy", "auto", "canonical"]);
 
 async function defaultLoadModule() {
   return import("@coderax/sdk");
@@ -191,6 +193,34 @@ export async function createTransport({
     return { transport, description: legacyDescription(transport, reason) };
   };
 
+  const buildV1 = () => {
+    const transport = createV1Transport({
+      settings: { ...settings, fetchImpl: settings.fetchImpl },
+      // A real submission needs a durable key; without a deployment URL there
+      // is nothing to scope it to, so the in-memory ledger is the honest default
+      // for tests and `--dry-run` only.
+      ledger: settings.ledger ?? (settings.baseUrl ? createSubmissionLedger({ baseUrl: settings.baseUrl }) : null),
+      onDiagnostic: settings.onDiagnostic ?? (() => {}),
+    });
+    return {
+      transport,
+      description: {
+        kind: "workflow-v1",
+        // The transport validates every payload against the mirrored contract
+        // before returning it, so the contract is verified by construction.
+        contractVersion: transport.capabilities.contractVersion,
+        contractVerified: true,
+        reason: null,
+        capabilities: { ...transport.capabilities },
+      },
+    };
+  };
+
+  // `v1` is the authoritative WorkflowEngine transport and fails closed: a
+  // deployment that does not serve `/v1` produces CONTRACT_UNSUPPORTED rather
+  // than a silent fallback to an older endpoint. `legacy` and `workflow` remain
+  // as explicit migration modes.
+  if (requested === "v1") return buildV1();
   if (requested === "workflow") return buildWorkflow();
   if (requested === "legacy") return buildLegacy();
 

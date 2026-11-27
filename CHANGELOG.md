@@ -5,6 +5,35 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the major
 version is `0`, a minor release may change behaviour.
 
+## [Unreleased]
+
+### Added
+
+- Canonical WorkflowEngine `/v1` transport in the shared SDK
+  (`packages/workflow-sdk/src/v1/`): strict payload validation, contract
+  negotiation that accepts any `1.x` and refuses another major, SSE replay with
+  `Last-Event-ID` and `after`, `eventId` deduplication, `seq` gap detection,
+  bounded reconnect with `STREAM_INTERRUPTED`, and durable at-most-once Work
+  submission with `SUBMISSION_UNCERTAIN`. Legacy `/api` remains an explicit
+  `CODERAX_SDK=workflow|legacy` migration mode and is never reached by a silent
+  fallback from `v1`.
+- `coderax v1` command group: `health`, `models`, `agents`, `chat`, `submit`,
+  `task`, `watch`, `tasks`, `cancel`, `resume`, `retry`, `resolve`,
+  `notifications`, `conversations`, `permissions` and `templates`. Chat and
+  watch emit NDJSON under `--json`.
+- Work templates (`inspect`, `implement`, `test`, `diff`, `pr`, `review`, `ci`)
+  as engine objectives, with an explicit tool-capability refusal.
+- Pinned contract artifact `contracts/workflow-engine-1.0.0.openapi.json` with
+  provenance (engine commit `808dfd37`, SHA-256 `4be54dc9…`), verified by
+  `test/v1-contract.test.js`.
+- Exit codes `8` (approval required), `9` (submission uncertain) and `10`
+  (conflict/busy), documented alongside the existing taxonomy.
+
+### Fixed
+
+- The WorkflowEngine's `/v1/chat` is documented as SSE but implemented as JSON;
+  the client accepts both and records the defect in `BACKEND-DEFECTS.md`.
+
 ## [0.3.0] - 2026-11-26
 
 This release reconciles three implementations that were developed in parallel:
