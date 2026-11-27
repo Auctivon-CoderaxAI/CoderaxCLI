@@ -47,8 +47,24 @@ foreach ($target in $targets) {
 
 # Only remove the launcher when it came from this prefix.
 if (Test-Path -LiteralPath $launcher) {
-  $content = Get-Content -Raw -LiteralPath $launcher
-  if ($content -and $content.Contains($Prefix)) {
+  $content = Get-Content -Raw -Encoding UTF8 -LiteralPath $launcher
+  $target = $null
+  # Read the launcher's target as data; never execute the launcher to find it.
+  if ($content -match '(?m)^node -e "const p = Buffer\.from\(''(?<path>[A-Za-z0-9+/=]+)'', ''base64''\)\.toString\(''utf8''\); ') {
+    try {
+      $target = [System.Text.UTF8Encoding]::new($false, $true).GetString([Convert]::FromBase64String($Matches['path']))
+    } catch {
+      # An invalid path encoding does not establish ownership.
+    }
+  } elseif ($content -match '(?m)^call "(?<path>[^"\r\n]+)" %\*\r?$') {
+    # Older installers called the versioned batch file directly.
+    $target = $Matches['path']
+  }
+
+  $prefixPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Prefix)
+  $escapedPrefix = [regex]::Escape($prefixPath.TrimEnd([char[]]'\/'))
+  # Require a versioned entry point inside this prefix, including the path separator.
+  if ($target -match "\A$escapedPrefix[\\/]\d+\.\d+\.\d+(?:[-.][0-9A-Za-z.]+)?[\\/](?:src[\\/]cli\.js|bin[\\/]coderax\.cmd)\z") {
     Remove-Item -LiteralPath $launcher -Force
   } else {
     Write-Warning "leaving $launcher (it does not reference $Prefix)"
