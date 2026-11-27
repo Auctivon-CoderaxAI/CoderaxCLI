@@ -89,7 +89,7 @@ else. No administrator rights, services, daemons, or open ports.
 | Traversal/symlink/overwrite-safe archive extraction | ✅ implemented, tested |
 | Atomic upgrade with retained rollback directory | ✅ implemented, tested |
 | Cross-platform installation tests | ✅ Linux executed; macOS/Windows in hosted CI |
-| Release provenance verification (`--provenance`) | ✅ installer support; attestations must be published per release |
+| Release provenance verification (`--provenance`) | ✅ verifies Sigstore bundles or legacy GitHub attestations |
 | npm registry publication | ⛔ not enabled — owner authorization required |
 | Automatic updates | ⛔ deliberately not implemented |
 | File upload, agent mutation | ⛔ not implemented — use `call` where supported by the backend |
@@ -185,7 +185,7 @@ fixed `SOURCE_DATE_EPOCH`; `npm run repro` rebuilds twice and compares hashes.
 
 The installers verify checksums by default, extract with a safe extractor
 (no absolute paths, `..`, symlinks, duplicates or overwrites), and can verify
-build provenance with `--provenance` when the release publishes attestations.
+release signatures with `--provenance` when the release publishes a Sigstore bundle or a legacy GitHub attestation.
 
 Maintainer documentation: [docs/RELEASE.md](docs/RELEASE.md).
 
