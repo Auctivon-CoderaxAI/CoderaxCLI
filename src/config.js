@@ -156,6 +156,7 @@ export async function loadConfig({
     output: stored.output || "text",
     account: typeof stored.account === "string" ? stored.account : null,
     role: typeof stored.role === "string" ? stored.role : null,
+    authMethod: typeof stored.authMethod === "string" ? stored.authMethod : null,
     tokenStore: typeof stored.tokenStore === "string" ? stored.tokenStore : "file",
     sessions:
       stored.sessions !== null && typeof stored.sessions === "object" && !Array.isArray(stored.sessions)
@@ -229,6 +230,9 @@ export async function saveConfig(
   if (patch.output !== undefined) next.output = String(patch.output);
   if (patch.account !== undefined) next.account = patch.account === null ? null : String(patch.account);
   if (patch.role !== undefined) next.role = patch.role === null ? null : String(patch.role);
+  if (patch.authMethod !== undefined) {
+    next.authMethod = patch.authMethod === null ? null : String(patch.authMethod);
+  }
   if (patch.sessions !== undefined) {
     next.sessions =
       patch.sessions === null
@@ -303,6 +307,7 @@ export function describeConfig(config) {
     history: config.history ?? {},
     account: config.account ?? null,
     role: config.role ?? null,
+    authMethod: config.authMethod ?? null,
     conversationCount: Object.keys(config.sessions ?? {}).length,
     output: config.output,
   };

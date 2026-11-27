@@ -58,9 +58,11 @@ fixes are included rather than overwritten.
 
 ## Evidence collected locally
 
-- `npm run check`: 76 JavaScript and MJS files pass `node --check`.
-- `npm test`: 294 tests, 292 pass, 0 fail, 2 skipped. The skips are the two
-  Windows-only tests, which require an actual Windows runner.
+- `npm run check`: 94 JavaScript and MJS files pass `node --check`.
+- `npm test`: 363 tests, 361 pass, 0 fail, 2 skipped. The skips are the two
+  Windows-only tests, which require an actual Windows runner. The suite now
+  includes the shared `/v1` contract, client, stream, submit, transport,
+  interactive-session and CLI suites.
 - `npm run test:pty`: real pseudo-terminal on Linux; raw mode, 40-column
   resize, CJK/emoji editing, streamed markdown, Ctrl+C cancellation and clean
   exit. The same job is configured for macOS.
@@ -68,36 +70,50 @@ fixes are included rather than overwritten.
   `SHA256SUMS`, SPDX SBOM and release manifest.
 - `npm run verify`: tarball contents, checksums, installer safety, spawn
   allowlist and documented files.
-- `npm run install-test`: 20/20 checks, including install into a path with
-  spaces and Unicode, hostile archives, SSE through the installed launcher,
-  rollback, credential-leak scanning and uninstall. Repeated after merging PR
-  #6's Unicode/launcher installer fixes.
+- `npm run install-test`: 20/20 checks on Linux, including install into a path
+  with spaces and Unicode, hostile archives, SSE through the installed
+  launcher, rollback, credential-leak scanning and uninstall. The Windows
+  hosted acceptance run is the release gate; its failure and fix are recorded
+  below.
+
+## Hosted verification status
+
+- The CI workflow runs the full Ubuntu, Windows and macOS matrix for pushes to
+  `main` and `rc/**`; pull requests run Ubuntu only to keep the private-repo
+  cost bounded. A release candidate therefore gets cross-platform acceptance at
+  its exact SHA without weakening the matrix on `main`.
+- The Windows unit, terminal, ACL and secure-store suites pass on the hosted
+  runner. Windows hosted installation acceptance now fails only when PowerShell
+  cannot autoload its security module; the store pins `PSModulePath` to the
+  interpreter's own `Modules` directory, and the hosted acceptance run is the
+  gate for that fix.
+- macOS unit and real-PTY jobs pass on the hosted runner. That is execution of
+  the tests, not a live Keychain integration test: the macOS credential unit
+  tests inject the platform, so genuine Keychain behaviour remains unverified.
 
 ## Not verified here, and why
 
-1. **Hosted CI at the final SHA.** This environment cannot create the pull
-   request or trigger workflows: `gh` is absent, no GitHub token is available,
-   and `cloud_git` supports fetch/pull/push only. The workflow triggers on
-   pull requests and `main` pushes, so a branch push alone produces no run.
-   PR #5's body also reports an organization Actions billing/runner failure.
-2. **Windows and macOS execution.** Only the Linux host is available. The
-   Windows ACL and console tests are written and included in `npm test`; they
-   skip elsewhere. No claim is made that they passed.
-3. **Authoritative WorkflowEngine `/v1` integration.** The public
-   `Auctivon-CoderaxAI/Coderax-WorkflowEngine` repository defines contract
-   `1.0.0` under `/v1` and publishes `@coderax/sdk` as a private TypeScript
-   package. PR #6's `packages/workflow-sdk` is explicitly written against the
-   deployment's legacy `/api/work` and `/api/workflows` routes. The two are not
-   interchangeable. Until the `/v1` SDK is published (or vendored under an
-   approved policy), the CLI must not claim WorkflowEngine connectivity, and
-   the canonical gate stays closed.
+1. **A deployed WorkflowEngine endpoint and owner token.** No production URL or
+   credential was provided. The `/v1` transport is tested against its pinned
+   OpenAPI document and a fixture engine, not a live cloud deployment. No claim
+   of production connectivity is made until an authorized endpoint is supplied.
+2. **Windows installer acceptance at the final SHA.** The PowerShell module
+   autoload defect is fixed and covered by a unit test, but the Windows hosted
+   acceptance job must pass at the exact release-candidate SHA. A green Linux
+   run is not evidence for Windows.
+3. **Upstream engine version drift.** The pinned contract is engine commit
+   `808dfd37` and version `1.0.0`. Negotiation accepts any `1.x`; it rejects a
+   different major. If the WorkflowEngine publishes a new minor while this is in
+   review, the pin and provenance must be refreshed with a reviewed contract
+   diff rather than silently widening the accepted shapes.
 4. **Artifacts and scheduled tasks.** The WorkflowEngine OpenAPI document
    exposes health, readiness, agents, models, chat, work, tasks, events,
-   conversations, memory, permissions and notifications. It has no artifacts or
-   scheduled-task routes. Implementing those terminal panels would require
-   inventing an endpoint, which the contract explicitly forbids.
-5. **PR #6 owner coordination and independent approval.** A coding agent cannot
-   contact the owner or provide a human review. This branch is an integration
-   candidate for PR #6's owner, not a competing release and not a tag.
+   conversations, memory, permissions and notifications. It has no artifact or
+   scheduled-task routes. The CLI refuses those operations explicitly instead of
+   inventing an endpoint. Attachments are likewise refused: `/v1` publishes no
+   upload operation.
+5. **Independent human approval.** A coding agent cannot supply the required
+   human review. This branch is an integration candidate for the owner, not a
+   competing release and not a tag.
 
-No tag, package publication, production change or `main` push was made.
+No tag, package publication, production change or direct `main` push was made.

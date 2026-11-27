@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runCli } from "../src/cli.js";
@@ -61,6 +61,26 @@ async function withServer(run) {
     }
     if (url.pathname === "/v1/health") return json(200, HEALTH);
     if (url.pathname === "/v1/ready") return json(200, READY);
+    if (url.pathname === "/v1/agents" && req.method === "GET") {
+      return json(200, {
+        agents: [{
+          id: "coderax",
+          engine: "native",
+          label: "Coderax Native",
+          external: false,
+          capabilities: {
+            streaming: true,
+            tools: true,
+            cancellation: true,
+            resume: true,
+            modelSelection: true,
+            durable: true,
+          },
+          availability: { available: true, reason: "ready", detail: "" },
+          isolation: { workspace: "isolated", memory: "none", credentials: "none", conversations: "none" },
+        }],
+      });
+    }
     if (url.pathname === "/v1/chat") return json(200, CHAT_REPLY);
     if (url.pathname === "/v1/work" && req.method === "POST") {
       return json(202, {
@@ -136,6 +156,45 @@ async function env(baseUrl) {
     CODERAX_TIMEOUT_MS: "5000",
   };
 }
+
+test("coderax v1 login verifies the owner through /v1/agents and stores the token", async () => {
+  await withServer(async (baseUrl, requests) => {
+    const dir = await mkdtemp(join(tmpdir(), "coderax-v1-login-"));
+    const environment = {
+      CODERAX_BASE_URL: baseUrl,
+      CODERAX_CONFIG_DIR: dir,
+      CODERAX_TIMEOUT_MS: "5000",
+      CODERAX_CREDENTIAL_STORE: "file",
+    };
+    const io = capture();
+    const code = await runCli(["v1", "login", "--json"], {
+      env: environment,
+      readSecret: async () => TOKEN,
+      ...io.deps,
+    });
+    assert.equal(code, 0, io.errors());
+    const login = JSON.parse(io.text());
+    assert.equal(login.authenticated, true);
+    assert.equal(login.owner, true);
+    assert.equal(login.authMethod, "v1");
+    assert.equal(io.text().includes(TOKEN), false);
+
+    const stored = JSON.parse(await readFile(join(dir, "config.json"), "utf8"));
+    assert.equal(stored.authMethod, "v1");
+    assert.equal(stored.token, TOKEN);
+    assert.equal(requests.some((entry) => entry.path === "/v1/agents" && entry.auth === `Bearer ${TOKEN}`), true);
+
+    const who = capture();
+    const whoami = await runCli(["v1", "whoami", "--json"], {
+      env: { ...environment, CODERAX_TOKEN: "" },
+      ...who.deps,
+    });
+    assert.equal(whoami, 0, who.errors());
+    const identity = JSON.parse(who.text());
+    assert.equal(identity.owner, true);
+    assert.equal(identity.method, "/v1/agents");
+  });
+});
 
 test("coderax v1 health reports the negotiated contract as JSON", async () => {
   await withServer(async (baseUrl) => {

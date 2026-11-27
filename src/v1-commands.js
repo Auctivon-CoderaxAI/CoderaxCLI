@@ -26,6 +26,7 @@ import {
   WORK_TEMPLATES,
   watchTask,
 } from "../packages/workflow-sdk/src/v1/index.js";
+import { login as loginCommand } from "./product-commands.js";
 import { createSubmissionLedger } from "./submissions.js";
 import { mapExecutionEvent } from "./v1-transport.js";
 import { VERSION } from "./version.js";
@@ -61,6 +62,27 @@ function ledgerFor(ctx) {
 
 function emit(ctx, value) {
   ctx.out(JSON.stringify(value, null, 2));
+}
+
+async function whoamiCommand(ctx) {
+  const client = clientFor(ctx);
+  await client.negotiate({ force: true });
+  // /v1/agents is owner-protected. A successful read proves the bearer token
+  // was accepted; the engine publishes no separate account name or role.
+  const agents = await client.agents({ refresh: true });
+  const payload = {
+    authenticated: true,
+    owner: true,
+    method: "/v1/agents",
+    agents: agents.agents.length,
+  };
+  if (ctx.json) {
+    emit(ctx, payload);
+  } else {
+    ctx.out("Owner    verified by the /v1 owner-protected route");
+    ctx.out(`Agents   ${payload.agents}`);
+  }
+  return EXIT.OK;
 }
 
 function numberFlag(ctx, name, { fallback = null, min = 0 } = {}) {
@@ -483,6 +505,9 @@ function templatesCommand(ctx) {
 
 const USAGE = `coderax v1 - canonical WorkflowEngine /v1 surface
 
+  coderax v1 login [--token-file <path>] [--json]
+                                              verify the owner through /v1/agents, then store the token
+  coderax v1 whoami [--json]
   coderax v1 health [--json]                 contract, readiness and engines
   coderax v1 models [--json]
   coderax v1 agents [--json]
@@ -511,6 +536,12 @@ export async function v1Command(ctx, args) {
     case "help":
       ctx.out(USAGE);
       return EXIT.OK;
+    case "login":
+      // Reuse the one login path, with the canonical verification route. The
+      // token is read from the same secure sources and is never an argument.
+      return loginCommand({ ...ctx, env: { ...ctx.env, CODERAX_SDK: "v1" } });
+    case "whoami":
+      return whoamiCommand(ctx);
     case "health":
       return healthCommand(ctx);
     case "models":

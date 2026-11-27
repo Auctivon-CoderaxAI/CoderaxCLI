@@ -44,7 +44,7 @@ interactive.js ─► terminal/session.js ─► sdk.js ─► workflow-transpor
 | `src/diagnostics.js` | install method, version and compatibility contract | filesystem, compat |
 | `src/maintenance.js` | uninstall/cleanup of user data and program-removal guidance | filesystem |
 | `src/workflow-commands.js` | chat, Work, autonomous submit, tasks, runs, approvals, cancel/resume/retry, notifications | SDK, session, render, approval |
-| `src/v1-commands.js` | `coderax v1` surface: health, discovery, chat, submit, watch, task control, resolve, notifications, conversations, permissions, templates | shared SDK `/v1` |
+| `src/v1-commands.js` | `coderax v1` surface: login/whoami, health, discovery, chat, submit, watch, task control, resolve, notifications, conversations, permissions, templates | shared SDK `/v1` |
 | `src/v1-transport.js` | maps `/v1` execution events onto the terminal vocabulary; honest capabilities | shared SDK `/v1`, client |
 | `src/submissions.js` | durable, private, per-deployment submission ledger | secure-store, config |
 | `src/session.js` | per-deployment conversation continuity, bounded and normalized | none |
@@ -63,7 +63,7 @@ interactive.js ─► terminal/session.js ─► sdk.js ─► workflow-transpor
 | `src/client.js` | one HTTP request, error mapping, redaction | `fetch` only |
 | `src/product-registry.js` | canonical five-product status data | none |
 | `src/commands.js` | canonical command catalogue for CLI dispatch and terminal completion | none |
-| `src/sdk.js` | interactive transport facade and canonical contract gate | shared workflow SDK, legacy adapter |
+| `src/sdk.js` | interactive transport facade: canonical `/v1`, shared legacy SDK, verified `@coderax/sdk` gate | shared SDK, legacy adapter |
 | `src/workflow-transport.js` | terminal adapter over the shared workflow SDK | `packages/workflow-sdk` |
 | `src/sdk-legacy.js` | explicit compatibility SSE adapter | client, discovery |
 | `src/interactive.js` | TTY raw mode, resize, accessible input | terminal modules, sdk |

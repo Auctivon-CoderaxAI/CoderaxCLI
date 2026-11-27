@@ -106,6 +106,32 @@ export const WORK_TEMPLATES = Object.freeze({
         input ? `Scope: ${input}` : "",
       ].join(" "),
   }),
+  project: Object.freeze({
+    label: "Scaffold a project",
+    requiresTools: true,
+    summary: "Create a new project in the cloud workspace without publishing it.",
+    objective: (input) =>
+      [
+        "Create a new project in your cloud workspace using the requested stack and conventions.",
+        "Include a minimal source tree, a lockfile if the package manager requires one, a test command,",
+        "and a README that states how to run and test it. Do not create a remote repository, push,",
+        "publish a package or deploy anything unless the owner explicitly authorizes that step.",
+        input ? `Project: ${input}` : "Project: ask the owner for the name and stack.",
+      ].join(" "),
+  }),
+  deploy: Object.freeze({
+    label: "Prepare a deployment request",
+    requiresTools: true,
+    summary: "Produce an exact, reviewable deployment request without executing it.",
+    objective: (input) =>
+      [
+        "Prepare a deployment request for the current workspace; do not deploy, push or change production.",
+        "Report the exact target environment, build command, artifact or image digest, configuration and",
+        "secrets that must be supplied by the owner, the rollback plan, and the checks that must pass first.",
+        "Finish with the precise command a human owner would run and the approval it requires.",
+        input ? `Target: ${input}` : "Target: ask the owner which environment is intended.",
+      ].join(" "),
+  }),
 });
 
 export function getTemplate(name) {

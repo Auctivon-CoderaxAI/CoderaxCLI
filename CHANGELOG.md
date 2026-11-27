@@ -17,10 +17,11 @@ version is `0`, a minor release may change behaviour.
   submission with `SUBMISSION_UNCERTAIN`. Legacy `/api` remains an explicit
   `CODERAX_SDK=workflow|legacy` migration mode and is never reached by a silent
   fallback from `v1`.
-- `coderax v1` command group: `health`, `models`, `agents`, `chat`, `submit`,
-  `task`, `watch`, `tasks`, `cancel`, `resume`, `retry`, `resolve`,
-  `notifications`, `conversations`, `permissions` and `templates`. Chat and
-  watch emit NDJSON under `--json`.
+- `coderax v1` command group: `login`, `whoami`, `health`, `models`, `agents`,
+  `chat`, `submit`, `task`, `watch`, `tasks`, `cancel`, `resume`, `retry`,
+  `resolve`, `notifications`, `conversations`, `permissions` and `templates`.
+  Chat prints one JSON document under `--json`; watch and attached submit emit
+  NDJSON.
 - Work templates (`inspect`, `implement`, `test`, `diff`, `pr`, `review`, `ci`)
   as engine objectives, with an explicit tool-capability refusal.
 - Pinned contract artifact `contracts/workflow-engine-1.0.0.openapi.json` with

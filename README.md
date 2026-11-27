@@ -90,8 +90,10 @@ else. No administrator rights, services, daemons, or open ports.
 | Explicit, per-send approval for local file attachments | ✅ implemented, tested |
 | Terminal output sanitisation (ANSI, OSC 52, control sequences) | ✅ implemented, tested |
 | Server-bound permission approvals | ✅ implemented, fails closed on the legacy transport |
-| Shared workflow SDK transport | ✅ default for CLI and terminal (`packages/workflow-sdk`) |
-| Canonical `@coderax/sdk` `/v1` transport | ⛔ gated: the WorkflowEngine SDK is not published; the gate fails closed |
+| Shared workflow SDK transport | ✅ default for the legacy deployment contract (`packages/workflow-sdk`) |
+| Canonical WorkflowEngine `/v1` transport | ✅ implemented in the shared SDK; `CODERAX_SDK=v1` selects it and fails closed |
+| Artifact upload/download | ⛔ not in contract 1.0.0; `/v1` publishes no transfer route |
+| Scheduled task management | ⛔ not in contract 1.0.0; `/v1` publishes no schedule route |
 | `products`, `cloud` and `projects` status | ✅ implemented, tested |
 | `doctor` diagnostics, `version`, `compat`, `uninstall` | ✅ implemented, tested |
 | Reproducible artifacts, SHA-256 checksums, SPDX SBOM | ✅ implemented, verified |
@@ -267,12 +269,29 @@ sent without approval.
 
 ### SDK transport
 
-The terminal talks to a small facade. The shared workflow SDK is the default;
-`CODERAX_SDK=canonical` requires a verified `@coderax/sdk` contract and fails
-closed if it is unavailable. `CODERAX_SDK=auto` uses the canonical SDK only
-after its contract handshake succeeds and otherwise keeps the shared workflow
-transport. `CODERAX_SDK=legacy` is an explicit compatibility mode.
-See [docs/TERMINAL.md](docs/TERMINAL.md).
+The terminal talks to one facade. `CODERAX_SDK=v1` selects the authoritative
+WorkflowEngine `/v1` transport in `packages/workflow-sdk/src/v1`; it verifies
+the contract, streams with `Last-Event-ID`/`after`, deduplicates by `eventId`,
+detects sequence gaps, reconnects with a bounded budget, and submits Work
+at-most-once from a durable ledger. There is no silent fallback: a deployment
+that does not serve `/v1` fails with a contract error.
+
+The legacy deployment contract is an explicit migration mode:
+`CODERAX_SDK=workflow` (the default for existing installations) or
+`CODERAX_SDK=legacy` (the compatibility SSE adapter). `CODERAX_SDK=canonical`
+requires a verified `@coderax/sdk` contract and `CODERAX_SDK=auto` uses that SDK
+only after its own handshake succeeds.
+
+For a `/v1`-only deployment, authenticate without the legacy `/api/user` route:
+
+```sh
+CODERAX_SDK=v1 coderax v1 login --token-file ~/.coderax/token
+coderax v1 whoami
+coderax v1 chat "Summarize this repository" --agent coderax
+coderax v1 submit "Inspect the repository" --template inspect --agent coderax
+```
+
+See [docs/TERMINAL.md](docs/TERMINAL.md) and [docs/CONTRACT.md](docs/CONTRACT.md).
 
 ## Exit codes
 
@@ -286,6 +305,9 @@ See [docs/TERMINAL.md](docs/TERMINAL.md).
 | `5` | not found |
 | `6` | unavailable (backend capability/API version, Cloud, projects) |
 | `7` | contract violation (including incomplete streams) |
+| `8` | approval required and not granted |
+| `9` | submission uncertain; do not blindly resubmit |
+| `10` | conflict or busy |
 | `130` | cancelled |
 
 Errors print as `coderax: <CODE>: <message>` for typed failures, with the token
