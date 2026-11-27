@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runCli } from "../src/cli.js";
+import { saveConfig } from "../src/config.js";
 import { detectInstallMethod } from "../src/diagnostics.js";
 import { programRemovalCommands } from "../src/maintenance.js";
 import {
@@ -260,7 +261,10 @@ test("a token in argv is refused with a secure alternative", async () => {
 test("uninstall is a dry run until --yes and then removes user data", async () => {
   const directory = await mkdtemp(join(tmpdir(), "coderax-uninstall-"));
   const file = join(directory, "config.json");
-  await writeFile(file, JSON.stringify({ baseUrl: "https://coderax.test", token: "stored" }), { mode: 0o600 });
+  // Written the way the CLI writes it: a token-bearing config must be private
+  // before uninstall can read it. A bare writeFile only sets POSIX mode bits,
+  // which does not restrict the inherited DACL on Windows.
+  await saveConfig({ baseUrl: "https://coderax.test", token: "stored" }, { filePath: file });
 
   const dry = capture();
   const dryCode = await runCli(["uninstall", "--dry-run", "--json"], {
@@ -268,7 +272,7 @@ test("uninstall is a dry run until --yes and then removes user data", async () =
     stdout: dry.stdout,
     stderr: dry.stderr,
   });
-  assert.equal(dryCode, 0);
+  assert.equal(dryCode, 0, dry.err());
   assert.equal(JSON.parse(dry.out()).removed, false);
   assert.ok(await readFile(file, "utf8"));
 
@@ -278,7 +282,7 @@ test("uninstall is a dry run until --yes and then removes user data", async () =
     stdout: yes.stdout,
     stderr: yes.stderr,
   });
-  assert.equal(yesCode, 0);
+  assert.equal(yesCode, 0, yes.err());
   assert.equal(JSON.parse(yes.out()).removed, true);
   await assert.rejects(() => readFile(file, "utf8"));
 });
@@ -310,6 +314,9 @@ test("only the credential helper and explicit notifications may spawn a process"
   const allowed = new Map([
     ["credentials.js", /"secret-tool"|"powershell\.exe"/],
     ["workflow-commands.js", /notify-command/],
+    // secure-store verifies platform ACLs with the OS tool; no shell is used
+    // and every argument is a fixed command plus a local path.
+    ["secure-store.js", /"icacls"|"ls"|"powershell\.exe"/],
   ]);
   for (const file of await readdir(directory)) {
     if (!file.endsWith(".js")) continue;

@@ -162,13 +162,16 @@ check(npmEntries.has("package/README.md"), "npm tarball is missing README.md");
 
 // The CLI is an access client, not an installer: shipping code that spawns
 // processes would make it possible to start runtimes or services behind the
-// operator's back. Two modules have a bounded, documented exception:
+// operator's back. Three modules have a bounded, documented exception:
 // credentials.js drives a fixed OS credential helper (never a caller-supplied
-// command), and workflow-commands.js runs a command only when the operator
-// explicitly passes --notify-command. Every other module must stay spawn-free.
+// command), workflow-commands.js runs a command only when the operator
+// explicitly passes --notify-command, and secure-store.js invokes the fixed
+// platform ACL helper for private files. Every other module must stay
+// spawn-free.
 const SPAWN_ALLOWLIST = new Map([
   ["package/src/credentials.js", /"secret-tool"|"powershell\.exe"|"cmd\.exe"|"where"|"\/bin\/sh"/],
   ["package/src/workflow-commands.js", /notify-command/],
+  ["package/src/secure-store.js", /"powershell\.exe"|"whoami"|"ls"/],
 ]);
 for (const [path, entry] of npmEntries) {
   if (!path.endsWith(".js")) continue;

@@ -2,32 +2,38 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    # `main` keeps the full OS matrix green. `rc/**` exists so a release
+    # candidate can be accepted on Windows and macOS at its exact SHA without
+    # paying the matrix multiplier on every pull request; it is not a
+    # publishing branch and never bypasses review of `main`.
+    branches: [main, "rc/**"]
+  schedule:
+    - cron: '17 3 * * 0'
+  workflow_dispatch:
   # Only code changes start the matrix. A plain `pull_request` also fires on
   # edits, labels and bot comments; with cancel-in-progress that killed a
   # running Windows job when a review bot updated the PR body.
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-  # Full cross-platform acceptance once a week, plus at release time in
-  # release.yml. Normal PR and main runs are Linux-only so the 2x Windows and
-  # 10x macOS multipliers do not consume the private Free allowance.
-  schedule:
-    - cron: '17 3 * * 0'
-  workflow_dispatch:
 
 permissions:
   contents: read
 
-concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
+# Concurrency is per job and does not cancel. A backed-up hosted queue makes a
+# newer run share a group with older candidates; cancelling in progress then
+# discards the newer run before it can execute. Each job waits its turn, and the
+# required `test` gate stays outside every group so it always reports.
 jobs:
-  # The ruleset requires a check context named exactly "verify (ubuntu-latest)".
-  # GitHub publishes "<caller> / <callee>" for a reusable workflow, so the gating
-  # job runs its steps directly. verify.yml stays in use by release.yml.
+  # Hosted standard runners only. This repository is being prepared for private
+  # operation, so pull requests run Linux only; the full OS matrix runs on main
+  # and on an `rc/**` release candidate. That keeps the macOS (10x) and Windows
+  # (2x) multipliers off every PR while still requiring cross-platform
+  # acceptance at the exact release SHA before a release.
   verify:
     name: verify (${{ matrix.os }})
+    concurrency:
+      group: ci-${{ github.workflow }}-${{ github.ref }}-verify-${{ matrix.os }}
+      cancel-in-progress: false
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     permissions:
@@ -35,7 +41,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON((github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && '["ubuntu-latest"]' || '["ubuntu-latest","windows-latest","macos-latest"]') }}
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest","windows-latest","macos-latest"]') }}
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -50,8 +56,28 @@ jobs:
         run: npm ci --ignore-scripts
       - name: Syntax check
         run: npm run check
-      - name: Unit, CLI and contract tests
-        run: npm test
+      # On Windows this runs the Windows-only ACL, console and wide-character
+      # tests. On every platform it runs the terminal, session, SDK, permission
+      # and secure-store suites.
+      #
+      # The output is tee'd and, on Windows, a failed run republishes the failing
+      # test names as check annotations. Job logs need repository admin rights,
+      # so without this a Windows-only failure is visible as "exit code 1" and
+      # nothing else. `shell: bash` keeps pipefail, so the step still fails.
+      - name: Unit, CLI, security and contract tests
+        shell: bash
+        run: npm test 2>&1 | tee test-output.log
+      - name: Publish failing test names
+        if: failure() && runner.os == 'Windows'
+        shell: bash
+        run: |
+          if [ -f test-output.log ]; then
+            # Keep the actual/expected lines: an assertion message alone is not
+            # enough to diagnose a Windows-only failure without the job log.
+            grep -E -A 8 '^✖ |^  ✖ |AssertionError|^not ok ' test-output.log | head -60 | while IFS= read -r line; do
+              [ -n "$line" ] && echo "::error::${line}"
+            done
+          fi
       - name: Build release artifacts
         run: npm run build
       - name: Verify checksums, contents, installers and safety
@@ -60,8 +86,18 @@ jobs:
       # refuse argv tokens, authenticate over stdin, exercise every
       # compatibility state, stream Work SSE, upgrade atomically with rollback,
       # and uninstall.
-      - name: Hosted installation acceptance (install -> auth -> upgrade -> uninstall)
+      - name: Hosted installation acceptance (install → auth → upgrade → uninstall)
         run: npm run install-test
+      # The acceptance script records every check in dist/install-evidence.json.
+      # Publish the failing ones as annotations so an installer failure is
+      # diagnosable without admin access to the job log or the artifact.
+      - name: Publish install acceptance failures
+        if: failure()
+        shell: bash
+        run: |
+          if [ -f dist/install-evidence.json ]; then
+            node -e 'const e=require("./dist/install-evidence.json"); for (const c of e.checks||[]) if (!c.ok) console.log("::error::"+c.name+": "+String(c.detail||"").split("\n")[0]);'
+          fi
       - name: Reproducibility check
         if: runner.os == 'Linux'
         run: npm run repro
@@ -78,30 +114,66 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  # A real pseudo-terminal, not a mocked stream: raw mode, resize, wide
+  # characters, multiline editing, markdown streaming, cancellation and clean
+  # exit. `script` is available on both hosted POSIX images.
+  pty:
+    name: real PTY (${{ matrix.os }})
+    concurrency:
+      group: ci-${{ github.workflow }}-${{ github.ref }}-pty-${{ matrix.os }}
+      cancel-in-progress: false
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b # v4.0.3
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Install from the lockfile
+        run: npm ci --ignore-scripts
+      - name: Real pseudo-terminal tests
+        run: npm run test:pty
+
   # The protected branch requires a check context named exactly "test".
-  # Private GitHub Free cannot enforce it; release.yml independently requires
-  # this result at the merged pull-request head.
+  # GitHub accepts a skipped job as passing, so evaluate the result even after
+  # verify fails or is cancelled, and keep this gate outside concurrency
+  # groups so it cannot block verification for a newer run.
   test:
     name: test
-    needs: verify
+    needs: [verify, pty]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Require every selected platform to pass
+      - name: Require every platform and PTY job to pass
         shell: bash
         run: |
-          result="${{ needs.verify.result }}"
-          echo "verify result: $result"
-          if [ "$result" != "success" ]; then
-            echo "One or more platform jobs did not pass."
+          verify="${{ needs.verify.result }}"
+          pty="${{ needs.pty.result }}"
+          echo "verify result: $verify"
+          echo "pty result: $pty"
+          if [ "$verify" != "success" ] || [ "$pty" != "success" ]; then
+            echo "One or more platform or PTY jobs did not pass."
             exit 1
           fi
 
   dependencies:
     name: dependency audit
+    concurrency:
+      group: ci-${{ github.workflow }}-${{ github.ref }}-dependencies
+      cancel-in-progress: false
     runs-on: ubuntu-latest
-    timeout-minutes: 5
     permissions:
       contents: read
     steps:

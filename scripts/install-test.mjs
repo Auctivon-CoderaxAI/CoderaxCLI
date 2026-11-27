@@ -219,7 +219,6 @@ const CAPABILITIES = [
  */
 async function withEngine(mode, run) {
   const authorization = `Bearer ${TOKEN}`;
-  const compatible = mode !== "api-incompatible";
   const apiVersion = mode === "api-incompatible" ? "2" : mode === "unavailable" ? null : "1";
   const deploymentVersion = mode === "older" ? "0.7.9" : mode === "unavailable" ? null : "0.8.8";
   const unauthenticated = mode === "unauthenticated";
