@@ -1,34 +1,42 @@
-# Private-repository readiness — CoderaxCLI
+# Private-repository readiness
 
-<!-- coderabbit-ai-generated:v1 -->
+This repository is prepared for private operation without reducing test
+coverage or publishing an owner-only package.
 
-<!-- coderabbit-ai-generated-section:v1:b2f7d263b5c9c4528cad754c56b635210a3456b336bb82bbc2a7ea3b54bec3ef -->
+## CI and cost
 
-Status: CI and release changes are prepared for GitHub Free private operation. Visibility is unchanged. Before privatizing, the owner must resolve the merge and publish approval controls and establish a release distribution path for both installers. The POSIX and Windows installers download GitHub Release assets without credentials, so their default downloads will fail once the repository is private. Provide a release endpoint both installers can use, or document how users with repository access can download the release assets and install offline with `--from-file` (POSIX) and `-FromFile` (Windows).
+- Pull requests and `main` pushes run the reusable Linux verification workflow.
+- A weekly schedule and every release run the complete Linux, Windows, and macOS
+  matrix through the same reusable workflow.
+- The PR/main Linux path covers syntax, unit/CLI/contract tests, build,
+  artifact/installer verification, hosted installation, authentication,
+  upgrade/rollback, and uninstall.
+- Dependency audit is a separate required check.
+- Full-history secret scanning is a weekly/manual job; changed commits are
+  scanned on every PR and main push.
+- GitHub Free includes $12 of private compute per billing account. The live
+  projection is maintained outside this repository; this note does not claim
+  that the organization is under the allowance.
 
-<!-- /coderabbit-ai-generated:v1 -->
+## Distribution and release authorization
 
-## Blockers and required controls
+- GitHub Releases are the only distribution channel and are private.
+- `package.json` remains `"private": true` and has no `publishConfig`.
+- The release workflow has no npm publication job.
+- A tag must be the merge commit of an independently approved PR with green
+  exact-head `test`, `changed-commits`, and `dependency audit` checks.
+- Release certification runs Linux, Windows, and macOS before publication.
+- Artifacts are covered by `SHA256SUMS`, an SBOM, a manifest, and keyless
+  Sigstore bundles.
+- The authorization record is attached to the release.
 
-| Dependency | Why it blocks private Free | Replacement |
-|---|---|---|
-| `actions/attest-build-provenance` + `gh attestation verify` | Artifact attestations are public-only on Free/Pro/Team; private needs Enterprise Cloud. | Keyless Sigstore signing (`cosign sign-blob`) with a `.sigstore.json` bundle per asset, verified in-workflow with `cosign verify-blob`. Both are free. |
-| `npm publish --provenance` and `publishConfig.provenance` | npm provenance requires a public repository matching the package. | Flags removed; npm OIDC trusted publishing remains available. See the separate approval control below. |
-| Required `test` merge check on `main` | GitHub Free cannot enforce protected branch checks on private repositories. | Owner must select and document a replacement merge control before privatizing. |
-| Required `npm-publish` reviewers | GitHub Free does not enforce environment reviewers on private repositories. | Keep npm publishing disabled until a replacement approval control is in place. |
-| Three-OS matrix on every PR | Private Free includes $12/month compute; macOS is 10x and Windows 2x. | PRs run Linux; `main` runs Ubuntu + Windows + macOS, preserving post-merge compatibility coverage. |
-| Artifact evidence on every run | 500 MB artifact allowance on Free. | Upload only on failure or `main`, retention 7 days. |
-| Secret scanning / push protection | Public-only on Free. | `secret-scan.yml` scans introduced commits on PRs and pushes, and audits full history on a schedule or manual dispatch. Push blocking has no free private equivalent. |
+## Honest limits
 
-## Cost math
-
-A 4-minute job costs about $0.024 on Linux, $0.048 on Windows and $0.24 on macOS.
-The old PR matrix cost roughly $0.31 per run; the new PR path costs about $0.024.
-
-## Owner action before privatizing
-
-1. Choose, name, and document the replacement control for merges to `main`,
-   including how it requires a passing `test` check before merge.
-2. Establish and document a replacement approval control for the `npm` job.
-   Keep `NPM_PUBLISH_ENABLED` unset until that control is in place.
-3. Add a $0 billing/spending limit.
+- GitHub Free private repositories cannot enforce branch protection or required
+  reviews against repository administrators. The release gate is fail-closed for
+  normal tags, but a writer who can edit `.github/workflows/release.yml` can
+  bypass it. Complete enforcement needs an external release/deployment authority.
+- A public source repository is not used for npm provenance. Sigstore is the
+  private-compatible integrity mechanism.
+- The repository's visibility is not changed by this document or by the CI
+  workflow.

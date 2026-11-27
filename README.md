@@ -11,10 +11,10 @@ and state live in the Coderax deployment; this program makes HTTP requests and
 exits. Installing it never pulls in Ollama, Docker, a local AI runtime, a
 database, or a background service.
 
-- Repository: [`Auctivon-CoderaxAI/CoderaxCLI`](https://github.com/Auctivon-CoderaxAI/CoderaxCLI) (public)
+- Repository: [`Auctivon-CoderaxAI/CoderaxCLI`](https://github.com/Auctivon-CoderaxAI/CoderaxCLI) (visibility is controlled separately)
+- Distribution: private GitHub Releases through authenticated downloads; no public npm publication
 - Runtime: Node.js 24 or newer, standard library only, no runtime dependencies
 - Companion: [`Coderax`](https://github.com/Auctivon-CoderaxAI/Coderax) (deployment)
-- Distribution: GitHub Releases (canonical); npm-ready but not published
 - Shared contract: [`packages/workflow-sdk`](packages/workflow-sdk/src/contract.js)
 
 This repository is the **canonical** Coderax CLI. The in-repo `Coderax/cli`
@@ -26,11 +26,12 @@ package is deprecated; it is replaced by this implementation.
 | --- | --- | --- |
 | Linux / macOS | `sh install.sh --version 0.3.0` | Verifies SHA-256, installs atomically to `~/.coderax/cli/0.3.0` |
 | Windows | `powershell -File install.ps1 -Version 0.3.0` | Installs atomically to `%LOCALAPPDATA%\Coderax\cli\0.3.0` |
-| npm tarball | `npm install --global ./coderax-cli-0.3.0.tgz` | Works today; registry publication is not enabled |
+| Offline npm tarball | `npm install --global ./coderax-cli-0.3.0.tgz` | Use an authenticated release download; registry publication is disabled |
 | Source | `npm ci --ignore-scripts && node src/cli.js --help` | For development |
 
-Release downloads are public. Full instructions, checksum and provenance
-verification, offline installs and PATH setup: [docs/INSTALL.md](docs/INSTALL.md).
+Release downloads require GitHub authentication. Full instructions, checksum and
+provenance verification, offline installs and PATH setup:
+[docs/INSTALL.md](docs/INSTALL.md).
 
 ## Authenticate
 
@@ -90,7 +91,7 @@ else. No administrator rights, services, daemons, or open ports.
 | Atomic upgrade with retained rollback directory | ✅ implemented, tested |
 | Cross-platform installation tests | ✅ Linux executed; macOS/Windows in hosted CI |
 | Release provenance verification (`--provenance`) | ✅ verifies Sigstore bundles or legacy GitHub attestations |
-| npm registry publication | ⛔ not enabled — owner authorization required |
+| Public npm publication | ⛔ disabled — private GitHub Release is the canonical channel |
 | Automatic updates | ⛔ deliberately not implemented |
 | File upload, agent mutation | ⛔ not implemented — use `call` where supported by the backend |
 
@@ -177,8 +178,11 @@ restores the previous version, and `--force` keeps the replaced directory at
 
 ## Releases
 
-Every release publishes a GitHub Release with an npm tarball, a POSIX standalone
-tarball, a Windows zip, `SHA256SUMS`, a release manifest, and an SPDX SBOM.
+Every release publishes a private GitHub Release with an npm-compatible tarball,
+a POSIX standalone tarball, a Windows zip, `SHA256SUMS`, a release manifest, an
+SPDX SBOM, and the signed release-authorization record. A tag is publishable only
+when it is the merge commit of an independently approved pull request with
+successful exact-head `test`, `changed-commits`, and `dependency audit` checks.
 
 Builds are reproducible: fixed metadata, sorted entries, fixed compression and a
 fixed `SOURCE_DATE_EPOCH`; `npm run repro` rebuilds twice and compares hashes.

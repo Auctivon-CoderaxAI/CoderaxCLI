@@ -3,6 +3,11 @@
 Coderax CLI is the owner-only command-line client for a cloud-hosted Coderax
 deployment. It is a small, dependency-free Node.js program.
 
+**Private distribution:** the release repository is private. Download release
+assets with an authenticated GitHub client, never from an anonymous
+`releases/download` URL. The examples below use `gh`, which reads the token from
+its own credential store.
+
 ## Requirements
 
 | Requirement | Detail |
@@ -53,7 +58,7 @@ Get-Content SHA256SUMS | ForEach-Object {
 }
 ```
 
-Release downloads are public: <https://github.com/Auctivon-CoderaxAI/CoderaxCLI/releases>.
+Release assets require authentication: <https://github.com/Auctivon-CoderaxAI/CoderaxCLI/releases>.
 
 Use `--provenance` / `-Provenance` (or `CODERAX_REQUIRE_PROVENANCE=1`)
 to verify the archive after the checksum check. Install Cosign on PATH
@@ -71,13 +76,17 @@ without either verified form of evidence stop installation.
 
 ```sh
 version=0.3.0
-base="https://github.com/Auctivon-CoderaxAI/CoderaxCLI/releases/download/v$version"
+mkdir -p release
+gh release download "v$version" \
+  --repo Auctivon-CoderaxAI/CoderaxCLI \
+  --dir release
 
-curl -fsSLO "$base/install.sh"
-curl -fsSLO "$base/SHA256SUMS"
-grep '  install.sh$' SHA256SUMS | sha256sum -c -
+(cd release && grep '  install.sh$' SHA256SUMS | sha256sum -c -)
+checksum="$(awk '$2 == "coderax-cli-'"$version"'-standalone.tar.gz" { print $1 }' release/SHA256SUMS)"
 
-sh install.sh --version "$version"
+sh release/install.sh --version "$version" \
+  --from-file "release/coderax-cli-$version-standalone.tar.gz" \
+  --checksum "$checksum"
 ```
 
 The installer downloads `coderax-cli-$version-standalone.tar.gz`, verifies it
@@ -105,14 +114,15 @@ The installer never edits your shell profile and never accepts a token.
 
 ```powershell
 $version = "0.3.0"
-$base = "https://github.com/Auctivon-CoderaxAI/CoderaxCLI/releases/download/v$version"
+New-Item -ItemType Directory -Force release | Out-Null
+gh release download "v$version" --repo Auctivon-CoderaxAI/CoderaxCLI --dir release
 
-Invoke-WebRequest "$base/install.ps1" -OutFile install.ps1
-Invoke-WebRequest "$base/SHA256SUMS" -OutFile SHA256SUMS
-$expected = (Select-String -Path SHA256SUMS -Pattern '  install\.ps1$').Line.Split(' ')[0]
-if ((Get-FileHash install.ps1 -Algorithm SHA256).Hash.ToLower() -ne $expected) { throw "checksum mismatch" }
+$expected = (Select-String -Path release\SHA256SUMS -Pattern '  install\.ps1$').Line.Split(' ')[0]
+if ((Get-FileHash release\install.ps1 -Algorithm SHA256).Hash.ToLower() -ne $expected) { throw "checksum mismatch" }
 
-powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Version $version
+$archive = "release\coderax-cli-$version-standalone.zip"
+$checksum = (Select-String -Path release\SHA256SUMS -Pattern "  coderax-cli-$version-standalone\.zip$").Line.Split(' ')[0]
+powershell -NoProfile -ExecutionPolicy Bypass -File .\release\install.ps1 -Version $version -FromFile $archive -Checksum $checksum
 ```
 
 Defaults: program in `%LOCALAPPDATA%\Coderax\cli\<version>`, launcher
@@ -124,9 +134,9 @@ Options mirror the POSIX installer: `-Version`, `-Prefix`, `-BinDir`,
 
 ## Option C — npm
 
-The package is **not published to the registry**: `package.json` contains
-`"private": true` so publication is an explicit owner decision. Install a
-release tarball directly; it contains no dependencies:
+The package is **not published to any public registry**: `package.json` contains
+`"private": true`, and the release workflow has no npm publication job. Install
+an authenticated release tarball directly; it contains no dependencies:
 
 ```sh
 npm install --global ./coderax-cli-0.3.0.tgz
