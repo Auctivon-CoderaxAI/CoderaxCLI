@@ -82,11 +82,13 @@ fixes are included rather than overwritten.
   `main` and `rc/**`; pull requests run Ubuntu only to keep the private-repo
   cost bounded. A release candidate therefore gets cross-platform acceptance at
   its exact SHA without weakening the matrix on `main`.
-- The Windows unit, terminal, ACL and secure-store suites pass on the hosted
-  runner. Windows hosted installation acceptance now fails only when PowerShell
-  cannot autoload its security module; the store pins `PSModulePath` to the
-  interpreter's own `Modules` directory, and the hosted acceptance run is the
-  gate for that fix.
+- Windows unit, terminal, ACL and secure-store suites previously passed on the
+  hosted runner; a first module-path fix then made the interpreter's own
+  `Modules` directory the only entry and broke two config ACL tests. The store
+  now prepends that directory, so it wins over a user-writable path while the
+  rest of PowerShell's module path remains available. The hosted Windows suite
+  and installation acceptance at the final SHA remain the gate for this fix;
+  no Windows pass is claimed from the Linux host.
 - macOS unit and real-PTY jobs pass on the hosted runner. That is execution of
   the tests, not a live Keychain integration test: the macOS credential unit
   tests inject the platform, so genuine Keychain behaviour remains unverified.

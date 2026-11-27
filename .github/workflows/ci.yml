@@ -17,10 +17,14 @@ on:
 permissions:
   contents: read
 
-# Concurrency is per job, not per workflow. A workflow-level group with
-# cancel-in-progress can cancel the verify jobs and leave the required `test`
-# gate evaluating a cancelled run. Each job cancels only its own prior attempt;
-# the gate stays outside any group so it always reports a result.
+# A superseded push must not leave its runs queued behind the shared runner
+# pool. This group cancels the whole previous run for the same ref; the current
+# run still owns its `test` gate. Each job also has its own group, so a job can
+# be superseded without cancelling the gate of the run that is still current.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # Hosted standard runners only. This repository is being prepared for private
   # operation, so pull requests run Linux only; the full OS matrix runs on main
@@ -145,8 +149,8 @@ jobs:
 
   # The protected branch requires a check context named exactly "test".
   # GitHub accepts a skipped job as passing, so evaluate the result even after
-  # verify fails or is cancelled, and keep this gate outside concurrency
-  # groups so it cannot block verification for a newer run.
+  # verify fails or is cancelled, and keep this gate outside job concurrency
+  # groups. Only a newer push, which owns a fresh gate, cancels this run.
   test:
     name: test
     needs: [verify, pty]
