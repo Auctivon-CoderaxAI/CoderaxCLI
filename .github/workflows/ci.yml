@@ -7,6 +7,8 @@ on:
     # paying the matrix multiplier on every pull request; it is not a
     # publishing branch and never bypasses review of `main`.
     branches: [main, "rc/**"]
+  schedule:
+    - cron: '17 3 * * 0'
   workflow_dispatch:
   # Only code changes start the matrix. A plain `pull_request` also fires on
   # edits, labels and bot comments; with cancel-in-progress that killed a

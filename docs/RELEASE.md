@@ -1,8 +1,10 @@
 > **Private-repository note (GitHub Free):** GitHub artifact attestations are
 > public-repository-only on Free. Releases are signed with keyless Sigstore and
 > publish a `.sigstore.json` bundle next to each asset; verify with
-> `cosign verify-blob --bundle …`. npm provenance is also public-only and is not
-> produced from a private repository.
+> `cosign verify-blob --bundle …`. Public npm publication is disabled. Every tag
+> is gated by an approved merged pull request, exact-head checks, and a full
+> Linux/Windows/macOS certification run. The gate proves release provenance; it
+> cannot stop a repository writer from editing the workflow.
 
 # Release process
 
@@ -65,33 +67,54 @@ default so that the hashes in the manifest and checksums match what CI built.
    npm version --no-git-tag-version 0.3.0
    ```
 
-3. **Run the full local gate**:
+3. **Open a pull request and use cloud verification**:
+
+   Use GitHub-hosted CI for syntax, unit, contract, build, artifact,
+   reproducibility, and installation checks. Pull requests run the Linux
+   verification job and separate Linux and macOS PTY tests. Pushes to `main` and
+   `rc/**` and weekly CI verify on Linux, Windows, and macOS. The release workflow
+   uses `verify.yml` for certification on all three platforms.
+
+4. **Merge after review and green PR checks. Wait for both workflows on the merge
+   commit’s push to `main` to finish and confirm that the dependency audit and
+   changed-commit secret scan passed, then tag it**:
 
    ```sh
-   npm ci --ignore-scripts
-   npm run release:check
-   ```
-
-   This runs syntax checks, unit tests, the build, artifact verification, the
-   reproducibility check, and the installation test (install → authenticate →
-   SDK → uninstall).
-
-4. **Commit and tag**:
-
-   ```sh
-   git add -A
-   git commit -m "release: 0.3.0"
    git tag -a v0.3.0 -m "coderax-cli 0.3.0"
-   git push origin main
    git push origin v0.3.0
    ```
 
+   The tag must point at the merge commit of the approved PR. `release.yml`
+   refuses a tag created by a direct push, a tag without an independent human
+   approval at the PR head, or a tag whose required checks on either revision
+   did not succeed. If a required main push job fails or is cancelled, rerun
+   that workflow on the same push. A manual CI run does not replace main push
+   evidence.
+
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:3dbc46cebc72bb7479bd5f2be195e132985676a88ee270304f82c59371d7e7e4 -->
+
 5. **The `release` workflow runs** on the tag:
-   - checks that the tag equals `v` + `package.json` version
-   - runs the same checks as CI on a GitHub-hosted Ubuntu runner
-   - builds, verifies, reproduces, and install-tests the artifacts
-   - creates the GitHub Release with every asset in `dist/`
-   - refuses to reuse an existing tag or release
+   - reads authorization policy from `main` and checks that the tag matches
+     the candidate's `package.json` version
+   - requires a merged PR, independent human approval with repository write
+     access, and successful `test`, `changed-commits`, and `dependency audit`
+     checks on the PR head
+   - records successful dependency audit and changed-commit secret scan jobs
+     from the latest runs for the tagged commit’s push to `main`
+   - certifies the authorized commit on Linux, Windows, and macOS
+   - builds and verifies artifacts from that same commit without rerunning
+     the full test matrix and signs every asset
+   - checks that the remote tag still points to the authorized commit before
+     publishing the assets and the `release-authorization.json` record
+   - refuses to overwrite an existing release
+
+   Keep release tags fixed. GitHub's release creation command checks that an
+   existing tag is present, and the workflow's separate SHA check cannot
+   prevent tag changes between that check and publication.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 6. **Confirm the published release**:
    - assets are present and `SHA256SUMS` matches `release-manifest.json`
@@ -102,9 +125,10 @@ default so that the hashes in the manifest and checksums match what CI built.
 
 | Workflow | Trigger | Token permissions | Secrets |
 | --- | --- | --- | --- |
-| `ci.yml` | push to `main`, pull requests | `contents: read` | none |
-| `release.yml` `release` job | version tag, manual dispatch | `contents: write` | `GITHUB_TOKEN` only |
-| `release.yml` `npm` job | manual dispatch + owner variable + protected environment | `contents: read`, `id-token: write` | none (OIDC trusted publishing) |
+| `ci.yml` | push to `main` and `rc/**`, pull requests, weekly schedule, manual dispatch | `contents: read` | none |
+| `release.yml` `authorize` job | version tag, manual dispatch | `contents: read`, `actions: read`, `checks: read`, `pull-requests: read` | `GITHUB_TOKEN` only |
+| `release.yml` `certify` job | after authorization | `contents: read` | none |
+| `release.yml` `release` job | after authorization and certification | `contents: write`, `id-token: write` | `GITHUB_TOKEN` only |
 
 Rules that keep publication credentials away from untrusted code:
 
@@ -114,30 +138,18 @@ Rules that keep publication credentials away from untrusted code:
   is not left in `.git/config` for later steps or scripts.
 - `contents: write` exists only in the release job, which runs from a tag or a
   manual dispatch, never from a pull request.
-- npm publication uses short-lived OIDC credentials from the
-  `npm-publish` environment; no long-lived `NPM_TOKEN` is stored in this repository.
+- There is no npm publication job and no registry credential in this repository.
 - Third-party actions are pinned to commit SHAs; the release path uses `gh`
   from the runner image instead of a third-party release action.
 
-## Publication is disabled by default
+## Publication is private-only
 
-The package is `"private": true`. Publishing to npm requires the owner to:
-
-1. decide that publication is authorized, and choose a licence;
-2. confirm ownership of the `coderax-cli` name in the registry (or rename);
-3. remove `"private": true` in a reviewed commit;
-4. configure a trusted publisher for the repository and workflow on npmjs.com
-   (npm CLI 11.5.1+ and Node 22.14+ are required for OIDC publishing);
-5. enforce reviewer approval for `npm-publish`, then set
-   `NPM_PUBLISH_ENABLED=true`. Private GitHub Free repositories do not enforce
-   environment reviewers. Keep publishing disabled until a replacement
-   approval control is in place.
-
-Only then does the gated `npm` job exist as a usable path. Until all five steps
-happen, `npm publish` is refused by npm itself because the package is private.
-
-The repository is public, so npm provenance is available for a tarball built
-from it. GitHub Releases remain the canonical channel regardless.
+The package is `"private": true`, `publishConfig` is absent, and the release
+workflow has no npm job. GitHub Releases are the only distribution channel;
+they inherit the repository's private visibility and require an authenticated
+download. This is intentional for an owner-only product. Adding a public
+registry would require a separate owner decision, a licence, name ownership,
+and a new review of private artifact distribution.
 
 ### Build provenance
 
@@ -159,5 +171,5 @@ for local archive verification.
 | `release v0.3.0 already exists` | Tag reused | Cut a new version; do not move published tags |
 | `checksum mismatch` in `npm run verify` | Build raced an edit, or `SOURCE_DATE_EPOCH` differed | Rebuild from a clean checkout |
 | `dist/` hashes differ in `npm run repro` | Non-deterministic input (untracked file, locale, zlib difference) | Build with the same Node version; check `git status` |
-| Hosted runner cannot start | Organization billing or spending limit | Standard runners are free for this public repository; check the organization's Actions policy |
-| npm job fails with "package is private" | Publication not authorized | Follow the five steps above |
+| Hosted runner cannot start | Organization billing or spending limit | Check the organization's Actions policy and the $0 budget |
+| Release authorization refuses the tag | Direct push, unmerged tag, missing approval, or a stale or missing check on the PR head or release commit | Verify both revisions and tag the merge commit of an independently approved green PR |

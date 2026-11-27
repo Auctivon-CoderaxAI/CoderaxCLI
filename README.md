@@ -11,10 +11,10 @@ and state live in the Coderax deployment; this program makes HTTP requests and
 exits. Installing it never pulls in Ollama, Docker, a local AI runtime, a
 database, or a background service.
 
-- Repository: [`Auctivon-CoderaxAI/CoderaxCLI`](https://github.com/Auctivon-CoderaxAI/CoderaxCLI) (public)
+- Repository: [`Auctivon-CoderaxAI/CoderaxCLI`](https://github.com/Auctivon-CoderaxAI/CoderaxCLI) (visibility is controlled separately)
+- Distribution: private GitHub Releases through authenticated downloads; no public npm publication
 - Runtime: Node.js 24 or newer, standard library only, no runtime dependencies
 - Companion: [`Coderax`](https://github.com/Auctivon-CoderaxAI/Coderax) (deployment)
-- Distribution: GitHub Releases (canonical); npm-ready but not published
 - Shared contract: [`packages/workflow-sdk`](packages/workflow-sdk/src/contract.js)
 
 This repository is the **canonical** Coderax CLI. The in-repo `Coderax/cli`
@@ -22,15 +22,22 @@ package is deprecated; it is replaced by this implementation.
 
 ## Install
 
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:f594ac1f9164be3e99b93e6d4f0c12c6d8b283a3ead2bea8ca48a5ef279615f4 -->
+
 | Method | Command | Notes |
 | --- | --- | --- |
-| Linux / macOS | `sh install.sh --version 0.3.0` | Verifies SHA-256, installs atomically to `~/.coderax/cli/0.3.0` |
-| Windows | `powershell -File install.ps1 -Version 0.3.0` | Installs atomically to `%LOCALAPPDATA%\Coderax\cli\0.3.0` |
-| npm tarball | `npm install --global ./coderax-cli-0.3.0.tgz` | Works today; registry publication is not enabled |
+| Linux / macOS | [Authenticated standalone install](docs/INSTALL.md#option-a--standalone-installer-linux-and-macos) | Downloads and verifies version 0.3.0 before running the local installer |
+| Windows | [Authenticated standalone install](docs/INSTALL.md#option-b--standalone-installer-windows) | Downloads and verifies version 0.3.0 before running the local installer |
+| Offline npm tarball | `npm install --global ./coderax-cli-0.3.0.tgz` | Use an authenticated release download; registry publication is disabled |
 | Source | `npm ci --ignore-scripts && node src/cli.js --help` | For development |
 
-Release downloads are public. Full instructions, checksum and provenance
-verification, offline installs and PATH setup: [docs/INSTALL.md](docs/INSTALL.md).
+<!-- /coderabbit-ai-generated:v1 -->
+
+Release downloads require GitHub authentication. Full instructions, checksum and
+provenance verification, offline installs and PATH setup:
+[docs/INSTALL.md](docs/INSTALL.md).
 
 ## Authenticate
 
@@ -101,7 +108,7 @@ else. No administrator rights, services, daemons, or open ports.
 | Atomic upgrade with retained rollback directory | ✅ implemented, tested |
 | Cross-platform installation tests | ✅ Linux executed; macOS/Windows in hosted CI |
 | Release provenance verification (`--provenance`) | ✅ verifies Sigstore bundles or legacy GitHub attestations |
-| npm registry publication | ⛔ not enabled — owner authorization required |
+| Public npm publication | ⛔ disabled — private GitHub Release is the canonical channel |
 | Automatic updates | ⛔ deliberately not implemented |
 | File upload, agent mutation | ⛔ not implemented — use `call` where supported by the backend |
 
@@ -188,8 +195,13 @@ restores the previous version, and `--force` keeps the replaced directory at
 
 ## Releases
 
-Every release publishes a GitHub Release with an npm tarball, a POSIX standalone
-tarball, a Windows zip, `SHA256SUMS`, a release manifest, and an SPDX SBOM.
+Every release publishes a private GitHub Release with an npm-compatible tarball,
+a POSIX standalone tarball, a Windows zip, `SHA256SUMS`, a release manifest, an
+SPDX SBOM, and the signed release-authorization record. A tag is publishable only
+when it is the merge commit of an independently approved pull request with
+successful `test`, `changed-commits`, and `dependency audit` checks on the PR head.
+The tagged commit also needs successful dependency audit and changed-commit
+secret scan jobs from its push to `main`.
 
 Builds are reproducible: fixed metadata, sorted entries, fixed compression and a
 fixed `SOURCE_DATE_EPOCH`; `npm run repro` rebuilds twice and compares hashes.

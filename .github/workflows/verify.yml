@@ -1,0 +1,65 @@
+name: verify
+
+on:
+  workflow_call:
+    inputs:
+      os:
+        description: "Runner operating system"
+        required: true
+        type: string
+      ref:
+        description: "Exact git ref to verify; defaults to the caller SHA"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ${{ inputs.os }}
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Install from the lockfile
+        run: npm ci --ignore-scripts
+      - name: Syntax check
+        run: npm run check
+      - name: Unit, CLI and contract tests
+        run: npm test
+      - name: Build release artifacts
+        run: npm run build
+      - name: Verify checksums, contents, installers and safety
+        run: npm run verify
+      # Real packed artifacts: install into a path with spaces and Unicode,
+      # refuse argv tokens, authenticate over stdin, exercise every
+      # compatibility state, stream Work SSE, upgrade atomically with rollback,
+      # and uninstall.
+      - name: Hosted installation acceptance (install -> auth -> upgrade -> uninstall)
+        run: npm run install-test
+      - name: Reproducibility check
+        if: runner.os == 'Linux'
+        run: npm run repro
+      - name: Upload installation evidence
+        if: failure() || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: install-evidence-${{ inputs.os }}
+          path: |
+            dist/install-evidence.json
+            dist/SHA256SUMS
+            dist/sbom.spdx.json
+            dist/release-manifest.json
+          if-no-files-found: ignore
+          retention-days: 7

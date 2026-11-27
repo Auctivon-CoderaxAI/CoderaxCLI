@@ -12,30 +12,102 @@ on:
         description: "Existing tag to publish (vX.Y.Z)"
         required: true
         type: string
-      publish_npm:
-        description: "Also publish to npm (owner authorization required)"
-        required: false
-        default: false
-        type: boolean
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
-  release:
-    name: build and publish the GitHub Release
+  authorize:
+    name: authorize the exact merged revision
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+      pull-requests: read
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      sha: ${{ steps.meta.outputs.sha }}
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - name: Check out release policy from main and fetch tags
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/heads/main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+      - name: Resolve and validate the release revision
+        id: meta
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          tag="${INPUT_TAG:-${GITHUB_REF_NAME}}"
+          case "$tag" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::invalid release tag: $tag"; exit 1 ;;
+          esac
+          sha="$(git rev-parse --verify "refs/tags/$tag^{commit}")"
+          if [ "$GITHUB_EVENT_NAME" = push ] && [ "$sha" != "$(git rev-parse --verify "$GITHUB_SHA^{commit}")" ]; then
+            echo "::error::tag $tag no longer points to the triggering commit"
+            exit 1
+          fi
+          version="$(git show "$sha:package.json" | node -p 'JSON.parse(require("node:fs").readFileSync(0, "utf8")).version')"
+          if [ "$tag" != "v$version" ]; then
+            echo "::error::tag $tag does not match package.json version $version"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Require PR approval and checks on the PR head and release commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+          RELEASE_SHA: ${{ steps.meta.outputs.sha }}
+        run: node scripts/release-gate.mjs
+      - name: Upload the authorization record
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-authorization
+          path: release-authorization.json
+          retention-days: 30
+
+  certify:
+    name: certify (${{ matrix.os }})
+    needs: authorize
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    uses: ./.github/workflows/verify.yml
+    with:
+      os: ${{ matrix.os }}
+      ref: ${{ needs.authorize.outputs.sha }}
+
+  release:
+    name: build and publish the private GitHub Release
+    needs: [authorize, certify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: write # create the release and upload assets
       id-token: write # Sigstore keyless signing for provenance
     steps:
-      - name: Check out source
+      - name: Check out the authorized commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ needs.authorize.outputs.sha }}
           fetch-depth: 0
           persist-credentials: false
       - name: Set up Node
@@ -45,37 +117,10 @@ jobs:
           cache: npm
       - name: Install from the lockfile
         run: npm ci --ignore-scripts
-      - name: Resolve and validate the release tag
-        id: meta
-        shell: bash
-        env:
-          INPUT_TAG: ${{ inputs.tag }}
-        run: |
-          tag="${INPUT_TAG:-${GITHUB_REF_NAME}}"
-          case "$tag" in
-            v[0-9]*.[0-9]*.[0-9]*) ;;
-            *) echo "::error::invalid release tag: $tag"; exit 1 ;;
-          esac
-          version="$(node -p 'require("./package.json").version')"
-          if [ "$tag" != "v$version" ]; then
-            echo "::error::tag $tag does not match package.json version $version"
-            exit 1
-          fi
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "Releasing $tag"
-      - name: Syntax check
-        run: npm run check
-      - name: Unit and CLI tests
-        run: npm test
       - name: Build release artifacts
         run: npm run build
       - name: Verify artifacts, checksums, and install safety
         run: npm run verify
-      - name: Reproducibility check
-        run: npm run repro
-      - name: Installation test
-        run: npm run install-test
       # GitHub artifact attestations are public-repository-only on GitHub Free.
       # Keyless Sigstore signing is free for private repositories and produces a
       # portable bundle that ships beside each asset.
@@ -91,66 +136,38 @@ jobs:
           done
       - name: Verify the signed archive
         env:
-          VERSION: ${{ steps.meta.outputs.version }}
+          VERSION: ${{ needs.authorize.outputs.version }}
         run: |
           cosign verify-blob \
             --bundle "dist/coderax-cli-${VERSION}-standalone.tar.gz.sigstore.json" \
             --certificate-identity-regexp "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/(tags|heads)/.*" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             "dist/coderax-cli-${VERSION}-standalone.tar.gz"
-      - name: Publish the GitHub Release
+      - name: Download the authorization record
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-authorization
+          path: release-authorization
+      - name: Publish the private GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.meta.outputs.tag }}
+          TAG: ${{ needs.authorize.outputs.tag }}
+          SHA: ${{ needs.authorize.outputs.sha }}
         run: |
+          set -euo pipefail
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "::error::release $TAG already exists; cut a new version instead of reusing a tag"
             exit 1
           fi
-          gh release create "$TAG" dist/* \
+          tag_ref="refs/tags/$TAG"
+          refs="$(git -c credential.helper= -c 'credential.helper=!gh auth git-credential' \
+            ls-remote --exit-code "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$tag_ref" "$tag_ref^{}")"
+          remote_sha="$(awk -v ref="$tag_ref" '$2 == ref { direct = $1 } $2 == ref "^{}" { peeled = $1 } END { print (peeled ? peeled : direct) }' <<< "$refs")"
+          if [ "$remote_sha" != "$SHA" ]; then
+            echo "::error::tag $TAG no longer points to the authorized commit $SHA"
+            exit 1
+          fi
+          gh release create "$TAG" dist/* release-authorization/release-authorization.json \
             --title "Coderax CLI $TAG" \
             --notes-file dist/release-notes.md \
             --verify-tag
-
-  npm:
-    name: publish to npm (requires authorization)
-    needs: release
-    # Requires an explicit manual dispatch and an owner-set repository variable.
-    # Configure npm-publish reviewers where supported. On private GitHub Free,
-    # keep NPM_PUBLISH_ENABLED unset until a replacement approval control exists.
-    # package.json is also "private": true until the owner authorizes
-    # publication, so even a misconfigured run is refused by npm.
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_npm == true && vars.NPM_PUBLISH_ENABLED == 'true' }}
-    runs-on: ubuntu-latest
-    environment: npm-publish
-    permissions:
-      contents: read
-      id-token: write # trusted publishing, no long-lived token
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Set up Node for publishing
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: "24"
-          registry-url: "https://registry.npmjs.org"
-      - name: Download the published assets
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.tag }}
-        run: |
-          mkdir -p dist
-          gh release download "$TAG" --dir dist \
-            --pattern "coderax-cli-*.tgz" \
-            --pattern "SHA256SUMS"
-      - name: Verify the downloaded tarball against the release checksums
-        run: |
-          cd dist
-          sha256sum -c SHA256SUMS --ignore-missing
-      - name: Publish to npm
-        run: |
-          version="$(node -p 'require("./package.json").version')"
-          # npm provenance requires a public source repository; private Free cannot use it.
-          npm publish "./dist/coderax-cli-${version}.tgz" --access public
