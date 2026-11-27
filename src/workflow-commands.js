@@ -1,4 +1,3 @@
-import { createInterface } from "node:readline/promises";
 import { spawn } from "node:child_process";
 import {
   BUILD_MODES,
@@ -31,6 +30,9 @@ export const EXIT = Object.freeze({
   NOT_FOUND: 5,
   UNAVAILABLE: 6,
   CONTRACT: 7,
+  APPROVAL: 8,
+  UNCERTAIN: 9,
+  CONFLICT: 10,
   CANCELLED: 130,
 });
 
@@ -141,26 +143,67 @@ function sessionFor(ctx, baseUrl) {
 
 async function streamTurn(ctx, client, mode, text, { session }) {
   const answer = [];
-  const result = await client.chatStream({
-    text,
-    mode,
-    conversationId: session.conversationId ?? undefined,
-    parentMessageId: session.parentMessageId ?? undefined,
-    agentId: ctx.flags.get("agent") ?? ctx.settings.agent ?? undefined,
-    model: ctx.flags.get("model") ?? ctx.settings.model ?? undefined,
-    endpoint: ctx.settings.endpoint,
-    signal: ctx.signal,
-    onEvent: (event) => {
-      if (event.type === "delta") {
-        answer.push(event.text);
-        if (!ctx.json) ctx.raw(event.text);
-      } else if (event.type === "replace") {
-        answer.length = 0;
-        answer.push(event.text);
-        if (!ctx.json) ctx.raw(`\n[Revised response]\n${event.text}`);
+  let result;
+  try {
+    result = await client.chatStream({
+      text,
+      mode,
+      conversationId: session.conversationId ?? undefined,
+      parentMessageId: session.parentMessageId ?? undefined,
+      agentId: ctx.flags.get("agent") ?? ctx.settings.agent ?? undefined,
+      model: ctx.flags.get("model") ?? ctx.settings.model ?? undefined,
+      endpoint: ctx.settings.endpoint,
+      path: ctx.flags.get("url") ?? ctx.settings.chatPath,
+      signal: ctx.signal,
+      onEvent: (event) => {
+        if (event.type === "delta") {
+          answer.push(event.text);
+          if (!ctx.json) ctx.raw(event.text);
+        } else if (event.type === "replace") {
+          answer.length = 0;
+          answer.push(event.text);
+          if (!ctx.json) ctx.raw(`\n[Revised response]\n${event.text}`);
+        }
+      },
+    });
+  } catch (error) {
+    // The POST is never retried. If a conversation was already identified,
+    // surface it so the operator can inspect the existing task instead of
+    // submitting the same generation a second time.
+    const isSafeId = (id) =>
+      typeof id === "string" && id.trim() !== "" &&
+      (!ctx.settings.token || !id.includes(ctx.settings.token));
+    const { conversationId: reportedId, streamId, ...details } = error?.details ?? {};
+    const conversationId = [reportedId, streamId, session.conversationId].find(isSafeId);
+    if (error instanceof SdkError && (error.details || conversationId)) {
+      error.details = {
+        ...details,
+        ...(conversationId ? { conversationId } : {}),
+        ...(isSafeId(streamId) ? { streamId } : {}),
+      };
+    }
+    if (conversationId) {
+      // Persist the accepted turn before reporting the failure so the next
+      // invocation continues it instead of silently starting a new one.
+      try {
+        const sessions = withSession(ctx.settings.sessions, ctx.settings.baseUrl, {
+          conversationId,
+          parentMessageId: isSafeId(session.parentMessageId) ? session.parentMessageId : null,
+        });
+        ctx.settings.sessions = sessions;
+        await saveConfig({ sessions }, { filePath: ctx.settings.configPath });
+      } catch {
+        ctx.err(`coderax: warning: could not save conversation ${conversationId}`);
       }
-    },
-  });
+      if (error instanceof SdkError) {
+        if (!error.message.includes(conversationId)) {
+          error.message +=
+            `; conversation ${conversationId}. Inspect it with \`coderax tasks\`; the message was not resent.`;
+        }
+      }
+    }
+    throw error;
+  }
 
   await persistSession(ctx, ctx.settings.baseUrl, result);
 
@@ -208,7 +251,36 @@ async function streamTurn(ctx, client, mode, text, { session }) {
   return EXIT.OK;
 }
 
+/**
+ * Start the one interactive terminal implementation. Non-interactive commands
+ * keep using the shared WorkflowClient transport directly; the terminal builds
+ * its own bounded, sanitising presentation layer on top of the same settings.
+ */
+async function runTerminal(ctx, mode) {
+  if (!ctx.stdinIsTTY) {
+    throw new SdkError("USAGE", "interactive mode requires a terminal; start a terminal session or pass a prompt");
+  }
+  if (typeof ctx.interactiveRunner !== "function") {
+    throw new SdkError("USAGE", "the interactive terminal is not available in this build");
+  }
+  const resume = ctx.flags.get("resume");
+  const code = await ctx.interactiveRunner({
+    settings: ctx.settings,
+    mode,
+    env: ctx.env,
+    accessible: ctx.flags.has("accessible") === true,
+    noColor: ctx.flags.has("no-color") === true,
+    resume: resume ?? false,
+    noHistory: ctx.flags.has("no-history") === true,
+    fetchImpl: ctx.fetchImpl,
+    signal: ctx.signal,
+  });
+  return Number.isInteger(code) ? code : EXIT.OK;
+}
+
 export async function chatCommand(ctx, positionals) {
+  if (ctx.flags.has("interactive")) return runTerminal(ctx, "chat");
+
   const client = await clientFor(ctx);
   if (ctx.flags.has("new")) resetSession(ctx, ctx.settings.baseUrl);
 
@@ -224,83 +296,7 @@ export async function chatCommand(ctx, positionals) {
       session: sessionFor(ctx, ctx.settings.baseUrl),
     });
   }
-  return interactiveChat(ctx, client);
-}
-
-async function interactiveChat(ctx, client) {
-  const readline = createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    terminal: true,
-  });
-  let session = sessionFor(ctx, ctx.settings.baseUrl);
-
-  ctx.out("Interactive chat. /help for commands, /exit to leave.");
-  if (session.conversationId) ctx.out(`Continuing conversation ${session.conversationId}.`);
-
-  try {
-    while (true) {
-      let line;
-      try {
-        line = await readline.question("coderax> ");
-      } catch {
-        return EXIT.CANCELLED;
-      }
-      const text = line.trim();
-      if (text === "") continue;
-      if (text === "/exit" || text === "/quit") return EXIT.OK;
-      if (text === "/help") {
-        ctx.out(
-          [
-            "/exit, /quit      leave the session",
-            "/new              start a new conversation",
-            "/model <id>       set the model for this session",
-            "/agent <id>       set the agent for this session",
-            "/conversation     show the current conversation id",
-            "/help             show this help",
-          ].join("\n"),
-        );
-        continue;
-      }
-      if (text === "/new") {
-        session = { conversationId: null, parentMessageId: null };
-        resetSession(ctx, ctx.settings.baseUrl);
-        await saveConfig({ sessions: ctx.settings.sessions }, { filePath: ctx.settings.configPath });
-        ctx.out("Started a new conversation.");
-        continue;
-      }
-      if (text === "/conversation") {
-        ctx.out(session.conversationId ?? "(no conversation yet)");
-        continue;
-      }
-      if (text.startsWith("/model ")) {
-        ctx.settings.model = text.slice("/model ".length).trim();
-        ctx.out(`Model set to ${ctx.settings.model || "(default)"}.`);
-        continue;
-      }
-      if (text.startsWith("/agent ")) {
-        ctx.settings.agent = text.slice("/agent ".length).trim();
-        ctx.out(`Agent set to ${ctx.settings.agent || "(default)"}.`);
-        continue;
-      }
-      if (text.startsWith("/")) {
-        ctx.err(`unknown command: ${text}. Type /help.`);
-        continue;
-      }
-
-      try {
-        const code = await streamTurn(ctx, client, "chat", text, { session });
-        if (code !== EXIT.OK) continue;
-        session = getSession(ctx.settings, ctx.settings.baseUrl);
-      } catch (error) {
-        if (error instanceof SdkError && error.code === "CANCELLED") return EXIT.CANCELLED;
-        ctx.err(`coderax: ${error.code ?? "ERROR"}: ${error.message}`);
-        if (error?.code === "UNAUTHENTICATED" || error?.code === "FORBIDDEN") return EXIT.UNAUTHENTICATED;
-      }
-    }
-  } finally {
-    readline.close();
-  }
+  return runTerminal(ctx, "chat");
 }
 
 export async function workCommand(ctx, positionals) {
@@ -313,6 +309,10 @@ export async function workCommand(ctx, positionals) {
       "autonomous Work requires `coderax work submit <prompt> --repo <owner/name> --agent <id>`; " +
         "`coderax work <prompt>` is the interactive streaming alias",
     );
+  }
+  if (ctx.flags.has("interactive")) return runTerminal(ctx, "work");
+  if (ctx.stdinIsTTY && messageFrom(ctx, positionals) === "") {
+    return runTerminal(ctx, "work");
   }
   const client = await clientFor(ctx);
   if (ctx.flags.has("new")) resetSession(ctx, ctx.settings.baseUrl);
@@ -367,6 +367,7 @@ export async function submitCommand(ctx, positionals) {
     throw new SdkError("USAGE", `--mode must be one of ${BUILD_MODES.join(", ")}`);
   }
   const workspace = ctx.flags.get("workspace") ?? defaultWorkspace(repository);
+  const follow = ctx.flags.has("follow") && !ctx.flags.has("detach");
 
   const result = await client.submitBuild({
     request,
@@ -377,18 +378,15 @@ export async function submitCommand(ctx, positionals) {
   });
 
   if (ctx.json) {
-    ctx.out(
-      JSON.stringify(
-        {
-          run: result.run,
-          workflow: result.workflow,
-          build: result.build,
-          ...diagnosticsForJson(client.diagnostics),
-        },
-        null,
-        2,
-      ),
-    );
+    const summary = {
+      run: result.run,
+      workflow: result.workflow,
+      build: result.build,
+      ...diagnosticsForJson(client.diagnostics),
+    };
+    // `--follow` makes this invocation an NDJSON stream; keep the submission
+    // record on one line instead of emitting pretty JSON followed by NDJSON.
+    ctx.out(JSON.stringify(summary, null, follow ? 0 : 2));
   } else {
     ctx.out(`Submitted run ${result.run.id}  ${statusLabel(result.run.status)}`);
     if (result.workflow?.id) {
@@ -403,7 +401,7 @@ export async function submitCommand(ctx, positionals) {
     ctx.out(`Next: coderax run ${result.run.id}`);
   }
 
-  if (ctx.flags.has("follow") && !ctx.flags.has("detach")) {
+  if (follow) {
     return runCommand(ctx, [result.run.id]);
   }
   return EXIT.OK;
@@ -513,10 +511,19 @@ function notifyTerminal(ctx, run) {
       .replaceAll("{id}", run.id)
       .replaceAll("{status}", run.status);
     try {
+      // Notification commands are user-supplied and detached; never hand them
+      // the deployment bearer token through the inherited environment. Windows
+      // environment variable names are case-insensitive.
+      const env = Object.fromEntries(
+        Object.entries(process.env).filter(
+          ([key]) => (process.platform === "win32" ? key.toUpperCase() : key) !== "CODERAX_TOKEN",
+        ),
+      );
       const child = spawn(expanded, {
         shell: true,
         detached: true,
         stdio: "ignore",
+        env,
       });
       child.unref();
     } catch {
@@ -669,12 +676,19 @@ export async function retryCommand(ctx, positionals) {
   const client = await clientFor(ctx);
   await client.requireOwner();
   const { previous, run } = await client.retryRun(id);
+  const follow = ctx.flags.has("follow");
   if (ctx.json) {
-    ctx.out(JSON.stringify({ previous, run, ...diagnosticsForJson(client.diagnostics) }, null, 2));
+    ctx.out(
+      JSON.stringify(
+        { previous, run, ...diagnosticsForJson(client.diagnostics) },
+        null,
+        follow ? 0 : 2,
+      ),
+    );
   } else {
     ctx.out(`Retried ${previous.id} (${statusLabel(previous.status)}) as run ${run.id}  ${statusLabel(run.status)}`);
   }
-  if (ctx.flags.has("follow")) return runCommand(ctx, [run.id]);
+  if (follow) return runCommand(ctx, [run.id]);
   return EXIT.OK;
 }
 

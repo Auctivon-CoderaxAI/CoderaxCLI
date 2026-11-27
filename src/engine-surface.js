@@ -1,6 +1,6 @@
 import { statSync } from "node:fs";
 import { dirname } from "node:path";
-import { CoderaxError, formatJson } from "./client.js";
+import { CoderaxError, formatJson, redactValue } from "./client.js";
 import { configDir, maskToken } from "./config.js";
 import { CONTRACT_VERSION, DATA_MODES, KNOWN_AGENTS } from "./contract.js";
 import { followTaskEvents } from "./events.js";
@@ -34,8 +34,12 @@ function table(rows, headers) {
   return [line(headers), line(widths.map((width) => "\u2500".repeat(width))), ...rows.map(line)];
 }
 
+function safeJson(ctx, value) {
+  return formatJson(redactValue(value, ctx.token));
+}
+
 function emit(ctx, human, machine) {
-  ctx.out(ctx.json ? formatJson(machine) : human);
+  ctx.out(ctx.json ? safeJson(ctx, machine) : human);
 }
 
 export function requireBase(ctx) {
@@ -49,7 +53,7 @@ export function requireBase(ctx) {
 
 export function requireAuth(ctx) {
   if (!ctx.settings.token) {
-    throw new CoderaxError("UNAUTHENTICATED", "no owner token configured; run `coderax login` first");
+    throw new CoderaxError("UNAUTHENTICATED", "no owner token configured; run `coderax engine login` first");
   }
 }
 
@@ -97,7 +101,7 @@ async function promptText(ctx, mode) {
   let text = ctx.args.join(" ").trim();
   if (!text && !ctx.stdinIsTTY) text = String(await ctx.readSecret()).trim();
   if (!text) {
-    throw usage(`no message provided; usage: coderax ${mode} "your message"`);
+    throw usage(`no message provided; usage: coderax engine ${mode === "work" ? "work submit" : mode} "your message"`);
   }
   return text;
 }
@@ -134,9 +138,9 @@ function renderTaskEvent(ctx, event, outcome) {
           `  resource    ${request.resource ?? "(unknown)"}`,
           `  description ${request.description ?? ""}`.trimEnd(),
           `  request     ${request.requestId ?? "(unknown)"}`,
-          `  approve     coderax approve ${event.taskId ?? "<taskId>"} ${request.requestId ?? "<requestId>"}`,
-          `  deny        coderax deny ${event.taskId ?? "<taskId>"} ${request.requestId ?? "<requestId>"}`,
-          `  continue    coderax events ${event.taskId ?? "<taskId>"}`,
+          `  approve     coderax engine approve ${event.taskId ?? "<taskId>"} ${request.requestId ?? "<requestId>"}`,
+          `  deny        coderax engine deny ${event.taskId ?? "<taskId>"} ${request.requestId ?? "<requestId>"}`,
+          `  continue    coderax engine events ${event.taskId ?? "<taskId>"}`,
           "",
         ].join("\n"),
       );
@@ -176,14 +180,14 @@ export async function status(ctx) {
     mode: settings.mode || null,
   };
   if (ctx.json) {
-    ctx.out(formatJson(payload));
+    ctx.out(safeJson(ctx, payload));
     return EXIT.OK;
   }
   ctx.out(`Coderax CLI       ${VERSION}`);
   ctx.out(`WorkflowEngine    ${CONTRACT_VERSION} (events v1)`);
   ctx.out(`API               ${payload.baseUrl ?? "(not configured)"}`);
   ctx.out(
-    `Authentication    ${payload.authenticated ? `owner token (${payload.token}, via ${payload.tokenSource})` : "no \u2014 run `coderax login`"}`,
+    `Authentication    ${payload.authenticated ? `owner token (${payload.token}, via ${payload.tokenSource})` : "no \u2014 run `coderax engine login`"}`,
   );
   if (payload.agent) ctx.out(`Agent             ${payload.agent}`);
   if (payload.model) ctx.out(`Model             ${payload.model}`);
@@ -243,7 +247,7 @@ export async function chat(ctx) {
 
   const reply = await engineFor(ctx).chat(request);
   if (ctx.json) {
-    ctx.out(formatJson(reply));
+    ctx.out(safeJson(ctx, reply));
   } else {
     ctx.out(reply.text);
     ctx.err(`conversation ${reply.conversationId}`);
@@ -277,7 +281,7 @@ export async function work(ctx) {
   if (ctx.flags.has("detach")) {
     emit(
       ctx,
-      `detached; task ${accepted.taskId} continues on the engine.\n  follow  coderax events ${accepted.taskId}\n  status  coderax task ${accepted.taskId}\n  cancel  coderax cancel ${accepted.taskId}\n`,
+      `detached; task ${accepted.taskId} continues on the engine.\n  follow  coderax engine events ${accepted.taskId}\n  status  coderax engine task ${accepted.taskId}\n  cancel  coderax engine cancel ${accepted.taskId}\n`,
       { ...accepted, detached: true },
     );
     return EXIT.OK;
@@ -308,26 +312,26 @@ export async function work(ctx) {
     if (error?.code === "DETACHED") {
       if (!ctx.json) {
         ctx.err(`detached; task ${accepted.taskId} is awaiting an approval decision.`);
-        ctx.err(`  approve/deny or follow: coderax events ${accepted.taskId}`);
+        ctx.err(`  approve/deny or follow: coderax engine events ${accepted.taskId}`);
       } else {
-        ctx.out(formatJson({ ...accepted, detached: true, state: "awaiting_approval" }));
+        ctx.out(safeJson(ctx, { ...accepted, detached: true, state: "awaiting_approval" }));
       }
       return EXIT.OK;
     }
     if (error?.code === "CANCELLED") {
       if (!ctx.json) {
         ctx.err(`detached; task ${accepted.taskId} continues on the engine.`);
-        ctx.err(`  follow  coderax events ${accepted.taskId}`);
-        ctx.err(`  cancel  coderax cancel ${accepted.taskId}`);
+        ctx.err(`  follow  coderax engine events ${accepted.taskId}`);
+        ctx.err(`  cancel  coderax engine cancel ${accepted.taskId}`);
       } else {
-        ctx.out(formatJson({ ...accepted, detached: true }));
+        ctx.out(safeJson(ctx, { ...accepted, detached: true }));
       }
       return EXIT.CANCELLED;
     }
     if (error?.code === "STREAM_DISCONNECTED" || error?.code === "REQUEST_TIMEOUT" || error?.code === "REQUEST_FAILED") {
       throw new CoderaxError(
         error.code,
-        `${error.message}\n  task ${accepted.taskId} may still be running; follow it with \`coderax events ${accepted.taskId}\``,
+        `${error.message}\n  task ${accepted.taskId} may still be running; follow it with \`coderax engine events ${accepted.taskId}\``,
       );
     }
     throw error;
@@ -340,7 +344,7 @@ export async function work(ctx) {
   const text = status.result?.summary || assembler.text || "";
   if (ctx.json) {
     ctx.out(
-      formatJson({
+      safeJson(ctx, {
         taskId: status.taskId,
         conversationId: status.conversationId,
         state: status.state,
@@ -381,7 +385,7 @@ export async function task(ctx) {
   const status = await engineFor(ctx).task(taskId);
 
   if (ctx.json) {
-    ctx.out(formatJson(status));
+    ctx.out(safeJson(ctx, status));
     return EXIT.OK;
   }
   ctx.out(`task      ${status.taskId}`);
@@ -415,12 +419,12 @@ export async function tasks(ctx) {
   requireAuth(ctx);
   const list = await engineFor(ctx).notifications();
   if (ctx.json) {
-    ctx.out(formatJson(list));
+    ctx.out(safeJson(ctx, list));
     return EXIT.OK;
   }
   if (list.notifications.length === 0) {
     ctx.out("no durable tasks reported yet.");
-    ctx.out("use `coderax conversations` for Chat/Work history, or `coderax task <id>` with a known id.");
+    ctx.out("use `coderax engine conversations` for Chat/Work history, or `coderax engine task <id>` with a known id.");
     return EXIT.OK;
   }
   const rows = list.notifications.map((item) => [
@@ -451,7 +455,7 @@ export async function events(ctx) {
     for await (const event of engine.events(taskId, { after, signal: ctx.signal })) {
       const outcome = assembler.apply(event);
       if (outcome.kind === "duplicate") continue;
-      if (ctx.json) ctx.out(`${JSON.stringify(event)}\n`);
+      if (ctx.json) ctx.out(`${JSON.stringify(redactValue(event, ctx.token))}\n`);
       else renderTaskEvent(ctx, event, outcome);
       if (assembler.terminal) break;
     }
@@ -468,7 +472,7 @@ export async function events(ctx) {
     after,
     signal: ctx.signal,
     onEvent: (event, outcome) => {
-      if (ctx.json) ctx.out(`${JSON.stringify(event)}\n`);
+      if (ctx.json) ctx.out(`${JSON.stringify(redactValue(event, ctx.token))}\n`);
       else renderTaskEvent(ctx, event, outcome);
     },
   });
@@ -480,7 +484,7 @@ export async function events(ctx) {
       `${JSON.stringify({
         taskId,
         state: assembler.terminal?.state ?? null,
-        text: assembler.text,
+        text: redactValue(assembler.text, ctx.token),
         seq: assembler.lastSeq,
         events: assembler.eventCount,
       })}\n`,
@@ -540,7 +544,7 @@ export function retry(ctx) {
 
 function renderPermissions(ctx, taskId, list) {
   if (ctx.json) {
-    ctx.out(formatJson(list));
+    ctx.out(safeJson(ctx, list));
     return;
   }
   if (list.requests.length === 0) {
@@ -559,8 +563,8 @@ function renderPermissions(ctx, taskId, list) {
   if (pending.length > 0) {
     ctx.out("");
     for (const request of pending) {
-      ctx.out(`approve  coderax approve ${taskId} ${request.requestId}`);
-      ctx.out(`deny     coderax deny ${taskId} ${request.requestId}`);
+      ctx.out(`approve  coderax engine approve ${taskId} ${request.requestId}`);
+      ctx.out(`deny     coderax engine deny ${taskId} ${request.requestId}`);
     }
   }
 }
@@ -587,7 +591,7 @@ async function decide(ctx, decision) {
   const list = await engineFor(ctx).decidePermission(taskId, request);
   const decided = list.requests.find((item) => item.requestId === requestId);
   if (ctx.json) {
-    ctx.out(formatJson(list));
+    ctx.out(safeJson(ctx, list));
   } else if (decided) {
     ctx.out(`${decided.decision}: ${decided.scope} ${decided.resource} for task ${taskId}`);
     if (decided.decision === "pending") ctx.out("the decision was not recorded; the request may have expired.");
@@ -610,7 +614,7 @@ export async function notifications(ctx) {
   requireAuth(ctx);
   const list = await engineFor(ctx).notifications();
   if (ctx.json) {
-    ctx.out(formatJson(list));
+    ctx.out(safeJson(ctx, list));
     return EXIT.OK;
   }
   if (list.notifications.length === 0) {
@@ -635,7 +639,7 @@ export async function conversations(ctx) {
   requireAuth(ctx);
   const list = await engineFor(ctx).conversations();
   if (ctx.json) {
-    ctx.out(formatJson(list));
+    ctx.out(safeJson(ctx, list));
     return EXIT.OK;
   }
   if (list.conversations.length === 0) {
@@ -660,7 +664,7 @@ export async function conversation(ctx) {
   if (!conversationId) throw usage("conversation requires a conversation id");
   const result = await engineFor(ctx).conversation(conversationId);
   if (ctx.json) {
-    ctx.out(formatJson(result));
+    ctx.out(safeJson(ctx, result));
     return EXIT.OK;
   }
   ctx.out(`conversation ${result.conversationId} (${result.isWork ? "work" : "chat"}, ${result.agent})`);
@@ -681,7 +685,7 @@ export async function memory(ctx) {
   if (!DATA_MODES.includes(mode)) throw usage("--mode must be private or cloud");
   const list = await engineFor(ctx).memory(mode);
   if (ctx.json) {
-    ctx.out(formatJson(list));
+    ctx.out(safeJson(ctx, list));
     return EXIT.OK;
   }
   if (list.entries.length === 0) {
@@ -707,7 +711,7 @@ export async function artifacts(ctx) {
     note: `contract ${CONTRACT_VERSION} exposes artifact metadata only; no upload or download operation exists`,
   };
   if (ctx.json) {
-    ctx.out(formatJson(payload));
+    ctx.out(safeJson(ctx, payload));
     return EXIT.OK;
   }
   if (list.length === 0) ctx.out(`no artifacts recorded for ${taskId}.`);
@@ -760,7 +764,7 @@ export async function doctor(ctx) {
     detail: ctx.settings.token
       ? `${maskToken(ctx.settings.token)} via ${ctx.env.CODERAX_TOKEN ? "environment" : "config file"}`
       : "no token",
-    hint: ctx.settings.token ? "" : "Run `coderax login`.",
+    hint: ctx.settings.token ? "" : "Run `coderax engine login`.",
   });
 
   let contractVersion = null;
@@ -818,7 +822,7 @@ export async function doctor(ctx) {
           name: "owner-auth",
           ok: false,
           detail: error.message,
-          hint: "The token was rejected; run `coderax login` again.",
+          hint: "The token was rejected; run `coderax engine login` again.",
         });
       }
     }
@@ -826,7 +830,7 @@ export async function doctor(ctx) {
 
   const ok = checks.every((check) => check.ok);
   if (ctx.json) {
-    ctx.out(formatJson({ ok, version: VERSION, contractVersion, checks }));
+    ctx.out(safeJson(ctx, { ok, version: VERSION, contractVersion, checks }));
     return ok ? EXIT.OK : EXIT.ERROR;
   }
   for (const check of checks) {

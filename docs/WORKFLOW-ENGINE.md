@@ -13,16 +13,15 @@ backend. It is not the legacy Coderax deployment API (`/api/work/chat`,
 | API prefix | `/v1` |
 | Operations in the published contract | 17 |
 | Runtime OpenAPI document | none served |
-| Pinned engine commit | `808dfd3797f9b1d7647ebd14bd395806fc4ab9bd` |
-| Vendored OpenAPI SHA-256 | `4be54dc95fe8b9c00d3521e8e289807716a928bc77c61cc173401303a048cf93` |
+| Pinned engine commit | `7b7c9d7a88b8e483995ebe445f2bbbdd29050229` |
+| Vendored OpenAPI SHA-256 | `66add22a0d38405e9aaa49a62a9e463648df00457ce0b0080e3cca240c9736f4` |
 | Owner authentication | `Authorization: Bearer <owner token>` |
 | Engine package version inspected | `0.1.0` |
 
-The route table lives once in [`src/contract.js`](../src/contract.js), with the
-pinned OpenAPI document in [`contracts/`](../contracts). The command registry
-in [`src/command-registry.js`](../src/command-registry.js) imports that table;
-it does not keep a second copy. The CLI does **not** discover routes at runtime,
-and therefore cannot be redirected by a document to another origin.
+The `engine` command registry imports its route table from
+[`src/contract.js`](../src/contract.js). Both this table and the shared SDK used
+by `coderax v1` are tested against the pinned OpenAPI document in
+[`contracts/`](../contracts). Neither namespace discovers routes at runtime.
 
 Top-level dispatch, `coderax --help` and shell completion read the same
 registry. `src/cli.js` holds one handler map keyed by the registry's `handler`

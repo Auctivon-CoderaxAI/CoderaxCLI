@@ -25,10 +25,33 @@ version is `0`, a minor release may change behaviour.
   Ubuntu against a pinned engine commit.
 - Adopted the pinned engine contract, vendored OpenAPI digest, validated HTTP
   client, SSE decoder, event assembler and command handlers from
-  `feat/engine-thin-client-v1` (`0cd85bf`); no second route catalogue,
-  transport or handler layer is kept. `src/engine-commands.js` is a thin
-  registry adapter with contract/owner preflight and secure credential
-  handling.
+  `feat/engine-thin-client-v1` (`0cd85bf`). `src/engine-commands.js` is an
+  adapter with contract and owner preflight and secure credential handling.
+- Canonical WorkflowEngine `/v1` transport in the shared SDK
+  (`packages/workflow-sdk/src/v1/`): strict payload validation, contract
+  negotiation that accepts any `1.x` and refuses another major, SSE replay with
+  `Last-Event-ID` and `after`, `eventId` deduplication, `seq` gap detection,
+  bounded reconnect with `STREAM_INTERRUPTED`, and durable at-most-once Work
+  submission with `SUBMISSION_UNCERTAIN`. Legacy `/api` remains an explicit
+  `CODERAX_SDK=workflow|legacy` migration mode and is never reached by a silent
+  fallback from `v1`.
+- `coderax v1` command group: `login`, `whoami`, `health`, `models`, `agents`,
+  `chat`, `submit`, `task`, `watch`, `tasks`, `cancel`, `resume`, `retry`,
+  `resolve`, `notifications`, `conversations`, `permissions` and `templates`.
+  Chat prints one JSON document under `--json`; watch and attached submit emit
+  NDJSON.
+- Work templates (`inspect`, `implement`, `test`, `diff`, `pr`, `review`, `ci`)
+  as engine objectives, with an explicit tool-capability refusal.
+- Pinned contract artifact `contracts/workflow-engine-1.0.0.openapi.json` with
+  provenance (engine commit `7b7c9d7a`, SHA-256 `66add22a…`), verified by
+  `test/v1-contract.test.js`. This revision adds optional Work `reasoning`,
+  step `dependsOn`/`attempts` and result `verification`; the engine kept
+  `info.version` at `1.0.0`, so the pin tracks the commit and digest (W3).
+- `coderax v1 submit --reasoning auto|fast|complex`, passed to the engine and
+  shown in authoritative task output alongside step dependencies, attempts and
+  result verification.
+- Exit codes `8` (approval required), `9` (submission uncertain) and `10`
+  (conflict/busy), documented alongside the existing taxonomy.
 
 ### Changed
 
@@ -50,7 +73,17 @@ version is `0`, a minor release may change behaviour.
   browser, Native Game Studio and Native Gaming Agent are declared blocked
   because WorkflowEngine 1.0.0 has no such operations. They exit `6` without a
   request and are never simulated. Artifact metadata and notification-derived
-  task discovery are available; `work --detach` is the supported detach path.
+  task discovery are available; `engine work --detach` is the supported detach path.
+
+### Fixed
+
+- Windows secure-store hardened and verified ACLs through PowerShell module
+  autoload, which failed when `USERPROFILE` was redirected and could be
+  shadowed by a user-writable `PSModulePath`. The security module is now loaded
+  from the interpreter's own directory, so a Unicode or redirected install path
+  cannot make `login` fail with `CONFIG_PERMISSIONS`.
+- The WorkflowEngine's `/v1/chat` is documented as SSE but implemented as JSON;
+  the client accepts both and records the defect in `BACKEND-DEFECTS.md`.
 
 ## [0.3.0] - 2026-11-26
 
@@ -80,6 +113,16 @@ together, rather than a packaging branch that shipped a stale CLI.
   through stdin. `--token-file` reads a `0600` file without echoing it.
 - Installer provenance verification with `--provenance` / `-Provenance`
   (`gh attestation verify`), alongside mandatory checksum verification.
+- Interactive terminal: multiline composer, streaming markdown with syntax
+  highlighting, bounded rendering, resize handling, command completion,
+  model/agent/conversation selection, progress, tool activity, cancellation,
+  retry/resume, accessible line mode and sanitised untrusted output.
+- One command catalogue (`src/commands.js`) shared by CLI dispatch and terminal
+  completion.
+- The shared `packages/workflow-sdk` is the default terminal transport, so the
+  interactive and non-interactive surfaces use one SSE parser.
+- Windows ACLs are rewritten and verified by SID (locale- and domain-safe), and
+  the DPAPI credential file is hardened and verified before use.
 
 ### Changed
 

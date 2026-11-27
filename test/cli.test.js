@@ -221,7 +221,13 @@ test("discovery keeps route keys unredacted while output stays redacted", async 
   const route = `/api/${TOKEN}/agents`;
   const document = {
     openapi: "3.1.0",
-    paths: { [route]: { get: { operationId: "listAgents" } } },
+    paths: { [route]: { get: {
+      operationId: "listAgents",
+      parameters: [{ name: "filter", in: "query", schema: { default: TOKEN } }],
+      requestBody: { content: { "application/json": {
+        schema: { properties: { [TOKEN]: { examples: [TOKEN] } } },
+      } } },
+    } } },
   };
 
   await withStub(
@@ -233,7 +239,10 @@ test("discovery keeps route keys unredacted while output stays redacted", async 
         0,
       );
       assert.equal(openapiIo.out().includes(TOKEN), false);
-      assert.equal(JSON.parse(openapiIo.out()).operations[0].path, "/api/[REDACTED]/agents");
+      const [operation] = JSON.parse(openapiIo.out()).operations;
+      assert.equal(operation.path, "/api/[REDACTED]/agents");
+      assert.equal(operation.parameters[0].schema.default, "[REDACTED]");
+      assert.deepEqual(operation.requestBody.schema.properties["[REDACTED]"].examples, ["[REDACTED]"]);
 
       const agentsIo = capture();
       assert.equal(

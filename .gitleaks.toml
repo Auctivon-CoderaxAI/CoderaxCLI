@@ -1,0 +1,17 @@
+[extend]
+useDefault = true
+
+# First-parent merge scans can rediscover these values at a new commit.
+[[allowlists]]
+description = "SHA-256 of the pinned, published WorkflowEngine OpenAPI document"
+condition = "AND"
+paths = ['^(src/contract\.js|packages/workflow-sdk/src/v1/contract\.js)$']
+regexTarget = "secret"
+regexes = ['^66add22a0d38405e9aaa49a62a9e463648df00457ce0b0080e3cca240c9736f4$']
+
+[[allowlists]]
+description = "Synthetic input to the terminal history secret detector"
+condition = "AND"
+paths = ['^test/terminal-history\.test\.js$']
+regexTarget = "secret"
+regexes = ['^1234567890abcdef1234567890abcdef$']

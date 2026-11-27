@@ -144,3 +144,66 @@ not a tenant-scoped role.
 | `repos` | `/api/repos` | exit `6` |
 | API version | metadata/header | `API_VERSION_UNVERIFIED`; `--strict` exit `6` |
 | event replay | SSE ids + `Last-Event-ID` | `CURSOR_UNSUPPORTED`; reconnect re-reads snapshots |
+
+## WorkflowEngine `/v1` findings
+
+Scope: `Auctivon-CoderaxAI/Coderax-WorkflowEngine` at `main`
+(`7b7c9d7a88b8e483995ebe445f2bbbdd29050229`). The CLI consumes this contract
+through `packages/workflow-sdk/src/v1/` and pins the document in
+`contracts/workflow-engine-1.0.0.openapi.json`.
+
+### W1 — `/v1/chat` is documented as SSE but implemented as JSON *(high)*
+
+**Observed.** `packages/contracts/src/routes.ts` declares `submitChat` with
+`stream: true` and `{ status: 200, description: 'Chat reply', schema: ChatReply }`.
+`buildOpenApiDocument` therefore publishes
+`text/event-stream` as the only `200` content type. `src/api/routes.ts` registers
+the handler as `{ kind: 'json', status: 200, body: result.value }`.
+
+**Client behaviour.** The CLI sends `Accept: application/json,
+text/event-stream` and accepts either shape. A JSON body is validated as
+`ChatReply`; an SSE body must end in a `ChatReply` frame or the turn fails with
+`STREAM_INCOMPLETE`. It does not guess.
+
+**Required engine change.** Either stream the turn (emit `text.delta` frames and
+a final `ChatReply`) or mark the route as a JSON response. The generated document
+and the handler must agree; a client generated from this document would otherwise
+break on every successful chat.
+
+**Acceptance test.** `npm run openapi:check` should also assert that a route
+marked `stream: true` returns `{ kind: 'sse' }` from its handler.
+
+### W2 — `/v1/work` is not idempotent *(high)*
+
+**Observed.** `submitWork` has no documented idempotency key and no
+`Idempotency-Key` header in the contract. A lost `202` is therefore ambiguous.
+
+**Client behaviour.** The CLI writes a submission key to a private durable ledger
+before transmitting, sends `idempotency-key` and `x-coderax-client-request-id`,
+and never retries an ambiguous submission automatically. It reports
+`SUBMISSION_UNCERTAIN` (exit `9`) with the key and any conversation id, and
+offers `coderax work resolve <key> <taskId>`.
+
+**Required engine change.** Honour `Idempotency-Key` on `POST /v1/work` and
+return the original `TaskAccepted` for a repeat, so a client can recover without
+owner reconciliation.
+
+### W3 — additive contract changes do not bump `info.version` *(medium)*
+
+**Observed.** Engine `main` moved from `808dfd37` to `7b7c9d7a` while
+`openapi.json` still reports `info.version` `1.0.0`. The newer document adds
+optional `reasoning` to the Work submission and status, `dependsOn` and
+`attempts` to a step, and `verification` to a result. A client that pinned only
+the version cannot tell the two documents apart.
+
+**Client behaviour.** The CLI pins the engine commit and the exact SHA-256 of
+the document, and fails `test/v1-contract.test.js` on digest drift. The strict
+validators accept the new optional fields and reject an invalid enum or shape.
+
+**Required engine change.** Bump the minor version for additive wire changes,
+or publish a contract revision/digest in `/v1/health`. A version string that
+stays constant while the schema changes makes cache and compatibility decisions
+ambiguous.
+
+**Acceptance test.** Two documents with different schemas never share the same
+reported contract version, and health reports the revision the server serves.

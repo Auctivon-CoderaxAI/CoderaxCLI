@@ -19,6 +19,7 @@ import { spawn } from "node:child_process";
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
+import { hardenSecurePath, verifySecurePath } from "./secure-store.js";
 
 export const CREDENTIAL_SERVICE = "coderax-cli";
 
@@ -102,6 +103,19 @@ async function powershell(script, { env, input = "" }) {
 }
 
 /**
+ * DPAPI already binds the ciphertext to this Windows account, but the file's
+ * DACL is still replaced and verified: a second account must not be able to
+ * read, replace or hold the credential file open.
+ */
+async function protectDpapiFile(path, { env, deps }) {
+  await (deps.hardenAcl ?? ((target) => hardenSecurePath(target, { env })))(path);
+  const verification = await (deps.verifyAcl ?? ((target) => verifySecurePath(target, { env })))(path);
+  if (!verification?.ok) {
+    throw new Error(`credential file is not private: ${verification?.detail ?? "ACL verification failed"}`);
+  }
+}
+
+/**
  * Read the stored token for an account.
  * Returns null when no credential exists. A broken store is an error, never a
  * silent fallback, so an operator is not told they are signed in when they are not.
@@ -120,8 +134,14 @@ export async function readCredential({ backend, account, env = process.env, deps
     return result.stdout.trim() || null;
   }
   if (kind === "windows-dpapi") {
+    const path = dpapiPath(env);
+    const verification = await (deps.verifyAcl ?? ((target) => verifySecurePath(target, { env })))(path);
+    if (verification.reason === "MISSING") return null;
+    if (!verification.ok) {
+      throw new Error(`refusing to read a credential file that is not private: ${verification.detail}`);
+    }
     const result = await (deps.powershell ?? powershell)(PS_LOAD, {
-      env: { ...env, CODERAX_DPAPI_PATH: dpapiPath(env) },
+      env: { ...env, CODERAX_DPAPI_PATH: path },
     });
     if (result.status !== 0) return null;
     return result.stdout.trim() || null;
@@ -146,11 +166,13 @@ export async function writeCredential({ backend, account, token, env = process.e
     return kind;
   }
   if (kind === "windows-dpapi") {
+    const path = dpapiPath(env);
     const result = await (deps.powershell ?? powershell)(PS_STORE, {
-      env: { ...env, CODERAX_DPAPI_PATH: dpapiPath(env) },
+      env: { ...env, CODERAX_DPAPI_PATH: path },
       input: token,
     });
     if (result.status !== 0) throw new Error(`DPAPI store failed: ${result.stderr.trim()}`);
+    await protectDpapiFile(path, { env, deps });
     return kind;
   }
   throw new Error(`unknown credential backend: ${kind}`);

@@ -16,7 +16,8 @@
  * It deliberately does not reimplement Chat, Work, task control, permissions,
  * conversations, memory or artifact metadata.
  */
-import { CoderaxError, formatJson } from "./client.js";
+import { CoderaxError, formatJson, redact } from "./client.js";
+import { StreamTextRedactor } from "../packages/workflow-sdk/src/redact.js";
 import { loadConfig, maskToken, saveConfig } from "./config.js";
 import { credentialBackend, readTokenFile } from "./credentials.js";
 import {
@@ -312,6 +313,7 @@ async function commandCompat(ctx) {
       `engine compat: ${health.contract.version} (supported ${ENGINE_CONTRACT_VERSION}.x)\nowner token: ${authenticated ? "verified" : ctx.token ? "rejected" : "not configured"}${authError ? `\n${authError.code}: ${authError.message}` : ""}`,
     );
   }
+  if (authError?.code === "REQUEST_TIMEOUT") return surface.EXIT.NETWORK;
   if (ctx.flags.has("strict") && !authenticated) return 6;
   if (authError?.code === "API_VERSION_UNSUPPORTED") return 6;
   if (authError?.code === "UNAUTHENTICATED" || authError?.code === "FORBIDDEN") return 3;
@@ -412,9 +414,9 @@ function surfaceContext(ctx, args, flags = ctx.flags) {
     args,
     flags,
     settings,
-    out: ctx.json ? ctx.out : (text) => ctx.out(safeText(text)),
+    out: ctx.json ? ctx.out : (text) => ctx.out(safeText(redact(text, ctx.token))),
     raw: ctx.json ? ctx.raw : (text) => ctx.raw(safeText(text)),
-    err: (text) => ctx.err(safeText(text)),
+    err: (text) => ctx.err(safeText(redact(text, ctx.token))),
   };
 }
 
@@ -620,7 +622,27 @@ export async function runEngineCommand(ctx) {
       // before the handler can send one.
       const prepared = prepareSurface(ctx, command.name, args);
       await connectEngine(ctx);
-      return surface[prepared.name](prepared.ctx);
+      const redactor = new StreamTextRedactor(ctx.token);
+      const writeRaw = prepared.ctx.raw;
+      prepared.ctx.raw = (text) => {
+        const safe = redactor.push(text);
+        if (safe) writeRaw(safe);
+      };
+      // Flush pending human output before a line or when the stream closes.
+      const flush = () => {
+        const tail = redactor.flush();
+        if (tail) writeRaw(tail);
+      };
+      const writeLine = prepared.ctx.out;
+      prepared.ctx.out = (text) => {
+        flush();
+        writeLine(text);
+      };
+      try {
+        return await surface[prepared.name](prepared.ctx);
+      } finally {
+        flush();
+      }
     }
   }
 }

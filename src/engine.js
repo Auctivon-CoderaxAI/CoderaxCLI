@@ -245,13 +245,17 @@ export class EngineClient {
     return headers;
   }
 
-  async #send({ method, path, query, body, accept = "application/json", signal, timeoutMs, cancelled }) {
+  async #send({ method, path, query, body, accept = "application/json", signal, timeoutMs, headersOnly = false }) {
     let target;
     try {
       target = joinUrl(this.baseUrl, path, query);
     } catch (error) {
       if (error instanceof CoderaxError) throw error;
       throw new CoderaxError("BASE_URL_INVALID", "the configured base URL is not a valid URL");
+    }
+    if (this.token && target.protocol !== "https:" &&
+        !(target.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(target.hostname))) {
+      throw new CoderaxError("BASE_URL_INSECURE", "an owner token requires HTTPS except on loopback");
     }
     const headers = this.headers(accept);
     let payload;
@@ -260,7 +264,12 @@ export class EngineClient {
       payload = JSON.stringify(body);
     }
 
-    const timeout = AbortSignal.timeout(timeoutMs ?? this.timeoutMs);
+    const deadline = timeoutMs ?? this.timeoutMs;
+    const headerController = headersOnly ? new AbortController() : null;
+    const timer = headerController
+      ? setTimeout(() => headerController.abort(), deadline)
+      : undefined;
+    const timeout = headerController?.signal ?? AbortSignal.timeout(deadline);
     const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
 
     try {
@@ -272,7 +281,7 @@ export class EngineClient {
         signal: combined,
       });
     } catch (error) {
-      if ((cancelled?.() ?? false) || signal?.aborted) {
+      if (signal?.aborted) {
         throw new CoderaxError("CANCELLED", "request cancelled");
       }
       const name = error?.name ?? "";
@@ -286,6 +295,8 @@ export class EngineClient {
         "REQUEST_FAILED",
         `request to ${target.pathname} failed: ${truncated(redact(String(error?.message ?? "network error"), this.token))}`,
       );
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -303,6 +314,10 @@ export class EngineClient {
   async #json(operationId, input) {
     const route = operation(operationId);
     const response = await this.#send({ ...input, method: route.method, path: input.path ?? route.path });
+    return this.#jsonResponse(operationId, response);
+  }
+
+  async #jsonResponse(operationId, response) {
     const text = await this.#readText(response);
     let body = null;
     if (text.trim() !== "") {
@@ -336,8 +351,42 @@ export class EngineClient {
     return this.#json("listModels", { path: operation("listModels").path });
   }
 
-  chat(request) {
-    return this.#json("submitChat", { path: operation("submitChat").path, body: request });
+  async chat(request) {
+    const operationId = "submitChat";
+    const { path, method } = operation(operationId);
+    // The published route is SSE; the pinned engine also returns JSON.
+    const response = await this.#send({ method, path, body: request, accept: "text/event-stream, application/json" });
+    const mediaType = response.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase();
+    if (!response.ok || mediaType !== "text/event-stream") {
+      return this.#jsonResponse(operationId, response);
+    }
+
+    const decoder = new TextDecoder();
+    const frames = new SseDecoder();
+    let reply;
+    const consume = (batch) => {
+      for (const frame of batch) {
+        const event = parseJsonFrame(frame);
+        if (event === null) continue;
+        if (!isRecord(event)) throw contractError(operationId, "an SSE frame was not a JSON object");
+        if (Object.hasOwn(event, "conversationId")) reply = VALIDATORS.submitChat(operationId, event);
+      }
+    };
+    try {
+      if (!response.body) throw contractError(operationId, "missing SSE response body");
+      for await (const chunk of response.body) consume(frames.push(decoder.decode(chunk, { stream: true })));
+      consume(frames.push(decoder.decode()));
+      consume(frames.end());
+    } catch (error) {
+      if (error instanceof CoderaxError) throw error;
+      if (error instanceof SseDecodeError) throw contractError(operationId, error.message);
+      if (error?.name === "AbortError" || error?.name === "TimeoutError") {
+        throw new CoderaxError("REQUEST_TIMEOUT", "the Chat response timed out");
+      }
+      throw new CoderaxError("RESPONSE_UNREADABLE", "the Chat stream could not be read");
+    }
+    if (!reply) throw contractError(operationId, "the SSE response ended without a ChatReply");
+    return reply;
   }
 
   submitWork(request) {
@@ -422,7 +471,7 @@ export class EngineClient {
     };
 
     try {
-      arm();
+      if (signal?.aborted) throw new CoderaxError("CANCELLED", "event stream detached");
       const response = await this.#send({
         method: "GET",
         path,
@@ -430,11 +479,10 @@ export class EngineClient {
         accept: "text/event-stream",
         signal: controller.signal,
         timeoutMs: this.eventTimeoutMs,
-        // The internal controller also aborts on the idle deadline; only the
-        // caller's own signal means a deliberate detach.
-        cancelled: () => signal?.aborted === true,
+        headersOnly: true,
       });
 
+      arm();
       if (!response.ok) {
         const text = await this.#readText(response);
         let body = null;
@@ -452,7 +500,6 @@ export class EngineClient {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       const frames = new SseDecoder();
-      arm();
 
       try {
         while (true) {

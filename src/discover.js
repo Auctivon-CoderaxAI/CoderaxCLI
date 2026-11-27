@@ -1,4 +1,4 @@
-import { CoderaxError, request } from "./client.js";
+import { CoderaxError, redactValue, request } from "./client.js";
 
 /**
  * Candidate locations for the deployment's OpenAPI document. The CLI resolves
@@ -118,7 +118,7 @@ export async function discoverOpenApi({ baseUrl, token, timeoutMs, fetchImpl } =
         attempts.push(`${path}: document lists no operations`);
         continue;
       }
-      return { document, sourcePath: path, operations };
+      return { document, sourcePath: path, operations, displayOperations: redactValue(operations, token) };
     } catch (error) {
       if (error.code === "HTTP_401" || error.code === "HTTP_403" || error.code === "REQUEST_TIMEOUT") {
         throw error;

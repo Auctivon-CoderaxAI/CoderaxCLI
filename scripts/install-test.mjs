@@ -23,7 +23,7 @@ import assert from "node:assert/strict";
 import { spawn as spawnProcess, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { once } from "node:events";
-import { existsSync } from "node:fs";
+import { existsSync, lstatSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -97,11 +97,14 @@ const env = {
 
 const launcher = join(binDir, IS_WINDOWS ? "coderax.cmd" : "coderax");
 const commandPath = (path) => (IS_WINDOWS ? `"${path}"` : path);
+// With shell: true Windows joins argv with spaces, so an argument that
+// contains one has to carry its own quoting.
+const shellArg = (value) => (IS_WINDOWS && /[\s"]/.test(value) ? `"${value.replaceAll('"', '""')}"` : value);
 
 /** Run the installed launcher without blocking the event loop (stub server). */
 function cli(args, extraEnv = {}, { input = null } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawnProcess(commandPath(launcher), args, {
+    const child = spawnProcess(commandPath(launcher), args.map(shellArg), {
       env: { ...env, ...extraEnv },
       shell: IS_WINDOWS,
       stdio: ["pipe", "pipe", "pipe"],
@@ -216,7 +219,6 @@ const CAPABILITIES = [
  */
 async function withEngine(mode, run) {
   const authorization = `Bearer ${TOKEN}`;
-  const compatible = mode !== "api-incompatible";
   const apiVersion = mode === "api-incompatible" ? "2" : mode === "unavailable" ? null : "1";
   const deploymentVersion = mode === "older" ? "0.7.9" : mode === "unavailable" ? null : "0.8.8";
   const unauthenticated = mode === "unauthenticated";
@@ -225,7 +227,11 @@ async function withEngine(mode, run) {
     const url = new URL(req.url, "http://127.0.0.1");
     const authenticated = req.headers.authorization === authorization;
     const json = (status, payload) => {
-      res.writeHead(status, { "content-type": "application/json", "x-coderax-api-version": compatible ? "1" : "2" });
+      const headers = { "content-type": "application/json" };
+      // An unavailable deployment advertises no version anywhere, not even on
+      // the 404 that hides its metadata; otherwise the header is a real signal.
+      if (apiVersion !== null) headers["x-coderax-api-version"] = apiVersion;
+      res.writeHead(status, headers);
       res.end(JSON.stringify(payload));
     };
     if (unauthenticated) return json(401, { message: "unauthorized" });
@@ -529,7 +535,7 @@ try {
     await mkdir(project, { recursive: true });
     await writeFile(join(project, "package.json"), `${JSON.stringify({ name: "sdk-check", private: true, type: "module" }, null, 2)}\n`);
     const npm = IS_WINDOWS ? "npm.cmd" : "npm";
-    const install = spawn(npm, ["install", "--no-audit", "--no-fund", "--ignore-scripts", "--prefer-offline", NPM_TARBALL], {
+    const install = spawn(npm, ["install", "--no-audit", "--no-fund", "--ignore-scripts", "--prefer-offline", shellArg(NPM_TARBALL)], {
       cwd: project,
       env,
       shell: IS_WINDOWS,
@@ -563,23 +569,47 @@ console.log(version.VERSION);
     return "exports map, SDK contract, version module and npm bin all work";
   });
 
-  await step("npm global install creates a working launcher", async () => {
+  await step("npm global install creates a working launcher and reports targeted removal advice", async () => {
     const globalPrefix = join(sandbox, "npm global");
+    const otherPrefix = join(sandbox, "other npm global");
     const npm = IS_WINDOWS ? "npm.cmd" : "npm";
-    const install = spawn(
-      npm,
-      ["install", "--global", "--prefix", globalPrefix, "--no-audit", "--no-fund", "--ignore-scripts", "--prefer-offline", NPM_TARBALL],
-      { cwd: sandbox, env, shell: IS_WINDOWS },
-    );
-    assert.equal(install.status, 0, tail(install));
-    const bin = IS_WINDOWS ? join(globalPrefix, "coderax.cmd") : join(globalPrefix, "bin", "coderax");
+    for (const target of [globalPrefix, otherPrefix]) {
+      const install = spawn(
+        npm,
+        ["install", "--global", "--prefix", shellArg(target), "--no-audit", "--no-fund", "--ignore-scripts", "--prefer-offline", shellArg(NPM_TARBALL)],
+        { cwd: sandbox, env, shell: IS_WINDOWS },
+      );
+      assert.equal(install.status, 0, tail(install));
+    }
+    const globalBin = (target) => IS_WINDOWS ? join(target, "coderax.cmd") : join(target, "bin", "coderax");
+    const bin = globalBin(globalPrefix);
     const version = spawn(commandPath(bin), ["--version"], { env, shell: IS_WINDOWS });
     assert.equal(version.status, 0, tail(version));
     assert.equal(version.stdout.trim(), `coderax-cli ${VERSION}`);
     const info = spawn(commandPath(bin), ["version", "--json"], { env, shell: IS_WINDOWS });
     assert.equal(info.status, 0, tail(info));
     assert.equal(JSON.parse(info.stdout).installMethod, "npm-global");
-    return "global shim runs and reports the npm-global install method";
+    const removalEnv = { ...env, npm_config_prefix: otherPrefix, npm_config_audit: "false" };
+    const dryRun = spawn(commandPath(bin), ["uninstall", "--dry-run", "--json"], { env: removalEnv, shell: IS_WINDOWS });
+    assert.equal(dryRun.status, 0, tail(dryRun));
+    const advice = JSON.parse(dryRun.stdout);
+    const resolvedPrefix = await realpath(globalPrefix);
+    // Windows may report the original 8.3 path while realpath expands it.
+    const expectedCommands = (IS_WINDOWS ? [globalPrefix, resolvedPrefix] : [resolvedPrefix]).map((target) => {
+      const commandPrefix = IS_WINDOWS ? target.replaceAll("\\", "/") : target;
+      return `npm uninstall --global --prefix "${commandPrefix}" coderax-cli`;
+    });
+    assert.equal(advice.program.commands.length, 1);
+    const [command] = advice.program.commands;
+    assert.ok(expectedCommands.includes(command), `unexpected removal advice: ${command}`);
+    const removal = spawn(command, [], { cwd: sandbox, env: removalEnv, shell: true });
+    assert.equal(removal.status, 0, tail(removal));
+    assert.ok(!existsSync(advice.program.installPath), "the reported package must be removed");
+    assert.equal(lstatSync(bin, { throwIfNoEntry: false }), undefined, "the reported launcher must be removed");
+    const retained = spawn(commandPath(globalBin(otherPrefix)), ["--version"], { env, shell: IS_WINDOWS });
+    assert.equal(retained.status, 0, tail(retained));
+    assert.equal(retained.stdout.trim(), `coderax-cli ${VERSION}`);
+    return "following the advice removes only the reported global install";
   });
 
   await step("reinstall is refused; a corrupted upgrade leaves the install intact", async () => {

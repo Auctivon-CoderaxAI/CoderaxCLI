@@ -8,8 +8,10 @@
  */
 import { rm, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, resolve } from "node:path";
+import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { EXIT } from "./product-commands.js";
+import { credentialBackend, deleteCredential } from "./credentials.js";
+import { PACKAGE_NAME } from "./version.js";
 
 async function exists(path) {
   try {
@@ -20,12 +22,36 @@ async function exists(path) {
   }
 }
 
-/** Commands that remove the program, per installation method. */
+function globalNpmPrefix(path) {
+  if (!path || !isAbsolute(path) || basename(path) !== PACKAGE_NAME) return null;
+  const modules = dirname(path);
+  if (basename(modules) !== "node_modules") return null;
+
+  const parent = dirname(modules);
+  const windows = process.platform === "win32";
+  // npm uses <prefix>/node_modules on Windows and <prefix>/lib/node_modules
+  // elsewhere. Other managers' global layouts may not have an npm prefix.
+  if (!windows && basename(parent) !== "lib") return null;
+  const prefix = windows ? parent.replaceAll("\\", "/") : dirname(parent);
+  // Use forward slashes on Windows so a drive root cannot escape the closing
+  // quote. Only emit commands for paths safe inside quotes across shells.
+  if (windows && !/^[a-z]:\//i.test(prefix)) return null;
+  // `~` covers Windows 8.3 short names (C:/Users/RUNNER~1/...), which appear in
+  // temporary and profile paths. It is literal inside double quotes in both
+  // cmd.exe and POSIX sh, so it does not need rejecting.
+  return /^[\p{L}\p{M}\p{N} /:~._-]+$/u.test(prefix) ? prefix : null;
+}
+
+/** Instructions that remove the program, per installation method. */
 export function programRemovalCommands(install) {
   const path = install.installPath;
   switch (install.installMethod) {
-    case "npm-global":
-      return ["npm uninstall --global coderax-cli"];
+    case "npm-global": {
+      const prefix = globalNpmPrefix(path);
+      return prefix
+        ? [`npm uninstall --global --prefix "${prefix}" ${PACKAGE_NAME}`]
+        : ["Verify the npm prefix for the installPath shown by coderax version --json before removing this copy."];
+    }
     case "npm-local":
       return ["npm uninstall coderax-cli"];
     case "standalone":
@@ -85,6 +111,18 @@ export async function uninstall(ctx) {
   if (present) {
     await rm(target, { recursive: true, force: true });
     payload.removed = true;
+  }
+
+  // The Windows DPAPI credential lives under APPDATA, not beside the config
+  // file, so removing the config directory alone would leave it behind.
+  // --purge is the explicit request to delete the stored owner credential.
+  if (ctx.flags.has("purge")) {
+    await deleteCredential({
+      backend: credentialBackend(ctx.env),
+      account: ctx.settings.account ?? null,
+      env: ctx.env,
+    });
+    payload.credentialRemoved = true;
   }
 
   const message = present

@@ -2,11 +2,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
-import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runCli } from "../src/cli.js";
+import { saveConfig } from "../src/config.js";
+import { detectInstallMethod } from "../src/diagnostics.js";
+import { programRemovalCommands } from "../src/maintenance.js";
 import {
   SUPPORTED_API_VERSION,
   SUPPORTED_DEPLOYMENT_RANGE,
@@ -121,6 +124,68 @@ test("version --json reports the install and compatibility contract", async () =
   assert.match(info.configPath, /config\.json$/);
 });
 
+test("npm install diagnostics use the supplied layout for removal advice", async (t) => {
+  const prefix = await mkdtemp(join(tmpdir(), "coderax-layout-"));
+  t.after(() => rm(prefix, { recursive: true, force: true }));
+  const root = join(prefix, "node_modules", "coderax-cli");
+  const modulePath = join(root, "src", "diagnostics.js");
+  const localBin = join(prefix, "node_modules", ".bin");
+  const windows = process.platform === "win32";
+  const shim = windows ? "coderax.cmd" : "coderax";
+  await mkdir(join(root, "src"), { recursive: true });
+  await writeFile(modulePath, "");
+
+  function check(path, installPath, scope, command = "npm uninstall coderax-cli") {
+    const installMethod = detectInstallMethod(path);
+    assert.equal(installMethod, `npm-${scope}`);
+    assert.deepEqual(
+      programRemovalCommands({ installMethod, installPath }),
+      [command],
+    );
+  }
+
+  check(modulePath, root, "local"); // bin-links=false
+  if (windows) {
+    await writeFile(join(prefix, shim), "");
+    check(modulePath, root, "global", `npm uninstall --global --prefix "${prefix.replaceAll("\\", "/")}" coderax-cli`);
+
+    // GitHub's Windows runners live under an 8.3 short profile path
+    // (C:/Users/RUNNER~1/...). A tilde in the prefix must not suppress the
+    // command, because it is literal inside double quotes in cmd.exe.
+    const shortPrefix = join(prefix, "RUNNER~1");
+    const shortRoot = join(shortPrefix, "node_modules", "coderax-cli");
+    await mkdir(join(shortRoot, "src"), { recursive: true });
+    await writeFile(join(shortRoot, "src", "diagnostics.js"), "");
+    await writeFile(join(shortPrefix, shim), "");
+    check(
+      join(shortRoot, "src", "diagnostics.js"),
+      shortRoot,
+      "global",
+      `npm uninstall --global --prefix "${shortPrefix.replaceAll("\\", "/")}" coderax-cli`,
+    );
+  }
+  await mkdir(localBin);
+  await writeFile(join(localBin, shim), "");
+  check(modulePath, root, "local");
+
+  if (!windows) {
+    const globalRoot = join(prefix, "lib", "node_modules", "coderax-cli");
+    check(join(globalRoot, "src", "diagnostics.js"), globalRoot, "global", `npm uninstall --global --prefix "${prefix}" coderax-cli`);
+  }
+});
+
+test("global removal advice requires a usable npm prefix", () => {
+  for (const installPath of [
+    join("node_modules", "coderax-cli"),
+    join(tmpdir(), "custom $prefix", ...(process.platform === "win32" ? [] : ["lib"]), "node_modules", "coderax-cli"),
+    join(tmpdir(), "non-npm-layout", "coderax-cli"),
+  ]) {
+    const commands = programRemovalCommands({ installMethod: "npm-global", installPath });
+    assert.match(commands.join("\n"), /verify the npm prefix/i);
+    assert.doesNotMatch(commands.join("\n"), /npm uninstall/);
+  }
+});
+
 test("version works even when the config file is corrupt", async () => {
   const directory = await mkdtemp(join(tmpdir(), "coderax-version-"));
   const file = join(directory, "config.json");
@@ -196,7 +261,10 @@ test("a token in argv is refused with a secure alternative", async () => {
 test("uninstall is a dry run until --yes and then removes user data", async () => {
   const directory = await mkdtemp(join(tmpdir(), "coderax-uninstall-"));
   const file = join(directory, "config.json");
-  await writeFile(file, JSON.stringify({ baseUrl: "https://coderax.test", token: "stored" }), { mode: 0o600 });
+  // Written the way the CLI writes it: a token-bearing config must be private
+  // before uninstall can read it. A bare writeFile only sets POSIX mode bits,
+  // which does not restrict the inherited DACL on Windows.
+  await saveConfig({ baseUrl: "https://coderax.test", token: "stored" }, { filePath: file });
 
   const dry = capture();
   const dryCode = await runCli(["uninstall", "--dry-run", "--json"], {
@@ -204,7 +272,7 @@ test("uninstall is a dry run until --yes and then removes user data", async () =
     stdout: dry.stdout,
     stderr: dry.stderr,
   });
-  assert.equal(dryCode, 0);
+  assert.equal(dryCode, 0, dry.err());
   assert.equal(JSON.parse(dry.out()).removed, false);
   assert.ok(await readFile(file, "utf8"));
 
@@ -214,7 +282,7 @@ test("uninstall is a dry run until --yes and then removes user data", async () =
     stdout: yes.stdout,
     stderr: yes.stderr,
   });
-  assert.equal(yesCode, 0);
+  assert.equal(yesCode, 0, yes.err());
   assert.equal(JSON.parse(yes.out()).removed, true);
   await assert.rejects(() => readFile(file, "utf8"));
 });
@@ -246,6 +314,9 @@ test("only the credential helper and explicit notifications may spawn a process"
   const allowed = new Map([
     ["credentials.js", /"secret-tool"|"powershell\.exe"/],
     ["workflow-commands.js", /notify-command/],
+    // secure-store verifies platform ACLs with the OS tool; no shell is used
+    // and every argument is a fixed command plus a local path.
+    ["secure-store.js", /"icacls"|"ls"|"powershell\.exe"/],
   ]);
   for (const file of await readdir(directory)) {
     if (!file.endsWith(".js")) continue;

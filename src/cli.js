@@ -11,6 +11,7 @@ import { CoderaxError, formatJson, redact, request } from "./client.js";
 import { discoverOpenApi, findOperation } from "./discover.js";
 import * as product from "./product-commands.js";
 import * as workflow from "./workflow-commands.js";
+import * as v1 from "./v1-commands.js";
 import * as maintenance from "./maintenance.js";
 import * as engine from "./engine-commands.js";
 import {
@@ -46,16 +47,21 @@ Global options:
   --strict           Fail on unverified API version or missing capabilities
   --max-retries <n>  Reconnect attempts for durable run monitoring (0-10)
   --json             Machine-readable output (run monitoring emits NDJSON)
+  --interactive, -i  Start the interactive terminal (Chat/Work)
+  --accessible       Line-oriented, screen-reader-friendly terminal mode
+  --resume [id]      Resume a saved conversation in interactive mode
+  --no-history       Do not read or write prompt history for this run
   --yes, --dry-run   Confirm or preview the uninstall command
   --purge            With uninstall: also remove stored credentials
-  --no-color         Accepted for compatibility
+  --no-color         Disable colour (also honours NO_COLOR)
   -h, --help         Show this help
   -v, --version      Show the version
 
 Environment:
   CODERAX_BASE_URL, CODERAX_TOKEN, CODERAX_TIMEOUT_MS, CODERAX_CONFIG,
   CODERAX_CONFIG_DIR, CODERAX_CHAT_PATH, CODERAX_ENDPOINT, CODERAX_MODEL,
-  CODERAX_AGENT, CODERAX_CREDENTIAL_STORE
+  CODERAX_AGENT, CODERAX_CREDENTIAL_STORE, CODERAX_HISTORY,
+  CODERAX_HISTORY_RETENTION_DAYS, CODERAX_HISTORY_MAX_ENTRIES, CODERAX_SDK
 
 Tokens: passing a token as a command-line argument is refused because it would
 appear in shell history and process listings. Use \`coderax login\` (secure
@@ -88,6 +94,9 @@ const EXIT = Object.freeze({
   notFound: 5,
   unavailable: 6,
   contract: 7,
+  approval: 8,
+  uncertain: 9,
+  conflict: 10,
   cancelled: 130,
 });
 
@@ -98,7 +107,7 @@ const CONFIG_KEYS = Object.freeze(Object.assign(Object.create(null), {
   model: "model",
   agent: "agent",
 }));
-const CONFIG_FLAGS = ["base-url", "timeout", "chat-path", "endpoint", "model", "agent"];
+const CONFIG_FLAGS = ["base-url", "token", "timeout", "chat-path", "endpoint", "model", "agent"];
 
 const KNOWN_COMMANDS = new Set(TOP_LEVEL_COMMAND_NAMES);
 const KNOWN_FLAGS = new Set(GLOBAL_FLAGS);
@@ -141,6 +150,10 @@ export function parseArgv(argv) {
           "Use `coderax login` (secure prompt), `--token-file <path>`, stdin, or CODERAX_TOKEN.",
       );
     }
+    if (arg === "-i") {
+      flags.set("interactive", true);
+      continue;
+    }
     if (arg.startsWith("--")) {
       const body = arg.slice(2);
       const equals = body.indexOf("=");
@@ -157,6 +170,10 @@ export function parseArgv(argv) {
         continue;
       }
       const value = argv[index + 1];
+      if (name === "resume" && (value === undefined || value.startsWith("--"))) {
+        flags.set(name, true);
+        continue;
+      }
       if (value === undefined || value.startsWith("--")) {
         throw new UsageError(`--${name} requires a value`);
       }
@@ -191,6 +208,29 @@ function preflight(positionals, flags) {
     throw new UsageError(`unknown command: ${command}. Run \`coderax --help\`.`);
   }
 
+  const resumeRequested = flags.has("resume");
+  if (resumeRequested && command !== "chat" && command !== "work") {
+    throw new UsageError("--resume is only available for `chat` and `work`");
+  }
+  const interactive = flags.has("interactive") || resumeRequested;
+  if (resumeRequested && positionals.length > 1) {
+    throw new UsageError("--resume implies an interactive session and does not accept a prompt; start a terminal session and type the message");
+  }
+  if (interactive) {
+    if (command !== "chat" && command !== "work") {
+      throw new UsageError("--interactive is only available for `chat` and `work`");
+    }
+    if (command === "work" && positionals[1] === "submit") {
+      throw new UsageError("autonomous `work submit` is not interactive; run `coderax work --interactive` for a chat session");
+    }
+    if (positionals.length > 1) {
+      throw new UsageError("--interactive does not accept a prompt; start a terminal session and type the message");
+    }
+    if (flags.has("json")) {
+      throw new UsageError("--interactive cannot be combined with --json; start a terminal session and type the message");
+    }
+  }
+
   if (command === "config") {
     const action = positionals[1] ?? "show";
     if (!["show", "list", "get", "set"].includes(action)) {
@@ -214,6 +254,16 @@ function preflight(positionals, flags) {
       if (key && key in CONFIG_KEYS && !hasFlags && !positionals[3]) {
         throw new UsageError(`config set ${key} requires a value`);
       }
+    }
+  }
+
+  if (command === "history") {
+    const action = positionals[1] ?? "list";
+    if (!["list", "clear", "on", "off", "retention"].includes(action)) {
+      throw new UsageError(`unknown history action: ${action}`);
+    }
+    if (action === "retention" && !/^\d+$/.test(positionals[2] ?? "")) {
+      throw new UsageError("history retention requires a number of days");
     }
   }
 
@@ -297,12 +347,7 @@ async function commandHealth(ctx, deps) {
 
 async function commandOpenapi(ctx, deps) {
   const discovery = await discoverOpenApi({ ...ctx.settings, fetchImpl: deps.fetchImpl });
-  const displayOperations = discovery.operations.map((operation) => ({
-    ...operation,
-    path: redact(operation.path, ctx.token),
-    operationId: operation.operationId ? redact(operation.operationId, ctx.token) : null,
-    summary: operation.summary ? redact(operation.summary, ctx.token) : null,
-  }));
+  const { displayOperations } = discovery;
   const lines = displayOperations
     .slice(0, 50)
     .map((operation) => `  ${operation.method.padEnd(6)} ${operation.path}${operation.operationId ? `  # ${operation.operationId}` : ""}`);
@@ -460,6 +505,8 @@ export const TOP_LEVEL_HANDLERS = Object.freeze({
   "workflow.models": (ctx, deps) =>
     ctx.flags.has("work") ? workflow.workModelsCommand(ctx) : commandResource("models", ctx, deps),
   "maintenance.uninstall": (ctx) => maintenance.uninstall(ctx),
+  "product.history": (ctx) => product.history(ctx),
+  "v1.run": (ctx) => v1.v1Command(ctx, ctx.args),
   "engine.run": (ctx) => engine.runEngineCommand(ctx),
   "cli.config": (ctx, deps) => commandConfig(ctx, deps),
   "cli.health": (ctx, deps) => commandHealth(ctx, deps),
@@ -497,6 +544,19 @@ function exitFor(error) {
   ) {
     return EXIT.unavailable;
   }
+  if (
+    error.code === "APPROVAL_REQUIRED" ||
+    error.code === "PERMISSION_REQUIRED" ||
+    error.code === "permission_required"
+  ) {
+    return EXIT.approval;
+  }
+  if (error.code === "SUBMISSION_UNCERTAIN" || error.code === "SUBMISSION_IN_PROGRESS") {
+    return EXIT.uncertain;
+  }
+  if (error.code === "CONFLICT" || error.code === "HTTP_409" || error.code === "conflict" || error.code === "busy") {
+    return EXIT.conflict;
+  }
   if (error.code === "CANCELLED") return EXIT.cancelled;
   if (
     error.code === "UNAUTHENTICATED" ||
@@ -527,6 +587,16 @@ function exitFor(error) {
   return EXIT.failure;
 }
 
+async function defaultInteractiveRunner(options = {}) {
+  const { runInteractive } = await import("./interactive.js");
+  return runInteractive({
+    ...options,
+    settings: { ...options.settings, fetchImpl: options.fetchImpl },
+    stdin: options.stdin ?? process.stdin,
+    stdout: options.stdout ?? process.stdout,
+  });
+}
+
 export async function runCli(argv, options = {}) {
   const deps = {
     env: options.env ?? process.env,
@@ -539,6 +609,7 @@ export async function runCli(argv, options = {}) {
     stdinIsTTY: options.stdinIsTTY ?? Boolean(process.stdin.isTTY),
     readSecret: options.readSecret ?? readStdin,
     confirm: options.confirm ?? defaultConfirm,
+    interactiveRunner: options.interactiveRunner ?? defaultInteractiveRunner,
   };
 
   const write = (text) => deps.stdout(text.endsWith("\n") ? text : `${text}\n`);
@@ -597,6 +668,7 @@ export async function runCli(argv, options = {}) {
       readSecret: deps.readSecret,
       confirm: deps.confirm,
       install: deps.install ?? collectVersionInfo({ env: deps.env }),
+      interactiveRunner: deps.interactiveRunner,
     };
 
     const entry = findTopLevelCommand(command);

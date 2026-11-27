@@ -6,7 +6,8 @@
  * string. It never assumes one network read equals one frame.
  */
 
-const CRLF = /\r\n|\r/g;
+const MAX_LINE_LENGTH = 1024 * 1024;
+const MAX_FRAME_LENGTH = 4 * 1024 * 1024;
 
 export class SseDecodeError extends Error {
   constructor(message) {
@@ -17,43 +18,70 @@ export class SseDecodeError extends Error {
 
 /**
  * Builds frames from arbitrary chunks. `push` returns every complete frame and
- * keeps the incomplete remainder. `end` flushes a final frame that used a lone
- * blank line terminator (SSE permits it) and otherwise discards a partial frame.
+ * keeps only the bounded, incomplete remainder. A trailing CR terminates
+ * its line immediately; the following LF, if present, belongs to that CR.
  */
 export class SseDecoder {
-  constructor() {
-    this.buffer = "";
+  #line = "";
+  #lines = [];
+  #frameLength = 0;
+  #skipLf = false;
+
+  #append(part) {
+    if (this.#line.length + part.length > MAX_LINE_LENGTH) {
+      throw new SseDecodeError("an SSE line exceeded the size limit");
+    }
+    if (this.#frameLength + this.#line.length + part.length > MAX_FRAME_LENGTH) {
+      throw new SseDecodeError("an SSE frame exceeded the size limit");
+    }
+    this.#line += part;
+  }
+
+  #finishLine() {
+    if (this.#line === "") return this.#finishFrame();
+    this.#frameLength += this.#line.length + 1;
+    if (this.#frameLength > MAX_FRAME_LENGTH) {
+      throw new SseDecodeError("an SSE frame exceeded the size limit");
+    }
+    this.#lines.push(this.#line);
+    this.#line = "";
+    return null;
+  }
+
+  #finishFrame() {
+    const frame = parseFrame(this.#lines.join("\n"));
+    this.#lines = [];
+    this.#frameLength = 0;
+    return frame;
   }
 
   push(chunk) {
-    this.buffer += String(chunk);
-    // Normalise complete CRLF pairs and lone CRs, but hold a trailing CR until
-    // the next read. Converting it immediately would turn a CRLF split across
-    // reads into two newlines and fabricate a frame boundary.
-    let text = this.buffer;
-    let carry = "";
-    if (text.endsWith("\r")) {
-      carry = "\r";
-      text = text.slice(0, -1);
-    }
-    this.buffer = `${text.replace(CRLF, "\n")}${carry}`;
+    const text = String(chunk);
     const frames = [];
-    let boundary = this.buffer.indexOf("\n\n");
-    while (boundary !== -1) {
-      const raw = this.buffer.slice(0, boundary);
-      this.buffer = this.buffer.slice(boundary + 2);
-      const frame = parseFrame(raw);
-      if (frame) frames.push(frame);
-      boundary = this.buffer.indexOf("\n\n");
+    let start = 0;
+    for (const match of text.matchAll(/[\r\n]/g)) {
+      const index = match.index;
+      if (this.#skipLf && index === start && match[0] === "\n") {
+        this.#skipLf = false;
+      } else {
+        this.#append(text.slice(start, index));
+        const frame = this.#finishLine();
+        if (frame) frames.push(frame);
+        this.#skipLf = match[0] === "\r";
+      }
+      start = index + 1;
+    }
+    if (start < text.length) {
+      this.#skipLf = false;
+      this.#append(text.slice(start));
     }
     return frames;
   }
 
   end() {
-    const remainder = this.buffer.replace(CRLF, "\n").trim();
-    this.buffer = "";
-    if (remainder === "") return [];
-    const frame = parseFrame(remainder);
+    if (this.#line !== "") this.#finishLine();
+    this.#skipLf = false;
+    const frame = this.#finishFrame();
     return frame ? [frame] : [];
   }
 }

@@ -40,7 +40,7 @@ Usage: install.sh [options]
   --from-file <path>  Install a local standalone .tar.gz (offline install)
   --checksum <sha256> Expected checksum for --from-file (required)
   --base-url <url>    Releases base URL (default: GitHub Releases, HTTPS only)
-  --provenance        Also verify the archive's build provenance with `gh`
+  --provenance        Also verify the archive's release signature
   --skip-verify       Do not verify the download (not recommended)
   --force             Atomically replace an existing install of this version
   --dry-run           Print the plan without changing anything
@@ -138,6 +138,22 @@ fetch() {
   fi
 }
 
+# Return 44 only for an HTTP 404, which permits verification of older releases.
+fetch_bundle() {
+  if command -v curl >/dev/null 2>&1; then
+    if status="$(curl -fsSL --proto '=https' --tlsv1.2 --retry 2 -w '%{http_code}' -o "$2" "$1")"; then
+      return 0
+    fi
+  else
+    if response="$(wget --server-response -O "$2" "$1" 2>&1)"; then
+      return 0
+    fi
+    status="$(printf '%s\n' "$response" | awk '$1 ~ /^HTTP\// {code=$2} END {print code}')"
+  fi
+  [ "$status" = 404 ] && return 44
+  return 1
+}
+
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/coderax-install.XXXXXX")"
 trap 'if [ -n "$TMP" ] && [ -d "$TMP" ]; then rm -rf "$TMP"; fi' EXIT INT TERM
 # Node resolves the extractor module to its physical path, including on macOS
@@ -212,13 +228,31 @@ else
   fi
 fi
 
-# Authenticated provenance, when the operator asks for it. Checksums prove the
-# bytes match the release file; provenance proves which workflow and commit
-# produced them. `gh` verifies the Sigstore bundle against the repository.
 if [ "$PROVENANCE" -eq 1 ]; then
-  command -v gh >/dev/null 2>&1 || die "--provenance requires the GitHub CLI (gh)" 3
-  gh attestation verify "$ARCHIVE" --repo "$REPO" >/dev/null 2>&1 ||
-    die "provenance verification failed for $ARCHIVE" 3
+  legacy=0
+  if [ -n "$FROM_FILE" ]; then
+    bundle="$ARCHIVE.sigstore.json"
+    if [ ! -e "$bundle" ]; then legacy=1; fi
+  else
+    bundle="$TMP/$ASSET.sigstore.json"
+    fetch_bundle "$release_base/$ASSET.sigstore.json" "$bundle" || {
+      [ "$?" -eq 44 ] || die "could not download the provenance bundle for $ASSET" 3
+      legacy=1
+    }
+  fi
+  if [ "$legacy" -eq 1 ]; then
+    command -v gh >/dev/null 2>&1 || die "legacy provenance verification requires the GitHub CLI (gh)" 3
+    gh attestation verify "$ARCHIVE" --repo "$REPO" >/dev/null ||
+      die "legacy provenance verification failed for $ARCHIVE" 3
+  else
+    command -v cosign >/dev/null 2>&1 || die "--provenance requires Cosign for signed bundles" 3
+    # Manual releases may be signed from a branch; tag runs must match this version.
+    tag_pattern="$(printf '%s' "$VERSION" | sed 's/[.+]/[&]/g')"
+    cosign verify-blob --bundle "$bundle" \
+      --certificate-identity-regexp "^https://github[.]com/${REPO}/[.]github/workflows/release[.]yml@refs/(tags/v${tag_pattern}|heads/.+)$" \
+      --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+      "$ARCHIVE" >/dev/null || die "provenance verification failed for $ARCHIVE" 3
+  fi
 fi
 
 # --- extract safely --------------------------------------------------------
@@ -239,7 +273,9 @@ node "$TMP/extract/lib/safe-extract.mjs" "$ARCHIVE" "$STAGING" >/dev/null ||
 
 # The archive contains a single top-level directory named for the version.
 EXTRACTED="$STAGING/coderax-cli-$VERSION"
-[ -d "$EXTRACTED" ] || die "unexpected archive layout: coderax-cli-$VERSION/ is missing" 3
+if [ ! -d "$EXTRACTED" ]; then
+  die "unexpected archive layout: coderax-cli-$VERSION/ is missing (staging contains: $(ls -A "$STAGING" 2>&1 | tr '\n' ' '))" 3
+fi
 [ -f "$EXTRACTED/src/cli.js" ] || die "unexpected archive layout: src/cli.js is missing" 3
 [ -f "$EXTRACTED/bin/coderax" ] || die "unexpected archive layout: bin/coderax is missing" 3
 

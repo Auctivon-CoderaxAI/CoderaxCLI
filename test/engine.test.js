@@ -10,6 +10,9 @@ import {
   completionScript,
 } from "../src/command-registry.js";
 import { assertContractVersion } from "../src/engine-client.js";
+import { EngineClient } from "../src/engine.js";
+import { EventAssembler, followTaskEvents } from "../src/events.js";
+import { SseDecoder, SseDecodeError } from "../src/sse.js";
 
 const TOKEN = "engine-test-owner-token";
 const BASE = "https://engine.example";
@@ -578,4 +581,88 @@ test("unknown engine commands are usage errors", async () => {
   assert.equal(code, 2);
   assert.equal(stub.calls.length, 0);
   assert.match(io.err(), /unknown engine command/);
+});
+
+test("compat fails on an owner proof timeout and succeeds without a token", async () => {
+  const stub = healthyEngine({ "/v1/agents": () => { throw new DOMException("mock timeout", "TimeoutError"); } });
+  for (const [token, expected] of [[TOKEN, 4], ["", 0]]) {
+    const io = capture();
+    const code = await runCli(["engine", "compat", "--json"], {
+      env: await env({ CODERAX_TOKEN: token }), fetchImpl: stub.fetchImpl,
+      stdout: io.stdout, stderr: io.stderr,
+    });
+    assert.equal(code, expected, io.err());
+    assert.equal(JSON.parse(io.out()).authenticationError?.code, token ? "REQUEST_TIMEOUT" : undefined);
+  }
+  assert.equal(stub.calls.filter(({ path }) => path === "/v1/agents").length, 1);
+});
+
+test("an EngineClient cannot send its token over non-loopback HTTP", async () => {
+  const client = new EngineClient({
+    baseUrl: "http://engine.example",
+    token: TOKEN,
+    fetchImpl: () => assert.fail("insecure request reached fetch"),
+  });
+  await assert.rejects(client.agents(), { code: "BASE_URL_INSECURE" });
+});
+
+test("native text with a new sequence appends even when it repeats a snapshot's tail", () => {
+  const assembler = new EventAssembler();
+  assembler.apply({ seq: 1, message: true, text: "hello!" });
+  const delta = { seq: 2, eventId: "delta", type: "text.delta", payload: { text: "!" } };
+  assert.equal(assembler.apply(delta).kind, "delta");
+  assert.equal(assembler.apply({ ...delta, seq: 3 }).kind, "duplicate");
+  assert.equal(assembler.text, "hello!!");
+});
+
+test("reconnects that only replay duplicates exhaust the budget", async () => {
+  const cursors = [];
+  await assert.rejects(followTaskEvents({
+    taskId: "task_test",
+    client: { async *events(_taskId, { after }) {
+      cursors.push(after);
+      yield { seq: 1, eventId: "same", type: "task.started" };
+      if (cursors.length > 4) assert.fail("duplicate replay reset the retry budget");
+    } },
+    maxReconnects: 2,
+    sleep: async () => {},
+  }), { code: "STREAM_DISCONNECTED" });
+  assert.deepEqual(cursors, [0, 1, 1]);
+});
+
+test("engine SSE framing caps unfinished lines and cumulative frames", () => {
+  const data = "x".repeat(1024 * 1024 - 8);
+  const line = new SseDecoder();
+  line.push(`data: ${data}`);
+  assert.throws(() => line.push("x".repeat(64)), {
+    name: SseDecodeError.name, message: "an SSE line exceeded the size limit",
+  });
+  const frame = new SseDecoder();
+  for (let count = 0; count < 4; count++) frame.push(`data: ${data}\r\n`);
+  assert.throws(() => frame.push("data: too long\n"), {
+    name: SseDecodeError.name, message: "an SSE frame exceeded the size limit",
+  });
+});
+
+test("engine streams redact a token split across deltas and print registered approval commands", async () => {
+  const frames = [
+    { seq: 1, type: "text.delta", payload: { text: `answer: ${TOKEN.slice(0, 8)}` } },
+    { seq: 2, type: "text.delta", payload: { text: TOKEN.slice(8) } },
+    { seq: 3, type: "approval.required", taskId: "task_1", payload: { requestId: "request_1" } },
+  ];
+  const stub = healthyEngine({
+    "/v1/work/task_1/events": () => new Response(
+      frames.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""),
+      { headers: { "content-type": "text/event-stream" } },
+    ),
+  });
+  const io = capture();
+  const code = await runCli(["engine", "events", "task_1", "--once"], {
+    env: await env(), fetchImpl: stub.fetchImpl, stdout: io.stdout, stderr: io.stderr,
+  });
+  assert.equal(code, 0, io.err());
+  assert.equal(io.out().trim(), "answer: [REDACTED]");
+  assert.match(io.err(), /coderax engine approve task_1 request_1/);
+  assert.match(io.err(), /coderax engine deny task_1 request_1/);
+  assert.match(io.err(), /coderax engine events task_1/);
 });

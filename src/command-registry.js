@@ -483,6 +483,18 @@ export const TOP_LEVEL_COMMANDS = Object.freeze([
     summary: "Check the deployment API-version handshake.",
   },
   {
+    name: "v1",
+    handler: "v1.run",
+    usage: "v1 <health|models|agents|chat|submit|task|watch|tasks|cancel|resume|retry|resolve|notifications|conversations|permissions|templates> [--json]",
+    summary: "Use the shared SDK's WorkflowEngine /v1 commands.",
+  },
+  {
+    name: "history",
+    handler: "product.history",
+    usage: "history [list|clear|on|off|retention <days>] [--json]",
+    summary: "Manage prompt history.",
+  },
+  {
     name: "engine",
     handler: "engine.run",
     usage: "engine <command> [options] [--json]",
@@ -585,6 +597,14 @@ export const GLOBAL_FLAGS = Object.freeze([
   "generation",
   "after",
   "once",
+  "interactive",
+  "accessible",
+  "plain",
+  "resume",
+  "no-history",
+  "template",
+  "retry-submission",
+  "reasoning",
 ]);
 
 export const BOOLEAN_GLOBAL_FLAGS = Object.freeze([
@@ -606,6 +626,11 @@ export const BOOLEAN_GLOBAL_FLAGS = Object.freeze([
   "purge",
   "no-approval",
   "once",
+  "interactive",
+  "accessible",
+  "plain",
+  "no-history",
+  "retry-submission",
 ]);
 
 /** Shell completion generated from this registry, not a second list. */

@@ -4,6 +4,7 @@ import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventSequencer, SseDecoder, parseFrame } from "../packages/workflow-sdk/src/sse.js";
+import { WorkflowClient } from "../packages/workflow-sdk/src/index.js";
 import { assertCompatibleVersion, parseApiVersion } from "../packages/workflow-sdk/src/http.js";
 import { normalizeSessions, withSession, getSession, clearSession } from "../src/session.js";
 
@@ -69,6 +70,45 @@ test("API versions are parsed and a different major is rejected", () => {
     () => assertCompatibleVersion("2.0", "test"),
     (error) => error.code === "API_VERSION_UNSUPPORTED",
   );
+});
+
+test("strict negotiation accepts validated headers and prefers a metadata version", async (t) => {
+  const scenarios = [
+    { name: "metadata only", metadata: { apiVersion: "1.4" }, expected: "1.4" },
+    { name: "metadata wins", metadata: { apiVersion: "1.4" }, metaHeader: "1.3", probeHeader: "1.2", expected: "1.4" },
+    { name: "metadata header", metadata: {}, metaHeader: "1.3", expected: "1.3" },
+    { name: "probe header", probeHeader: "1.2", expected: "1.2" },
+    { name: "degraded probe header", probeStatus: 503, probeHeader: "1.2", expected: "1.2" },
+    { name: "missing metadata response header", metaHeader: "1.3", expected: "1.3" },
+    { name: "malformed header", probeHeader: "unknown", error: "API_VERSION_UNVERIFIED" },
+    { name: "unsupported probe header", probeHeader: "2.0", error: "API_VERSION_UNSUPPORTED" },
+  ];
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, async () => {
+      const client = new WorkflowClient({
+        baseUrl: "https://coderax.test",
+        strict: true,
+        fetchImpl: async (url, { method }) => {
+          assert.equal(method, "GET");
+          if (url.pathname === "/api/meta" || url.pathname === "/api/work/tasks") {
+            const meta = url.pathname === "/api/meta";
+            const version = meta ? scenario.metaHeader : scenario.probeHeader;
+            return Response.json(meta ? scenario.metadata ?? {} : { tasks: [] }, {
+              status: meta ? (scenario.metadata ? 200 : 404) : scenario.probeStatus ?? 200,
+              headers: version ? { "x-coderax-api-version": version } : {},
+            });
+          }
+          return new Response(null, { status: 404 });
+        },
+      });
+      if (scenario.error) {
+        await assert.rejects(client.negotiate(), { code: scenario.error });
+      } else {
+        assert.equal((await client.negotiate()).apiVersion, scenario.expected);
+        assert.ok(!client.diagnostics.some(({ code }) => code === "API_VERSION_UNVERIFIED"));
+      }
+    });
+  }
 });
 
 test("conversation pointers are keyed by deployment and bounded", () => {

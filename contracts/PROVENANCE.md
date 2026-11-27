@@ -1,40 +1,74 @@
 # Pinned WorkflowEngine contract
 
-`workflow-engine-1.0.0.openapi.json` is a byte-for-byte copy of the engine's
-generated OpenAPI document.
+`workflow-engine-1.0.0.openapi.json` is a byte-for-byte copy of the
+WorkflowEngine's generated OpenAPI document. It is vendored, not hand-written,
+and `test/v1-contract.test.js` fails when the digest or the route catalogue
+changes without the shared SDK pin being updated. The engine namespace pin is
+checked by `test/engine-contract.test.js`.
 
 | Field | Value |
 | --- | --- |
 | Repository | `Auctivon-CoderaxAI/Coderax-WorkflowEngine` |
-| Commit | `808dfd3797f9b1d7647ebd14bd395806fc4ab9bd` |
+| Commit | `7b7c9d7a88b8e483995ebe445f2bbbdd29050229` (current `main`) |
 | Document | `openapi.json` |
-| SHA-256 | `4be54dc95fe8b9c00d3521e8e289807716a928bc77c61cc173401303a048cf93` |
+| SHA-256 | `66add22a0d38405e9aaa49a62a9e463648df00457ce0b0080e3cca240c9736f4` |
 | HTTP contract | `1.0.0` |
-| SDK | `@coderax/sdk` `1.0.0` |
+| SDK | `@coderax/sdk` `1.0.0` (private workspace package) |
 | Event schema | `1` |
+| Operations | 17, all under `/v1` |
 
-`test/contract.test.js` verifies the digest, the version and that every route
-this CLI calls exists in the document with the same operation id. A contract
-change therefore fails the CLI suite instead of drifting silently. The digest
-is computed over LF-normalized bytes, and `.gitattributes` pins this artifact
-to LF, so a Windows checkout cannot produce a false drift failure.
+Verified against engine `main` on 2026-11-27: `main` points at `7b7c9d7a`, and
+the published `openapi.json` hashes to the value above. The pin is therefore
+current, not a stale 1.0.0 that the engine has since replaced.
 
-## Why the SDK is mirrored, not installed
+The engine kept `info.version` at `1.0.0` while adding optional fields
+(`reasoning` on a Work submission and task status, `dependsOn` and `attempts` on
+a step, and `verification` on a result). Those additions are accepted by the
+strict validators and are covered by `test/v1-client.test.js` and
+`test/v1-submit.test.js`. A version alone would not distinguish the two
+documents, so the pin records the commit and digest as well; see W3 in
+`BACKEND-DEFECTS.md`.
 
-`@coderax/sdk` is a `private: true` workspace package in the engine
-repository. It is not published to npm, and this repository has no paid
-registry or package subscription. The CLI therefore consumes the same pinned
-contract with a dependency-free client (`src/engine.js`). It does not define a
-second payload contract: the route table and version come from this document,
-and responses are validated against the fields the CLI consumes.
+## Version policy
 
-## Recovery note
+The client accepts any server reporting major `1`. A server reporting a newer
+`1.x` minor is used and records a `CONTRACT_MINOR_NEWER` diagnostic, because a
+newer minor may add optional fields this mirror rejects as strict violations. A
+server reporting a different major is refused with `CONTRACT_UNSUPPORTED`; there
+is no silent downgrade.
 
-The previously reported `feat/engine-thin-client` implementation at `d12a8b5`
-is not present in any `Auctivon-CoderaxAI` repository: the commit is not
-reachable in `CoderaxCLI`, `Coderax` or `Coderax-WorkflowEngine`, and no branch
-with that name exists. This implementation is a reconstruction against the
-authoritative SDK/contract above.
+`CONTRACT_VERSION` in `packages/workflow-sdk/src/v1/contract.js` is the version of
+the vendored document. It is not a promise that the engine will stay at 1.0.0:
+when the WorkflowEngine publishes a new contract, update the whole pin in one
+change (document, digest, commit, `CONTRACT_VERSION`, this table, and any route
+or validator that changed).
 
-The sole cross-repository integration owner (`@nnabdelshahid`, named in the
-engine's `.github/CODEOWNERS`) should confirm this pin before production use.
+## Why the contract is mirrored, not installed
+
+`@coderax/sdk` and `@coderax/contracts` are `private: true` workspace packages in
+the engine repository. They are not published to a registry this project can
+install from. The CLI therefore consumes the pinned wire contract through a
+dependency-free mirror inside its one shared SDK
+(`packages/workflow-sdk/src/v1/`). It does not define a second payload contract:
+routes, versions and payload shapes come from the vendored document and the
+engine's own zod schemas.
+
+The mirror lives in the shared SDK, not in `src/`, so Coderax Web and any other
+supported client can consume the same implementation instead of writing a third.
+
+## Updating the pin
+
+1. Check out the reviewed engine commit.
+2. Copy its generated `openapi.json` to `contracts/workflow-engine-<version>.openapi.json`.
+3. Update this table, the HTTP test checkout pin, and `CONTRACT_SOURCE` in
+   both `packages/workflow-sdk/src/v1/contract.js` and `src/contract.js`.
+4. Update `CONTRACT_VERSION` and any changed validator.
+5. Run `npm run test:contract`, `npm test`, and the real-engine job before merging.
+
+## Known engine contract defect
+
+`/v1/chat` is declared `stream: true` with a `text/event-stream` response in the
+published document, but `src/api/routes.ts` registers `submitChat` as
+`{ kind: 'json' }`. The CLI accepts both shapes and reports the mismatch in
+`BACKEND-DEFECTS.md`; the engine owner should either stream the reply or mark the
+route as JSON.

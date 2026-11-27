@@ -1,12 +1,12 @@
 import { PRODUCTS, STATUS_LABELS, getOrderedProducts } from "./product-registry.js";
-import { CoderaxError, request } from "./client.js";
+import { CoderaxError, request, streamRequest } from "./client.js";
 import {
   checkCompatibility,
   detectDeploymentVersion,
   isSupportedDeploymentVersion,
 } from "./compat.js";
 import { collectVersionInfo } from "./diagnostics.js";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { configDir, loadConfig, maskToken, saveConfig } from "./config.js";
 import { credentialBackend, readTokenFile } from "./credentials.js";
 import { VERSION } from "./version.js";
@@ -15,6 +15,9 @@ import {
   SdkError,
   WorkflowClient,
 } from "../packages/workflow-sdk/src/index.js";
+import { V1Client } from "../packages/workflow-sdk/src/v1/index.js";
+import { ConversationStore, historyPathFor, normalizeHistorySettings, PromptHistory } from "./terminal/history.js";
+import { verifySecurePath } from "./secure-store.js";
 
 export const EXIT = Object.freeze({
   OK: 0,
@@ -131,12 +134,14 @@ export async function projects(ctx) {
 
 export async function status(ctx) {
   const settings = ctx.settings;
+  const ownerVerified = settings.role === "ADMIN" || settings.authMethod === "v1";
   const payload = {
     version: VERSION,
     baseUrl: settings.baseUrl || null,
     authenticated: Boolean(settings.token),
     role: settings.role ?? null,
-    owner: settings.role === "ADMIN",
+    owner: ownerVerified,
+    authMethod: settings.authMethod ?? null,
     token: maskToken(settings.token),
     tokenSource: ctx.env.CODERAX_TOKEN
       ? "environment"
@@ -162,7 +167,13 @@ export async function status(ctx) {
   );
   if (payload.authenticated) {
     ctx.out(
-      `Owner            ${payload.role === "ADMIN" ? "verified" : payload.role ? `no (role ${payload.role})` : "unverified \u2014 run `coderax whoami`"}`,
+      `Owner            ${ownerVerified
+        ? settings.authMethod === "v1"
+          ? "verified by the /v1 owner-protected route"
+          : "verified"
+        : payload.role
+          ? `no (role ${payload.role})`
+          : "unverified \u2014 run `coderax whoami`"}`,
     );
   }
   if (payload.account) ctx.out(`Account          ${payload.account}`);
@@ -194,29 +205,63 @@ export async function login(ctx) {
   }
 
   // Owner-only gate. A token is not persisted until the deployment confirms
-  // that this identity is the instance owner (SystemRoles.ADMIN).
-  const client = new WorkflowClient({
-    baseUrl: ctx.settings.baseUrl,
-    token,
-    timeoutMs: ctx.settings.timeoutMs,
-    fetchImpl: ctx.fetchImpl,
-    clientVersion: VERSION,
-    signal: ctx.signal,
-  });
-
+  // that this identity is the instance owner. `/api/user` is the legacy gate;
+  // `CODERAX_SDK=v1` selects the canonical owner-protected `/v1/agents` route
+  // instead, so a deployment that never published the legacy API can still be
+  // authenticated without inventing a role the server did not report.
+  const requestedSdk = String(ctx.env.CODERAX_SDK ?? "").trim().toLowerCase();
   let identity;
-  try {
-    identity = await client.requireOwner();
-  } catch (error) {
-    if (error instanceof SdkError && error.code === "NOT_FOUND") {
-      throw new SdkError(
-        "OWNER_UNVERIFIABLE",
-        "/api/user is not exposed by this deployment, so owner-only access cannot be verified; " +
-          "the token was not stored",
-        { status: 404, details: { endpoint: "/api/user" } },
-      );
+  let authMethod = "legacy";
+  if (requestedSdk === "v1") {
+    const client = new V1Client({
+      baseUrl: ctx.settings.baseUrl,
+      token,
+      timeoutMs: ctx.settings.timeoutMs,
+      fetchImpl: ctx.fetchImpl,
+      clientVersion: VERSION,
+      signal: ctx.signal,
+    });
+    try {
+      await client.negotiate({ force: true });
+      // The contract makes every route except health/readiness owner-gated. A
+      // successful agent listing is therefore evidence that the token was
+      // accepted, not a claim about an account role the engine never returns.
+      await client.agents({ refresh: true });
+    } catch (error) {
+      if (error instanceof SdkError && (error.code === "UNAUTHENTICATED" || error.code === "FORBIDDEN")) {
+        throw new SdkError(
+          "OWNER_UNVERIFIABLE",
+          "the /v1 owner-protected route rejected this token; it was not stored",
+          { status: error.status, details: { endpoint: "/v1/agents" } },
+        );
+      }
+      throw error;
     }
-    throw error;
+    identity = { account: null, role: null };
+    authMethod = "v1";
+  } else {
+    const client = new WorkflowClient({
+      baseUrl: ctx.settings.baseUrl,
+      token,
+      timeoutMs: ctx.settings.timeoutMs,
+      fetchImpl: ctx.fetchImpl,
+      clientVersion: VERSION,
+      signal: ctx.signal,
+    });
+
+    try {
+      identity = await client.requireOwner();
+    } catch (error) {
+      if (error instanceof SdkError && error.code === "NOT_FOUND") {
+        throw new SdkError(
+          "OWNER_UNVERIFIABLE",
+          "/api/user is not exposed by this deployment, so owner-only access cannot be verified; " +
+            "set CODERAX_SDK=v1 to verify through /v1/agents. The token was not stored",
+          { status: 404, details: { endpoint: "/api/user" } },
+        );
+      }
+      throw error;
+    }
   }
 
   // Prefer an OS credential store that accepts the secret on stdin. When the
@@ -227,6 +272,7 @@ export async function login(ctx) {
     token,
     account: identity.account,
     role: identity.role,
+    authMethod,
     baseUrl: ctx.settings.baseUrl,
   };
   try {
@@ -250,6 +296,7 @@ export async function login(ctx) {
             account: identity.account,
             role: identity.role,
             owner: true,
+            authMethod,
           },
           null,
           2,
@@ -266,7 +313,7 @@ export async function logout(ctx) {
   const removed = Boolean(stored.token);
   const environmentTokenActive = Boolean(ctx.env.CODERAX_TOKEN?.trim());
   await saveConfig(
-    { token: null, account: null, role: null, sessions: {} },
+    { token: null, account: null, role: null, authMethod: null, sessions: {} },
     {
       filePath: ctx.settings.configPath,
       // Clear the backend the credential was actually stored in.
@@ -289,10 +336,34 @@ export async function logout(ctx) {
 
 async function streamPrompt(ctx, mode) {
   let text = ctx.args.join(" ").trim();
+  const interactiveFlag = ctx.flags.has("interactive") || ctx.flags.has("accessible");
+  if (interactiveFlag && (text || ctx.json || !ctx.stdinIsTTY)) {
+    throw new CoderaxError(
+      "USAGE",
+      "--interactive/--accessible start a terminal session; they do not accept a prompt, --json, or piped stdin",
+    );
+  }
+  if (ctx.flags.has("resume") && !interactiveFlag) {
+    throw new CoderaxError("USAGE", "--resume is only available with --interactive");
+  }
   if (!text && !ctx.stdinIsTTY) {
     text = (await ctx.readSecret()).trim();
   }
   if (!text) {
+    if (ctx.stdinIsTTY) {
+      requireBase(ctx);
+      requireAuth(ctx);
+      const runner = ctx.interactiveRunner ?? (await import("./interactive.js")).runInteractive;
+      return await runner({
+        settings: ctx.settings,
+        mode,
+        env: ctx.env,
+        accessible: ctx.flags.has("accessible") || ctx.flags.has("plain"),
+        noColor: ctx.flags.has("no-color"),
+        resume: ctx.flags.get("resume") ?? false,
+        noHistory: ctx.flags.has("no-history"),
+      });
+    }
     throw new CoderaxError("USAGE", `no message provided; usage: coderax ${mode} "your prompt"`);
   }
   requireBase(ctx);
@@ -351,6 +422,74 @@ export async function chat(ctx) {
 
 export async function work(ctx) {
   return streamPrompt(ctx, "work");
+}
+
+export async function history(ctx) {
+  const action = ctx.args[0] ?? "list";
+  const settings = normalizeHistorySettings(ctx.settings.history, ctx.env);
+  const path = historyPathFor(ctx.settings.configPath, ctx.env);
+  const store = await PromptHistory.open({ path, settings });
+
+  const persist = async (patch) => {
+    await saveConfig(
+      { history: { ...settings, ...patch } },
+      { filePath: ctx.settings.configPath },
+    );
+  };
+
+  if (action === "list") {
+    const entries = store.list();
+    if (ctx.json) {
+      ctx.out(JSON.stringify({ history: { path, enabled: store.enabled, retentionDays: store.retentionDays, entries } }, null, 2));
+      return EXIT.OK;
+    }
+    if (!store.enabled) ctx.out("History is disabled.");
+    if (entries.length === 0) {
+      ctx.out("No saved prompts.");
+      return EXIT.OK;
+    }
+    entries.forEach((entry, index) => {
+      const text = entry.text.replace(/\s+/g, " ").trim();
+      ctx.out(`${String(index + 1).padStart(3)}  ${new Date(entry.at).toISOString().slice(0, 16).replace("T", " ")}  ${text.slice(0, 100)}`);
+    });
+    return EXIT.OK;
+  }
+
+  if (action === "clear") {
+    await store.clear();
+    ctx.out(ctx.json ? JSON.stringify({ cleared: true, path }, null, 2) : "Prompt history cleared.");
+    return EXIT.OK;
+  }
+
+  if (action === "off" || action === "on") {
+    const enabled = action === "on";
+    await store.setEnabled(enabled);
+    if (!enabled) {
+      // Conversation metadata can contain a prompt excerpt, so disabling
+      // history also removes it rather than leaving it on disk.
+      const conversations = await ConversationStore.open({
+        path: join(dirname(ctx.settings.configPath), "conversations.json"),
+      });
+      await conversations.clear();
+    }
+    await persist({ enabled });
+    ctx.out(ctx.json ? JSON.stringify({ enabled }, null, 2) : `History ${enabled ? "enabled" : "disabled"}.`);
+    return EXIT.OK;
+  }
+
+  if (action === "retention") {
+    const days = Number(ctx.args[1]);
+    if (!Number.isInteger(days) || days < 1 || days > 3650) {
+      throw new CoderaxError("USAGE", "history retention must be an integer number of days between 1 and 3650");
+    }
+    store.setRetentionDays(days);
+    await persist({ retentionDays: days });
+    if (store.enabled) await store.persist().catch(() => {});
+    ctx.out(ctx.json ? JSON.stringify({ retentionDays: days }, null, 2) : `History retention set to ${days} days.`);
+    return EXIT.OK;
+  }
+
+  throw new CoderaxError("USAGE", `unknown history action: ${action}`);
 }
 
 export async function doctor(ctx) {
@@ -544,6 +683,27 @@ export async function doctor(ctx) {
       );
     }
   }
+
+  const historyPath = historyPathFor(ctx.settings.configPath, ctx.env);
+  const historyVerification = await verifySecurePath(historyPath, { platform: process.platform });
+  const historyExists = historyVerification.reason !== "MISSING";
+  checks.push({
+    name: "history",
+    ok: !historyExists || historyVerification.ok,
+    detail: historyExists ? historyVerification.detail : `${historyPath} (not created yet)`,
+    hint:
+      !historyExists || historyVerification.ok
+        ? ""
+        : "Run `coderax history off` or restrict the history file; prompts are not stored until it is private.",
+  });
+  checks.push({
+    name: "terminal",
+    ok: true,
+    detail: process.stdout.isTTY
+      ? `${process.stdout.columns || "?"}x${process.stdout.rows || "?"} TTY`
+      : "non-interactive (pipes/CI)",
+    hint: "",
+  });
 
   const failed = checks.filter((check) => !check.ok && check.severity !== "warning");
   const ok = failed.length === 0;

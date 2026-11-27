@@ -9,7 +9,7 @@ import { TERMINAL_EVENT_TYPES, TERMINAL_TASK_STATES } from "./contract.js";
  * with the full text so far). A client may receive both forms in one stream, so
  * the rule is: a cumulative snapshot is authoritative; when it only extends what
  * is displayed, emit the unseen suffix; when it rewrites the answer, emit a
- * replacement. A delta that merely repeats the tail of the current snapshot is
+ * replacement. A legacy delta that merely repeats the tail of the current snapshot is
  * discarded rather than printed twice.
  *
  * `eventId` and the per-task `seq` are the dedupe keys. A replayed event is
@@ -55,7 +55,7 @@ export class EventAssembler {
     }
     if (typeof event.delta === "string" && event.delta !== "") {
       // Legacy Work frames carry the increment at the top level.
-      return this.#delta(event.delta, event);
+      return this.#delta(event.delta, event, true);
     }
 
     if (event.type === "usage") {
@@ -96,11 +96,11 @@ export class EventAssembler {
     return { kind: "unknown", event };
   }
 
-  #delta(text, event) {
+  #delta(text, event, legacy = false) {
     // In snapshot mode a delta that is already the tail of the displayed text is
     // the increment the snapshot was built from. Printing it again is the
     // duplicate this guard exists to prevent.
-    if (this.mode === "snapshot" && this.text.endsWith(text)) {
+    if (legacy && this.mode === "snapshot" && this.text.endsWith(text)) {
       return { kind: "duplicate-text", event };
     }
     this.text += text;
@@ -196,10 +196,13 @@ export async function followTaskEvents({
     if (signal?.aborted) throw new CoderaxError("CANCELLED", "event stream detached");
     try {
       for await (const event of client.events(taskId, { after: cursor, signal })) {
-        failures = 0;
+        const previousCount = assembler.eventCount;
         const outcome = assembler.apply(event);
-        if (Number.isInteger(event.seq) && event.seq > cursor) cursor = event.seq;
-        if (outcome.kind !== "duplicate") onEvent?.(event, outcome);
+        if (assembler.eventCount > previousCount) {
+          failures = 0;
+          cursor = Math.max(cursor, assembler.lastSeq);
+          onEvent?.(event, outcome);
+        }
         if (assembler.terminal) return assembler;
       }
       if (assembler.terminal) return assembler;

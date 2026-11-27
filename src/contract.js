@@ -21,9 +21,9 @@ export const SDK_VERSION = "1.0.0";
 /** Provenance for the pinned document. Update with a contract version bump. */
 export const CONTRACT_SOURCE = Object.freeze({
   repository: "Auctivon-CoderaxAI/Coderax-WorkflowEngine",
-  commit: "808dfd3797f9b1d7647ebd14bd395806fc4ab9bd",
+  commit: "7b7c9d7a88b8e483995ebe445f2bbbdd29050229",
   openapiPath: "openapi.json",
-  openapiSha256: "4be54dc95fe8b9c00d3521e8e289807716a928bc77c61cc173401303a048cf93",
+  openapiSha256: "66add22a0d38405e9aaa49a62a9e463648df00457ce0b0080e3cca240c9736f4",
 });
 
 /**
@@ -36,7 +36,7 @@ export const ROUTES = Object.freeze([
   Object.freeze({ operationId: "getReadiness", method: "GET", path: "/v1/ready", auth: "public", stream: false }),
   Object.freeze({ operationId: "listAgents", method: "GET", path: "/v1/agents", auth: "owner", stream: false }),
   Object.freeze({ operationId: "listModels", method: "GET", path: "/v1/models", auth: "owner", stream: false }),
-  Object.freeze({ operationId: "submitChat", method: "POST", path: "/v1/chat", auth: "owner", stream: false }),
+  Object.freeze({ operationId: "submitChat", method: "POST", path: "/v1/chat", auth: "owner", stream: true }),
   Object.freeze({ operationId: "submitWork", method: "POST", path: "/v1/work", auth: "owner", stream: false }),
   Object.freeze({ operationId: "getTask", method: "GET", path: "/v1/work/{taskId}", auth: "owner", stream: false }),
   Object.freeze({ operationId: "cancelTask", method: "POST", path: "/v1/work/{taskId}/cancel", auth: "owner", stream: false }),
