@@ -17,9 +17,9 @@ on:
 permissions:
   contents: read
 
-# Concurrency is per job, not per workflow. A workflow-level group can hold a
-# run before GitHub creates any of its jobs, so a queued superseded run blocks
-# the current candidate instead of cancelling it. Each job owns its group; the
+# Concurrency is per job and does not cancel. A backed-up hosted queue makes a
+# newer run share a group with older candidates; cancelling in progress then
+# discards the newer run before it can execute. Each job waits its turn, and the
 # required `test` gate stays outside every group so it always reports.
 jobs:
   # Hosted standard runners only. This repository is being prepared for private
@@ -31,7 +31,7 @@ jobs:
     name: verify (${{ matrix.os }})
     concurrency:
       group: ci-${{ github.workflow }}-${{ github.ref }}-verify-${{ matrix.os }}
-      cancel-in-progress: true
+      cancel-in-progress: false
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     permissions:
@@ -119,7 +119,7 @@ jobs:
     name: real PTY (${{ matrix.os }})
     concurrency:
       group: ci-${{ github.workflow }}-${{ github.ref }}-pty-${{ matrix.os }}
-      cancel-in-progress: true
+      cancel-in-progress: false
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     permissions:
@@ -170,7 +170,7 @@ jobs:
     name: dependency audit
     concurrency:
       group: ci-${{ github.workflow }}-${{ github.ref }}-dependencies
-      cancel-in-progress: true
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     permissions:
       contents: read
