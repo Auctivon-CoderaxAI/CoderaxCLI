@@ -81,6 +81,16 @@ jobs:
       # and uninstall.
       - name: Hosted installation acceptance (install → auth → upgrade → uninstall)
         run: npm run install-test
+      # The acceptance script records every check in dist/install-evidence.json.
+      # Publish the failing ones as annotations so an installer failure is
+      # diagnosable without admin access to the job log or the artifact.
+      - name: Publish install acceptance failures
+        if: failure()
+        shell: bash
+        run: |
+          if [ -f dist/install-evidence.json ]; then
+            node -e 'const e=require("./dist/install-evidence.json"); for (const c of e.checks||[]) if (!c.ok) console.log("::error::"+c.name+": "+String(c.detail||"").split("\n")[0]);'
+          fi
       - name: Reproducibility check
         if: runner.os == 'Linux'
         run: npm run repro
