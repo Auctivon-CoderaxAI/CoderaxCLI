@@ -147,6 +147,21 @@ test("npm install diagnostics use the supplied layout for removal advice", async
   if (windows) {
     await writeFile(join(prefix, shim), "");
     check(modulePath, root, "global", `npm uninstall --global --prefix "${prefix.replaceAll("\\", "/")}" coderax-cli`);
+
+    // GitHub's Windows runners live under an 8.3 short profile path
+    // (C:/Users/RUNNER~1/...). A tilde in the prefix must not suppress the
+    // command, because it is literal inside double quotes in cmd.exe.
+    const shortPrefix = join(prefix, "RUNNER~1");
+    const shortRoot = join(shortPrefix, "node_modules", "coderax-cli");
+    await mkdir(join(shortRoot, "src"), { recursive: true });
+    await writeFile(join(shortRoot, "src", "diagnostics.js"), "");
+    await writeFile(join(shortPrefix, shim), "");
+    check(
+      join(shortRoot, "src", "diagnostics.js"),
+      shortRoot,
+      "global",
+      `npm uninstall --global --prefix "${shortPrefix.replaceAll("\\", "/")}" coderax-cli`,
+    );
   }
   await mkdir(localBin);
   await writeFile(join(localBin, shim), "");

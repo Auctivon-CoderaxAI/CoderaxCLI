@@ -1,3 +1,9 @@
+> **Private-repository note (GitHub Free):** GitHub artifact attestations are
+> public-repository-only on Free. Releases are signed with keyless Sigstore and
+> publish a `.sigstore.json` bundle next to each asset; verify with
+> `cosign verify-blob --bundle …`. npm provenance is also public-only and is not
+> produced from a private repository.
+
 # Release process
 
 This document is for maintainers. It describes how a version becomes a set of
@@ -108,8 +114,8 @@ Rules that keep publication credentials away from untrusted code:
   is not left in `.git/config` for later steps or scripts.
 - `contents: write` exists only in the release job, which runs from a tag or a
   manual dispatch, never from a pull request.
-- npm publication uses short-lived OIDC credentials from a protected
-  environment; no long-lived `NPM_TOKEN` is stored in this repository.
+- npm publication uses short-lived OIDC credentials from the
+  `npm-publish` environment; no long-lived `NPM_TOKEN` is stored in this repository.
 - Third-party actions are pinned to commit SHAs; the release path uses `gh`
   from the runner image instead of a third-party release action.
 
@@ -122,8 +128,10 @@ The package is `"private": true`. Publishing to npm requires the owner to:
 3. remove `"private": true` in a reviewed commit;
 4. configure a trusted publisher for the repository and workflow on npmjs.com
    (npm CLI 11.5.1+ and Node 22.14+ are required for OIDC publishing);
-5. set the repository variable `NPM_PUBLISH_ENABLED=true` and protect the
-   `npm-publish` environment with required reviewers.
+5. enforce reviewer approval for `npm-publish`, then set
+   `NPM_PUBLISH_ENABLED=true`. Private GitHub Free repositories do not enforce
+   environment reviewers. Keep publishing disabled until a replacement
+   approval control is in place.
 
 Only then does the gated `npm` job exist as a usable path. Until all five steps
 happen, `npm publish` is refused by npm itself because the package is private.
@@ -133,14 +141,15 @@ from it. GitHub Releases remain the canonical channel regardless.
 
 ### Build provenance
 
-Every artifact is covered by `SHA256SUMS`, which proves the bytes match the
-release. Provenance proves which workflow and commit produced them. The installers support `--provenance` (or `CODERAX_REQUIRE_PROVENANCE=1`), which
-runs `gh attestation verify` against the repository and fails closed. The release
-workflow generates the Sigstore attestation for every `dist/*` asset with a
-SHA-pinned official action and verifies the archive's attestation before the
-release is created. Attestations exist only after a release has been published;
-on a release that predates them, `--provenance` correctly fails and checksums
-remain the enforced control.
+Every artifact is covered by `SHA256SUMS`. The release workflow also signs
+each asset with keyless Cosign, verifies the standalone tarball's signature,
+and uploads each asset's `.sigstore.json` bundle. The installers can verify
+these bundles with Cosign via `--provenance`, `-Provenance`, or
+`CODERAX_REQUIRE_PROVENANCE=1`. They require the GitHub Actions OIDC issuer
+and the repository's release workflow, on the corresponding version tag
+or on a branch for manual dispatch. If a bundle is absent, a valid legacy
+GitHub attestation verified by `gh` is required. See [Install](INSTALL.md)
+for local archive verification.
 
 ## Troubleshooting
 

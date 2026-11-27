@@ -23,7 +23,7 @@ import assert from "node:assert/strict";
 import { spawn as spawnProcess, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { once } from "node:events";
-import { existsSync } from "node:fs";
+import { existsSync, lstatSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -227,14 +227,11 @@ async function withEngine(mode, run) {
     const url = new URL(req.url, "http://127.0.0.1");
     const authenticated = req.headers.authorization === authorization;
     const json = (status, payload) => {
-      // An unavailable deployment publishes no version signal at all: no
-      // /api/meta document, no OpenAPI document and no header. The SDK treats
-      // an x-coderax-api-version response header as authoritative, so sending
-      // one here would make the "unknown" case advertise API 1.
-      res.writeHead(status, {
-        "content-type": "application/json",
-        ...(apiVersion === null ? {} : { "x-coderax-api-version": apiVersion }),
-      });
+      const headers = { "content-type": "application/json" };
+      // An unavailable deployment advertises no version anywhere, not even on
+      // the 404 that hides its metadata; otherwise the header is a real signal.
+      if (apiVersion !== null) headers["x-coderax-api-version"] = apiVersion;
+      res.writeHead(status, headers);
       res.end(JSON.stringify(payload));
     };
     if (unauthenticated) return json(401, { message: "unauthorized" });
@@ -597,13 +594,18 @@ console.log(version.VERSION);
     assert.equal(dryRun.status, 0, tail(dryRun));
     const advice = JSON.parse(dryRun.stdout);
     const resolvedPrefix = await realpath(globalPrefix);
-    const commandPrefix = IS_WINDOWS ? resolvedPrefix.replaceAll("\\", "/") : resolvedPrefix;
-    const command = `npm uninstall --global --prefix "${commandPrefix}" coderax-cli`;
-    assert.deepEqual(advice.program.commands, [command]);
+    // Windows may report the original 8.3 path while realpath expands it.
+    const expectedCommands = (IS_WINDOWS ? [globalPrefix, resolvedPrefix] : [resolvedPrefix]).map((target) => {
+      const commandPrefix = IS_WINDOWS ? target.replaceAll("\\", "/") : target;
+      return `npm uninstall --global --prefix "${commandPrefix}" coderax-cli`;
+    });
+    assert.equal(advice.program.commands.length, 1);
+    const [command] = advice.program.commands;
+    assert.ok(expectedCommands.includes(command), `unexpected removal advice: ${command}`);
     const removal = spawn(command, [], { cwd: sandbox, env: removalEnv, shell: true });
     assert.equal(removal.status, 0, tail(removal));
     assert.ok(!existsSync(advice.program.installPath), "the reported package must be removed");
-    assert.ok(!existsSync(bin), "the reported launcher must be removed");
+    assert.equal(lstatSync(bin, { throwIfNoEntry: false }), undefined, "the reported launcher must be removed");
     const retained = spawn(commandPath(globalBin(otherPrefix)), ["--version"], { env, shell: IS_WINDOWS });
     assert.equal(retained.status, 0, tail(retained));
     assert.equal(retained.stdout.trim(), `coderax-cli ${VERSION}`);
