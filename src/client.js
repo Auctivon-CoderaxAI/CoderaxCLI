@@ -7,11 +7,13 @@ import {
 export { redact, redactValue };
 
 export class CoderaxError extends Error {
-  constructor(code, message, { status } = {}) {
+  constructor(code, message, { status, details = null, retryable = false } = {}) {
     super(message);
     this.name = "CoderaxError";
     this.code = code;
     this.status = status;
+    this.details = details;
+    this.retryable = retryable === true;
   }
 }
 

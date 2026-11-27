@@ -36,3 +36,4 @@ export {
 } from "./task-events.js";
 export { TASK_STATE_VERSION, TaskState, settlementKey } from "./task-state.js";
 export { TaskClient, newSubmissionKey } from "./task-client.js";
+export { LEGACY_ADAPTER, isLegacyAdapter } from "./legacy.js";

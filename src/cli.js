@@ -11,6 +11,7 @@ import { CoderaxError, formatJson, redact, request } from "./client.js";
 import { discoverOpenApi, findOperation } from "./discover.js";
 import * as product from "./product-commands.js";
 import * as workflow from "./workflow-commands.js";
+import * as engine from "./engine-commands.js";
 import { SdkError } from "../packages/workflow-sdk/src/index.js";
 import { VERSION } from "./version.js";
 import { collectVersionInfo, formatVersionInfo } from "./diagnostics.js";
@@ -33,6 +34,19 @@ Usage:
                               [--mode turbo15|autonomous|verified] [--workspace <name>]
                               [--follow] [--json]
   coderax tasks [taskId] [--json]              durable Work conversations
+  coderax engine status|handshake [--json]    WorkflowEngine contract negotiation
+  coderax engine submit "<objective>" [--agent <id>] [--mode private|cloud]
+                        [--model <provider>/<model>] [--detach] [--idempotency-key <key>]
+                        [--resume-key <key>] [--json]
+  coderax engine tasks [--state <state>] [--limit <n>] [--json]
+  coderax engine task <taskId> [--json]
+  coderax engine events <taskId> [--after <seq>] [--json]
+  coderax engine cancel <taskId> [--reason <text>] [--json]
+  coderax engine resume|retry <taskId> [--generation <n>] [--json]
+  coderax engine permissions <taskId> [--json]
+  coderax engine approve|deny <taskId> <requestId> [--reason <text>] [--json]
+  coderax engine notifications|ack <taskId> [--json]
+  coderax engine reconcile <taskId> [--json]
   coderax workflows [--json]
   coderax runs --workflow <id> [--json]
   coderax run <runId> [--no-follow] [--approval ask|allow|deny] [--notify]
@@ -449,8 +463,35 @@ async function commandConfig(positionals, context, deps, write, flags) {
 }
 
 function exitFor(error) {
-  if (error instanceof UsageError || error instanceof ConfigError || error.code === "USAGE") {
+  if (
+    error instanceof UsageError ||
+    error instanceof ConfigError ||
+    error.code === "USAGE" ||
+    error.code === "GENERATION_REQUIRED" ||
+    error.code === "SUBMISSION_MISMATCH" ||
+    error.code === "validation_failed"
+  ) {
     return EXIT.usage;
+  }
+  if (
+    error.code === "REQUEST_TIMEOUT" ||
+    error.code === "REQUEST_FAILED" ||
+    error.code === "TIMEOUT" ||
+    error.code === "NETWORK"
+  ) {
+    return EXIT.network;
+  }
+  if (error.code === "STREAM_PROTOCOL" || error.code === "protocol_error") {
+    return EXIT.contract;
+  }
+  if (error.code === "SUBMISSION_UNKNOWN" || error.code === "engine_unavailable" || error.code === "not_ready") {
+    return EXIT.unavailable;
+  }
+  if (error.code === "unauthorized" || error.code === "forbidden") {
+    return EXIT.unauthenticated;
+  }
+  if (error.code === "not_found") {
+    return EXIT.notFound;
   }
   if (
     error.code === "CONTRACT_VIOLATION" ||
@@ -582,6 +623,8 @@ export async function runCli(argv, options = {}) {
         return await workflow.workCommand(ctx, ctx.args);
       case "tasks":
         return await workflow.tasksCommand(ctx, ctx.args);
+      case "engine":
+        return await engine.engineCommand(ctx);
       case "workflows":
         return await workflow.workflowsCommand(ctx);
       case "runs":

@@ -14,6 +14,7 @@ export const COMMANDS = Object.freeze([
   ["chat", "Interactive chat over streaming SSE"],
   ["work", "Run or submit an autonomous Work request"],
   ["tasks", "List durable Work tasks or show one task"],
+  ["engine", "Durable task control on the WorkflowEngine /v1 contract"],
   ["workflows", "List workflows"],
   ["runs", "List runs for a workflow"],
   ["run", "Follow or show one run"],
@@ -46,6 +47,23 @@ export const COMMANDS = Object.freeze([
 export const SUBCOMMANDS = Object.freeze({
   config: Object.freeze(["show", "list", "get", "set"]),
   work: Object.freeze(["submit"]),
+  engine: Object.freeze([
+    "status",
+    "handshake",
+    "submit",
+    "tasks",
+    "task",
+    "events",
+    "cancel",
+    "resume",
+    "retry",
+    "permissions",
+    "approve",
+    "deny",
+    "notifications",
+    "ack",
+    "reconcile",
+  ]),
   completion: Object.freeze(["bash", "zsh", "fish", "powershell"]),
 });
 
@@ -88,6 +106,14 @@ export const FLAGS = Object.freeze([
   ["dry-run", "Preview uninstall", false],
   ["purge", "Also remove stored credentials with uninstall", false],
   ["no-color", "Accepted for compatibility", false],
+  ["after", "Replay events strictly after this sequence", true],
+  ["generation", "Task generation for resume or retry", true],
+  ["idempotency-key", "Caller-chosen key that makes a Work submission safe to reconcile", true],
+  ["resume-key", "Reconcile a recorded submission without creating a second task", true],
+  ["state", "Filter tasks by state", true],
+  ["limit", "Maximum rows to return", true],
+  ["reason", "Reason for a cancellation or permission decision", true],
+  ["environment", "Advisory state environment label (default: derived)", true],
 ].map(([name, summary, takesValue]) => Object.freeze({ name, summary, takesValue })));
 
 export const COMMAND_NAMES = new Set(COMMANDS.map((command) => command.name));

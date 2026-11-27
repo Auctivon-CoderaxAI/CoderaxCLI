@@ -77,20 +77,61 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # Real cross-repository acceptance: run the CLI against the authoritative
+  # WorkflowEngine HTTP application built from the pinned contracts/SDK commit.
+  # The engine is public, so this uses no secret and no paid runner.
+  engine-acceptance:
+    name: engine-acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the CLI
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b # v4.0.3
+        with:
+          node-version: "24"
+
+      - name: Install the CLI
+        run: npm ci --ignore-scripts
+
+      - name: Check out the pinned WorkflowEngine
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: Auctivon-CoderaxAI/Coderax-WorkflowEngine
+          ref: a048a0283e6aa32531f7a6c1b74034843230ab0f
+          path: engine
+          persist-credentials: false
+
+      - name: Build the authoritative engine
+        working-directory: engine
+        run: npm ci --ignore-scripts && npm run build
+
+      - name: Verify the contract and SDK pin against the engine
+        run: npm run verify:engine -- --engine engine
+
+      - name: Run the CLI acceptance suite against the real engine HTTP app
+        run: node scripts/run-engine-acceptance.mjs --engine engine
+
   # The protected branch requires the check context named exactly "test".
   test:
     name: test
-    needs: verify
+    needs: [verify, engine-acceptance]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Require every platform to pass
+      - name: Require every platform and the engine acceptance to pass
         shell: bash
         run: |
           result="${{ needs.verify.result }}"
+          engine="${{ needs.engine-acceptance.result }}"
           echo "verify result: $result"
-          if [ "$result" != "success" ]; then
-            echo "One or more platform jobs did not pass."
+          echo "engine-acceptance result: $engine"
+          if [ "$result" != "success" ] || [ "$engine" != "success" ]; then
+            echo "One or more required jobs did not pass."
             exit 1
           fi

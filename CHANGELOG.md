@@ -5,6 +5,40 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the major
 version is `0`, a minor release may add or change behaviour.
 
+## [Unreleased]
+
+### Added
+
+- `coderax engine` — durable task control over the authoritative
+  Coderax-WorkflowEngine `/v1` contract 1.2.0: handshake negotiation, Work
+  submission, task discovery, event replay/tailing, cancellation, resume,
+  retry, permissions, notifications and reconciliation.
+- Durable synchronization state partitioned by deployment origin, a one-way
+  owner-token fingerprint and environment. Cursors and applied event ids are
+  committed only after the event is handled; `eventId`/`seq` dedupe,
+  `stream.truncated` snapshot recovery and bounded reconnects prevent duplicate
+  output.
+- Server-side `idempotencyKey` support. An ambiguous submission is never retried
+  automatically; `--resume-key` reuses the engine reservation and returns the
+  original task.
+- Pinned engine contract and SDK provenance in `contracts/`, with a
+  cross-repository verifier and an acceptance suite that runs against the real
+  engine HTTP application.
+
+### Changed
+
+- The vendored `packages/workflow-sdk` is now marked as the temporary legacy
+  `/api/*` compatibility adapter; the `/v1` engine client is the canonical
+  client. No legacy command handler was rewritten.
+
+### Known gaps
+
+- WorkflowEngine PR #7 (contracts/SDK 1.2.0) is unmerged and the engine has no
+  deployment. Acceptance runs on its in-process HTTP application, not a
+  production origin.
+- Contract 1.2.0 publishes no pause operation; the CLI does not invent one.
+- OS keychain storage remains unimplemented.
+
 ## [0.3.0] - 2026-11-26
 
 ### Added

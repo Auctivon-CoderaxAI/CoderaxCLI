@@ -2,7 +2,7 @@
   "name": "@coderax/workflow-sdk",
   "version": "0.1.0",
   "private": true,
-  "description": "Shared client contract for the Coderax WorkflowEngine HTTP and SSE API",
+  "description": "TEMPORARY legacy /api/* compatibility adapter. The canonical client is WorkflowEngine contract 1.2.0 via @coderax/sdk 1.2.0 (see contracts/PROVENANCE.md).",
   "type": "module",
   "exports": {
     ".": "./src/index.js",

@@ -63,6 +63,12 @@ forwarded to another origin.
 | `coderax work [message]` | streaming Work-mode turn |
 | `coderax work submit <prompt> --repo <owner/name> --agent <id> [--base-ref <ref>] [--mode turbo15\|autonomous\|verified] [--workspace <name>] [--follow]` | autonomous cloud coding run |
 | `coderax tasks [taskId]` | durable Work conversations and their resolved state |
+| `coderax engine status` / `handshake` | authoritative WorkflowEngine 1.2.0 negotiation and capabilities |
+| `coderax engine submit "<objective>" [--agent <id>] [--mode private\|cloud] [--model <p>/<m>] [--detach] [--idempotency-key <key>]` | durable Work on the engine `/v1` contract |
+| `coderax engine tasks` / `task <taskId>` / `events <taskId> [--after <seq>]` | discover, inspect and replay engine tasks |
+| `coderax engine cancel` / `resume` / `retry <taskId> [--generation <n>]` | generation-fenced task control |
+| `coderax engine permissions` / `approve` / `deny <taskId> [<requestId>]` | scoped permission requests |
+| `coderax engine notifications` / `ack <taskId>` | durable completion notifications |
 | `coderax workflows` | workflows visible to the owner |
 | `coderax runs --workflow <id>` | runs for one workflow (the backend has no global run list) |
 | `coderax run <runId> [--no-follow] [--approval ask\|allow\|deny] [--notify] [--notify-command <cmd>] [--cancel-on-interrupt]` | monitor, approve, detach, notify |
@@ -80,6 +86,22 @@ forwarded to another origin.
 `chat` and interactive `work` keep conversation continuity per deployment in
 the config (`--new` resets it, `--conversation <id>` overrides it). JSON output
 is a single document; run monitoring emits NDJSON.
+
+### Authoritative WorkflowEngine surface
+
+`coderax engine` targets the separate Coderax-WorkflowEngine `/v1` contract
+**1.2.0** (`@coderax/sdk` 1.2.0), not the legacy `/api/*` routes. It verifies the
+contract fingerprint during the handshake and fails closed on a mismatch. Task
+events carry stable `eventId`s and per-task `seq` numbers; replay uses
+`?after=<seq>`, `stream.truncated` triggers snapshot reconciliation, and an
+ambiguous submission is never retried automatically. State is advisory, mode
+`0600`, partitioned by deployment, owner and environment, and stores no
+prompts, transcripts, tool output or credentials. See
+[`docs/ENGINE.md`](docs/ENGINE.md) and
+[`contracts/PROVENANCE.md`](contracts/PROVENANCE.md).
+
+The `work`, `tasks`, `workflows`, `runs`, `run` and `approve` commands remain on
+the legacy Coderax `/api/*` adapter for deployments that have not migrated.
 
 ### Streaming, reconnection and detachment
 
@@ -125,9 +147,14 @@ instead of inventing routes:
 | no `/api/user` | `OWNER_UNVERIFIABLE`; nothing is stored |
 | JSON `200` on an SSE route | `CONTRACT_VIOLATION` (exit `7`) |
 
-See [`docs/CONTRACT.md`](docs/CONTRACT.md) for the exact routes, frame shapes
-and reconnection rules, and [`BACKEND-DEFECTS.md`](BACKEND-DEFECTS.md) for the
-changes requested from the WorkflowEngine owners.
+`coderax engine` uses the `/v1` contract instead and names its own gaps: a
+missing handshake, fingerprint mismatch, unsupported event/chat schema or
+unpublished operation fails closed with exit `6`/`7` before a write.
+
+See [`docs/CONTRACT.md`](docs/CONTRACT.md) for the legacy routes,
+[`docs/ENGINE.md`](docs/ENGINE.md) for the authoritative `/v1` operations and
+durable rules, and [`BACKEND-DEFECTS.md`](BACKEND-DEFECTS.md) for the changes
+requested from the WorkflowEngine owners.
 
 ## Development
 
